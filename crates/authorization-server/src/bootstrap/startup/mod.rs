@@ -3,6 +3,7 @@ use super::*;
 mod background;
 mod configuration;
 mod services;
+pub(crate) mod tenant_runtime;
 
 // Keep the existing bootstrap unit-test source boundary while the
 // implementation lives with the background-task lifecycle.
@@ -19,5 +20,11 @@ pub async fn run(
 ) -> anyhow::Result<()> {
     let _observability = observability::init(&config)?;
     let startup = configuration::load(config, persistence, transient_state).await?;
-    services::run(startup).await
+    services::run(
+        startup.process,
+        startup.registry,
+        startup.refresher,
+        startup.backchannel_logout_worker,
+    )
+    .await
 }

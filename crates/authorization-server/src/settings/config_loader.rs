@@ -1,5 +1,53 @@
 use super::*;
 
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TenantRuntimeConfig {
+    tenant_id: uuid::Uuid,
+    realm_id: uuid::Uuid,
+    organization_id: uuid::Uuid,
+    issuer: String,
+}
+
+struct TenantOverride {
+    context: nazo_identity::TenantContext,
+    issuer: String,
+    host: String,
+}
+
+impl TenantOverride {
+    fn from_issuer(context: nazo_identity::TenantContext, issuer: String) -> anyhow::Result<Self> {
+        let issuer = issuer.trim().to_owned();
+        validate_issuer_url(&issuer)?;
+        let parsed = Url::parse(&issuer)?;
+        let issuer_host = parsed
+            .host()
+            .ok_or_else(|| anyhow::anyhow!("tenant issuer must include a host"))?;
+        let host = match issuer_host {
+            url::Host::Domain(domain) => canonical_tenant_host(domain)?,
+            url::Host::Ipv4(address) => canonical_tenant_host(&address.to_string())?,
+            url::Host::Ipv6(address) => canonical_tenant_host(&format!("[{address}]"))?,
+        };
+        Ok(Self {
+            context,
+            issuer,
+            host,
+        })
+    }
+
+    fn from_directory(binding: &nazo_identity::TenantDirectoryBinding) -> anyhow::Result<Self> {
+        let override_ = Self::from_issuer(binding.tenant, binding.issuer.clone())?;
+        let external_host = canonical_tenant_host(&binding.external_host)?;
+        if override_.host != external_host {
+            bail!(
+                "tenant directory issuer host {} does not match external_host {external_host}",
+                override_.host
+            );
+        }
+        Ok(override_)
+    }
+}
+
 pub(crate) fn credential_configurations_from_config(
     config: &ConfigSource,
 ) -> anyhow::Result<BTreeMap<String, nazo_openid4vci::CredentialConfiguration>> {
@@ -16,42 +64,189 @@ pub(crate) fn credential_configurations_from_config(
 
 impl Settings {
     pub(crate) fn from_config(config: &ConfigSource) -> anyhow::Result<Self> {
-        let tenant = nazo_identity::TenantContext {
-            tenant_id: nazo_identity::TenantId::new(
-                config.parse("TENANT_ID", nazo_identity::DEFAULT_TENANT_ID)?,
-            )?,
-            realm_id: nazo_identity::RealmId::new(
-                config.parse("REALM_ID", nazo_identity::DEFAULT_REALM_ID)?,
-            )?,
-            organization_id: nazo_identity::OrganizationId::new(
-                config.parse("ORGANIZATION_ID", nazo_identity::DEFAULT_ORGANIZATION_ID)?,
-            )?,
+        if config.optional_string("TENANTS_JSON").is_some() {
+            bail!("TENANTS_JSON requires Settings::from_config_all");
+        }
+        Self::from_config_for_tenant(config, None)
+    }
+
+    pub(crate) fn from_config_all(config: &ConfigSource) -> anyhow::Result<Vec<Self>> {
+        let Some(raw) = config.optional_string("TENANTS_JSON") else {
+            return Ok(vec![Self::from_config(config)?]);
         };
-        let public_base_url = config.string("PUBLIC_BASE_URL", "http://127.0.0.1:8000");
+        for legacy_key in ["TENANT_ID", "REALM_ID", "ORGANIZATION_ID", "ISSUER"] {
+            if config.get(legacy_key).is_some() {
+                bail!("{legacy_key} must not be configured together with TENANTS_JSON");
+            }
+        }
+        if config.get("JWK_KEYS_DIR").is_some() {
+            bail!(
+                "JWK_KEYS_DIR must not be configured with TENANTS_JSON; tenant key directories are derived from DATA_DIR"
+            );
+        }
+
+        let configured: Vec<TenantRuntimeConfig> = serde_json::from_str(&raw).map_err(|error| {
+            anyhow::anyhow!("TENANTS_JSON must be a JSON array of tenants: {error}")
+        })?;
+        if configured.is_empty() {
+            bail!("TENANTS_JSON must contain at least one tenant");
+        }
+
+        let mut tenant_ids = BTreeSet::new();
+        let mut issuers = BTreeSet::new();
+        let mut hosts = BTreeSet::new();
+        let mut overrides = Vec::with_capacity(configured.len());
+        for tenant in configured {
+            let context = nazo_identity::TenantContext {
+                tenant_id: nazo_identity::TenantId::new(tenant.tenant_id)?,
+                realm_id: nazo_identity::RealmId::new(tenant.realm_id)?,
+                organization_id: nazo_identity::OrganizationId::new(tenant.organization_id)?,
+            };
+            let override_ = TenantOverride::from_issuer(context, tenant.issuer)?;
+            let issuer_key = Url::parse(&override_.issuer)?.to_string();
+            if !tenant_ids.insert(tenant.tenant_id) {
+                bail!(
+                    "TENANTS_JSON contains duplicate tenant_id {}",
+                    tenant.tenant_id
+                );
+            }
+            if !issuers.insert(issuer_key) {
+                bail!(
+                    "TENANTS_JSON contains duplicate issuer {}",
+                    override_.issuer
+                );
+            }
+            if !hosts.insert(override_.host.clone()) {
+                bail!("TENANTS_JSON contains duplicate host {}", override_.host);
+            }
+            overrides.push(override_);
+        }
+
+        let multiple = overrides.len() > 1;
+        let mut settings = Vec::with_capacity(overrides.len());
+        for tenant in overrides {
+            let snapshot = Self::from_config_for_tenant(config, Some(tenant))?;
+            if multiple && snapshot.endpoint.transport_mode != TransportMode::TrustedProxy {
+                bail!("multiple tenants require TRANSPORT_MODE=trusted-proxy");
+            }
+            if multiple
+                && (snapshot.modules.enable_openid4vci_issuer
+                    || snapshot.modules.enable_openid4vp_verifier)
+            {
+                bail!("multiple tenants do not yet support OpenID4VC modules");
+            }
+            settings.push(snapshot);
+        }
+        Ok(settings)
+    }
+
+    /// Builds one tenant snapshot from the authoritative runtime directory.
+    /// All non-routing policy remains in the process configuration; the
+    /// directory only selects the tenant boundary and public issuer.
+    pub(crate) fn from_directory_binding(
+        config: &ConfigSource,
+        binding: &nazo_identity::TenantDirectoryBinding,
+    ) -> anyhow::Result<Self> {
+        if config.get("JWK_KEYS_DIR").is_some() {
+            bail!(
+                "JWK_KEYS_DIR must not be configured for a directory-managed tenant; tenant key directories are derived from DATA_DIR"
+            );
+        }
+        if config.get("AVATAR_STORAGE_DIR").is_some() {
+            bail!(
+                "AVATAR_STORAGE_DIR must not be configured for a directory-managed tenant; tenant avatar directories are derived from DATA_DIR"
+            );
+        }
+        let snapshot =
+            Self::from_config_for_tenant(config, Some(TenantOverride::from_directory(binding)?))?;
+        if snapshot.endpoint.transport_mode != TransportMode::TrustedProxy {
+            bail!("directory-managed tenants require TRANSPORT_MODE=trusted-proxy");
+        }
+        if snapshot.modules.enable_openid4vci_issuer || snapshot.modules.enable_openid4vp_verifier {
+            bail!("directory-managed tenants do not yet support OpenID4VC modules");
+        }
+        Ok(snapshot)
+    }
+
+    fn from_config_for_tenant(
+        config: &ConfigSource,
+        tenant_override: Option<TenantOverride>,
+    ) -> anyhow::Result<Self> {
+        let tenant_specific = tenant_override.is_some();
+        let public_base_url = tenant_override
+            .as_ref()
+            .map(|tenant| tenant.issuer.clone())
+            .unwrap_or_else(|| config.string("PUBLIC_BASE_URL", "http://127.0.0.1:8000"));
         validate_issuer_url(&public_base_url)?;
         let public_origin = url_origin(&public_base_url)?;
 
-        let issuer = config.string("ISSUER", &public_base_url);
+        let issuer = tenant_override
+            .as_ref()
+            .map(|tenant| tenant.issuer.clone())
+            .unwrap_or_else(|| config.string("ISSUER", &public_base_url));
         validate_issuer_url(&issuer)?;
-        let mtls_endpoint_base_url = config
-            .optional_string("MTLS_ENDPOINT_BASE_URL")
-            .unwrap_or_else(|| issuer.clone());
+        let tenant = match tenant_override {
+            Some(tenant) => TenantSettings {
+                context: tenant.context,
+                host: tenant.host,
+            },
+            None => {
+                let context = nazo_identity::TenantContext {
+                    tenant_id: nazo_identity::TenantId::new(
+                        config.parse("TENANT_ID", nazo_identity::DEFAULT_TENANT_ID)?,
+                    )?,
+                    realm_id: nazo_identity::RealmId::new(
+                        config.parse("REALM_ID", nazo_identity::DEFAULT_REALM_ID)?,
+                    )?,
+                    organization_id: nazo_identity::OrganizationId::new(
+                        config.parse("ORGANIZATION_ID", nazo_identity::DEFAULT_ORGANIZATION_ID)?,
+                    )?,
+                };
+                let parsed = Url::parse(&issuer)?;
+                let host = match parsed.host() {
+                    Some(url::Host::Domain(domain)) => canonical_tenant_host(domain)?,
+                    Some(url::Host::Ipv4(address)) => canonical_tenant_host(&address.to_string())?,
+                    Some(url::Host::Ipv6(address)) => {
+                        canonical_tenant_host(&format!("[{address}]"))?
+                    }
+                    None => bail!("issuer must include a host"),
+                };
+                TenantSettings { context, host }
+            }
+        };
+        let mtls_endpoint_base_url = if tenant_specific {
+            issuer.clone()
+        } else {
+            config
+                .optional_string("MTLS_ENDPOINT_BASE_URL")
+                .unwrap_or_else(|| issuer.clone())
+        };
         validate_issuer_url(&mtls_endpoint_base_url)?;
-        let frontend_base_url =
-            config.string("FRONTEND_BASE_URL", &format!("{}/ui/", public_base_url));
+        let frontend_base_url = if tenant_specific {
+            format!("{}/ui/", public_base_url.trim_end_matches('/'))
+        } else {
+            config.string(
+                "FRONTEND_BASE_URL",
+                &format!("{}/ui/", public_base_url.trim_end_matches('/')),
+            )
+        };
         validate_frontend_base_url(&frontend_base_url)?;
-        let cors_allowed_origins = config
-            .get("CORS_ALLOWED_ORIGINS")
-            .map(|value| {
-                value
-                    .split(',')
-                    .map(str::trim)
-                    .filter(|value| !value.is_empty())
-                    .map(ToOwned::to_owned)
-                    .collect()
-            })
-            .filter(|values: &Vec<String>| !values.is_empty())
-            .unwrap_or_else(|| vec![public_origin]);
+        let cors_allowed_origins = if tenant_specific {
+            vec![public_origin]
+        } else {
+            config
+                .get("CORS_ALLOWED_ORIGINS")
+                .map(|value| {
+                    value
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                        .map(ToOwned::to_owned)
+                        .collect()
+                })
+                .filter(|values: &Vec<String>| !values.is_empty())
+                .unwrap_or_else(|| vec![public_origin])
+        };
         for origin in &cors_allowed_origins {
             validate_cors_origin(origin)?;
         }
@@ -323,16 +518,32 @@ impl Settings {
         let passkey = PasskeySettings::from_config(config, &issuer)?;
         let email = EmailSettings::from_config(config, &issuer)?;
         let federation = FederationSettings::from_config(config)?;
-        let task_key_settings = key_settings_from_config(config)?;
+        let mut task_key_settings = key_settings_from_config(config)?;
         let fapi_http_signature_max_age_seconds =
             config.parse("FAPI_HTTP_SIGNATURE_MAX_AGE_SECONDS", 60)?;
         if !(1..=300).contains(&fapi_http_signature_max_age_seconds) {
             bail!("FAPI_HTTP_SIGNATURE_MAX_AGE_SECONDS must be between 1 and 300");
         }
         let data_dir = config.persistent_path("DATA_DIR", Some(DEFAULT_DATA_DIR))?;
-        let avatar_storage_dir = match config.optional_string("AVATAR_STORAGE_DIR") {
-            Some(_) => config.persistent_path("AVATAR_STORAGE_DIR", None)?,
-            None => data_dir.join("avatars"),
+        if tenant_specific {
+            task_key_settings.keys_dir = data_dir
+                .join("tenants")
+                .join(tenant.context.tenant_id.as_uuid().to_string())
+                .join("keys");
+        }
+        let avatar_storage_dir = match (
+            tenant_specific,
+            config.optional_string("AVATAR_STORAGE_DIR"),
+        ) {
+            (true, Some(_)) => config
+                .persistent_path("AVATAR_STORAGE_DIR", None)?
+                .join(tenant.context.tenant_id.as_uuid().to_string()),
+            (true, None) => data_dir
+                .join("tenants")
+                .join(tenant.context.tenant_id.as_uuid().to_string())
+                .join("avatars"),
+            (false, Some(_)) => config.persistent_path("AVATAR_STORAGE_DIR", None)?,
+            (false, None) => data_dir.join("avatars"),
         };
         let scim_event_retention_seconds = positive_u64(
             config,
@@ -357,7 +568,7 @@ impl Settings {
         }
 
         Ok(Self {
-            tenant: TenantSettings { context: tenant },
+            tenant,
             endpoint: {
                 let trusted_proxy_cidrs =
                     parse_trusted_proxy_cidrs(config.get("TRUSTED_PROXY_CIDRS"))?;

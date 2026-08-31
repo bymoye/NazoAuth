@@ -1056,6 +1056,7 @@ fn canonical_config_keys_are_locked_to_the_reviewed_baseline() {
             "SIGNING_KEY_PREPUBLISH_SECONDS",
             "SIGNING_KEY_ROTATION_INTERVAL_SECONDS",
             "SUBJECT_TYPE",
+            "TENANTS_JSON",
             "TOKEN_MANAGEMENT_RATE_LIMIT_MAX_REQUESTS",
             "TOKEN_RATE_LIMIT_MAX_REQUESTS",
             "TLS_BIND",

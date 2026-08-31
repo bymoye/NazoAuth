@@ -5,6 +5,7 @@ mod openid4vc;
 
 /// Request-facing protocol and OAuth service handles.  Each handle is built
 /// once outside the Actix worker factory and cloned into worker applications.
+#[derive(Clone)]
 pub(super) struct CoreServices {
     pub(super) metadata_handles: web::Data<nazo_http_actix::MetadataHandles>,
     pub(super) resource_server_http_data: web::Data<nazo_http_actix::FapiResourceEndpoint>,
@@ -148,12 +149,6 @@ pub(super) async fn build(startup: &StartupConfiguration) -> anyhow::Result<Core
         keyset.clone(),
     ));
     let ciba_service = web::Data::new(ServerCibaService::new(transient_state.ciba_state()));
-    #[cfg(not(test))]
-    super::super::background::spawn_ciba_ping_worker(
-        transient_state.ciba_ping_deliveries(),
-        &startup.settings,
-        startup.runtime_modules.get_ref(),
-    )?;
     let ciba_users: web::Data<dyn nazo_persistence::CibaAccountStore> =
         web::Data::from(persistence.ciba_accounts());
     let ciba_config = web::Data::new(CibaHttpConfig::from(settings));

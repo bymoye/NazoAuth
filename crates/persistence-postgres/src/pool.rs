@@ -200,6 +200,10 @@ pub async fn configure_runtime_role(database_url: &str, runtime_role: &str) -> a
                      GRANT USAGE ON SCHEMA public TO {quoted_role};\
                      REVOKE ALL ON ALL TABLES IN SCHEMA public FROM {quoted_role};\
                      GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO {quoted_role};\
+                     REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON TABLE \
+                         public.tenant_runtime_directory_state \
+                     FROM {quoted_role};\
+                     GRANT SELECT ON TABLE public.tenant_runtime_directory_state TO {quoted_role};\
                      REVOKE ALL ON ALL SEQUENCES IN SCHEMA public FROM {quoted_role};\
                      GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA public TO {quoted_role};\
                      REVOKE ALL ON TABLE \

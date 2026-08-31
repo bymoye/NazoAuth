@@ -78,6 +78,137 @@ pub(crate) struct CreateUserRequest {
     password: String,
 }
 
+#[derive(Deserialize)]
+pub(crate) struct SetTenantAdminRequest {
+    admin_level: i32,
+}
+
+pub(crate) async fn system_set_tenant_admin(
+    admin_sessions: Data<AdminSessionHandles>,
+    users: Data<dyn AdminUserRepositoryPort>,
+    registry: Data<crate::bootstrap::TenantRuntimeRegistry>,
+    control_tenant: Data<crate::bootstrap::routes::ControlTenantId>,
+    client_ip_config: Data<ClientIpConfig>,
+    req: HttpRequest,
+    path: actix_web::web::Path<(Uuid, Uuid)>,
+    Json(payload): Json<SetTenantAdminRequest>,
+) -> HttpResponse {
+    let session_http = admin_sessions.http_config();
+    if !has_valid_csrf_token_for_cookies(
+        &req,
+        None,
+        session_http.session_cookie_name(),
+        session_http.csrf_cookie_name(),
+    ) {
+        return csrf_error();
+    }
+    let admin = match require_admin_with_recent_mfa_or_forbidden_with_handles(&admin_sessions, &req)
+        .await
+    {
+        Ok(admin) if admin.admin_level() >= 2 => admin,
+        Ok(_) => {
+            return oauth_error(
+                StatusCode::FORBIDDEN,
+                "access_denied",
+                "需要系统管理员权限.",
+            );
+        }
+        Err(response) => return response,
+    };
+    if payload.admin_level < 0 {
+        return oauth_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "admin_level 不能为负数.",
+        );
+    }
+    let (tenant_uuid, user_uuid) = path.into_inner();
+    let target_tenant = match nazo_identity::TenantId::new(tenant_uuid) {
+        Ok(value) => value,
+        Err(_) => {
+            return oauth_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+                "tenant_id 格式无效.",
+            );
+        }
+    };
+    if target_tenant == control_tenant.0 || !registry.contains_tenant(target_tenant) {
+        return HttpResponse::NotFound().finish();
+    }
+    let target_user = match nazo_identity::UserId::new(user_uuid) {
+        Ok(value) => value,
+        Err(_) => {
+            return oauth_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+                "user_id 格式无效.",
+            );
+        }
+    };
+    let actor = match nazo_identity::UserId::new(admin.id()) {
+        Ok(value) => value,
+        Err(_) => {
+            return oauth_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "server_error",
+                "管理员身份无效.",
+            );
+        }
+    };
+    if let Err(response) = require_durable_audit_or_unavailable().await {
+        return response;
+    }
+    match users
+        .set_tenant_admin_authorized(
+            control_tenant.0,
+            actor,
+            target_tenant,
+            target_user,
+            payload.admin_level,
+        )
+        .await
+    {
+        Ok(nazo_identity::AdminUserUpdateOutcome::Updated(user)) => {
+            if let Err(response) = persist_required_audit_or_unavailable(
+                "system_tenant_admin_updated",
+                audit_fields(&[
+                    ("actor_tenant_id", json!(control_tenant.0.as_uuid())),
+                    ("actor_user_id", json!(admin.id())),
+                    ("target_tenant_id", json!(target_tenant.as_uuid())),
+                    ("target_user_id", json!(user_uuid)),
+                    ("admin_level", json!(payload.admin_level)),
+                    (
+                        "source_ip_hash",
+                        json!(blake3_hex(&client_ip_with_config(&req, &client_ip_config))),
+                    ),
+                ]),
+            )
+            .await
+            {
+                return response;
+            }
+            json_response(admin_user_json(*user))
+        }
+        Ok(nazo_identity::AdminUserUpdateOutcome::TargetNotFound) => {
+            HttpResponse::NotFound().finish()
+        }
+        Ok(nazo_identity::AdminUserUpdateOutcome::Denied(_)) => oauth_error(
+            StatusCode::FORBIDDEN,
+            "access_denied",
+            "不允许修改该租户管理员.",
+        ),
+        Err(error) => {
+            tracing::warn!(%error, "failed to update tenant administrator");
+            oauth_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "server_error",
+                "租户管理员更新失败.",
+            )
+        }
+    }
+}
+
 pub(crate) async fn admin_create_user(
     admin_sessions: Data<AdminSessionHandles>,
     accounts: Data<dyn RegistrationAccountRepositoryPort>,

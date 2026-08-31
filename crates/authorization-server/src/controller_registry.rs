@@ -371,12 +371,35 @@ pub struct IssuedApprovalView {
 #[derive(Clone)]
 pub struct ControllerRegistryService {
     repository: Arc<dyn ControllerRegistryPort>,
+    deployment_id: String,
+}
+
+fn ensure_local_deployment(
+    local_deployment_id: &str,
+    caller_deployment_id: &str,
+) -> Result<(), ControllerRegistryServiceError> {
+    if caller_deployment_id != local_deployment_id {
+        return Err(ControllerRegistryServiceError::Invalid(
+            "deployment_id 与当前部署不匹配.",
+        ));
+    }
+    Ok(())
 }
 
 impl ControllerRegistryService {
     #[must_use]
-    pub fn new(repository: Arc<dyn ControllerRegistryPort>) -> Self {
-        Self { repository }
+    pub fn new(repository: Arc<dyn ControllerRegistryPort>, deployment_id: &str) -> Self {
+        Self {
+            repository,
+            deployment_id: deployment_id.to_owned(),
+        }
+    }
+
+    fn ensure_local_deployment(
+        &self,
+        deployment_id: &str,
+    ) -> Result<(), ControllerRegistryServiceError> {
+        ensure_local_deployment(&self.deployment_id, deployment_id)
     }
 
     /// Issue a single-use approval for one exact identity change.  The
@@ -389,6 +412,7 @@ impl ControllerRegistryService {
         change: &IdentityChange,
         now: DateTime<Utc>,
     ) -> Result<IssuedApprovalView, ControllerRegistryServiceError> {
+        self.ensure_local_deployment(change.deployment_id())?;
         change.validate()?;
         let issued: IssuedIdentityApproval = self
             .repository
@@ -418,6 +442,7 @@ impl ControllerRegistryService {
         request: &SlotChangeRequest,
         now: DateTime<Utc>,
     ) -> Result<StoredControllerSlot, ControllerRegistryServiceError> {
+        self.ensure_local_deployment(&request.deployment_id)?;
         if !matches!(
             action,
             ControllerIdentityAction::Bind | ControllerIdentityAction::Add
@@ -476,6 +501,7 @@ impl ControllerRegistryService {
         request: &RotateRequest,
         now: DateTime<Utc>,
     ) -> Result<StoredControllerSlot, ControllerRegistryServiceError> {
+        self.ensure_local_deployment(&request.deployment_id)?;
         let change = IdentityChange::Rotate(request.clone());
         change.validate()?;
         let rotation = RotateControllerKey {
@@ -505,6 +531,7 @@ impl ControllerRegistryService {
         request: &RevokeRequest,
         now: DateTime<Utc>,
     ) -> Result<StoredControllerSlot, ControllerRegistryServiceError> {
+        self.ensure_local_deployment(&request.deployment_id)?;
         let change = IdentityChange::Revoke(request.clone());
         change.validate()?;
         let committed = self
@@ -526,6 +553,7 @@ impl ControllerRegistryService {
         &self,
         deployment_id: &str,
     ) -> Result<Vec<StoredControllerSlot>, ControllerRegistryServiceError> {
+        self.ensure_local_deployment(deployment_id)?;
         Ok(self.repository.list_slots(deployment_id).await?)
     }
 
@@ -536,6 +564,7 @@ impl ControllerRegistryService {
         deployment_id: &str,
         now: DateTime<Utc>,
     ) -> Result<Vec<AdmittedController>, ControllerRegistryServiceError> {
+        self.ensure_local_deployment(deployment_id)?;
         Ok(self
             .repository
             .admitted_controllers(deployment_id, now)
@@ -549,6 +578,7 @@ impl ControllerRegistryService {
         kid: &str,
         now: DateTime<Utc>,
     ) -> Result<Option<AdmittedController>, ControllerRegistryServiceError> {
+        self.ensure_local_deployment(deployment_id)?;
         Ok(self
             .repository
             .admitted_controller_by_kid(deployment_id, kid, now)

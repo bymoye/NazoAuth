@@ -189,7 +189,9 @@ enum PingPostOutcome {
     Terminal(StatusCode),
 }
 
-pub(crate) fn spawn_ciba_ping_delivery_worker(worker: CibaPingDeliveryWorker) {
+pub(crate) fn spawn_ciba_ping_delivery_worker(
+    worker: CibaPingDeliveryWorker,
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         loop {
             if let Err(error) = worker.process_due_batch().await {
@@ -197,5 +199,5 @@ pub(crate) fn spawn_ciba_ping_delivery_worker(worker: CibaPingDeliveryWorker) {
             }
             tokio::time::sleep(LOOP_INTERVAL).await;
         }
-    });
+    })
 }

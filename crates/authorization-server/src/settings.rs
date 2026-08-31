@@ -59,19 +59,20 @@ pub(crate) struct Settings {
     pub(crate) openid4vc: Openid4vcSettings,
 }
 
-/// The single active tenant owned by this process runtime.
+/// The immutable tenant identity selected for this runtime snapshot.
 ///
-/// The tenant is the process-wide security and routing boundary. The realm and
-/// organization are validated active defaults for identity placement inside
-/// that tenant; they are not independent request authorization partitions.
-/// Request-level multi-tenant routing is enabled only after transport identity,
-/// protocol keys, clients, and transient state can all be selected from the
-/// same immutable tenant snapshot. Until then every service is composed from
-/// this explicit context instead of silently falling back to the legacy IDs.
-#[derive(Clone, Copy)]
+/// `Settings::from_config_all` creates one complete `Settings` value per
+/// tenant. Keeping the host beside the identity prevents request routing from
+/// consulting a second tenant registry after the snapshot has been selected.
+#[derive(Clone)]
 pub(crate) struct TenantSettings {
     pub(crate) context: nazo_identity::TenantContext,
+    pub(crate) host: String,
 }
+
+/// Canonicalizes a configured tenant host without accepting a URL, userinfo,
+/// path, or port. Ports cannot distinguish tenants because TLS SNI has none.
+pub(crate) use nazo_identity::canonical_tenant_host;
 
 #[derive(Clone)]
 pub(crate) struct EndpointSettings {

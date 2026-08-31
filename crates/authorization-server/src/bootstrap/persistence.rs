@@ -28,6 +28,7 @@ use nazo_identity::ports::{
 /// into the binary.
 pub trait ServerPersistenceProvider: Send + Sync {
     fn active_tenant_boundary(&self) -> Arc<dyn nazo_persistence::ActiveTenantBoundaryStore>;
+    fn tenant_directory(&self) -> Arc<dyn nazo_persistence::TenantDirectoryStore>;
     fn security_audit_ledger(&self) -> Arc<dyn nazo_persistence::SecurityAuditLedger>;
     fn database_health(&self) -> Arc<dyn nazo_persistence::DatabaseHealthPort>;
     fn database_pool_metrics(&self) -> Arc<dyn nazo_persistence::DatabasePoolMetricsPort>;

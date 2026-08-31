@@ -1,7 +1,13 @@
 //! HTTP 路由表。
 // 本文件只声明 URL 到 handler 的映射，不承载业务逻辑。
 
-use actix_web::web;
+use actix_web::{
+    Error, HttpResponse,
+    body::{EitherBody, MessageBody},
+    dev::{ServiceRequest, ServiceResponse},
+    middleware::{Next, from_fn},
+    web,
+};
 use nazo_http_actix::{
     admin_patch_runtime_module, admin_runtime_module_events, admin_runtime_modules,
     authorize_decision, check_session_iframe, check_session_status, configure_mfa_challenge_route,
@@ -48,7 +54,7 @@ use crate::http::admin::{
     recovery_root::{
         admin_recovery_root, admin_recovery_root_approval, admin_recovery_root_rotate,
     },
-    users::{admin_create_user, admin_patch_user, admin_users},
+    users::{admin_create_user, admin_patch_user, admin_users, system_set_tenant_admin},
 };
 use crate::http::auth::{
     csrf::csrf,
@@ -86,24 +92,73 @@ use nazo_http_actix::{
     scim_service_provider_config,
 };
 
-use super::cors;
+use super::{cors, startup::tenant_runtime::TenantRuntimeRegistry};
+
+/// Process-selected tenant allowed to reach deployment-global HTTP controls.
+pub(crate) struct ControlTenantId(pub(crate) nazo_identity::TenantId);
+
+impl ControlTenantId {
+    pub(super) fn new(tenant_id: nazo_identity::TenantId) -> Self {
+        Self(tenant_id)
+    }
+}
+
+pub(super) async fn control_tenant_only<B>(
+    request: ServiceRequest,
+    next: Next<B>,
+) -> Result<ServiceResponse<EitherBody<B>>, Error>
+where
+    B: MessageBody + 'static,
+{
+    let tenant = request.app_data::<web::Data<nazo_identity::TenantContext>>();
+    let control = request.app_data::<web::Data<ControlTenantId>>();
+    if !matches!((tenant, control), (Some(tenant), Some(control)) if tenant.tenant_id == control.0)
+    {
+        return Ok(request
+            .into_response(HttpResponse::NotFound().finish())
+            .map_into_right_body());
+    }
+    Ok(next.call(request).await?.map_into_left_body())
+}
 
 pub(crate) fn configure(
     cfg: &mut web::ServiceConfig,
     settings: &Settings,
     perf_metrics_enabled: bool,
 ) {
+    configure_with_cors(
+        cfg,
+        settings,
+        perf_metrics_enabled,
+        cors::CorsPolicy::from_settings(settings),
+    );
+}
+
+pub(super) fn configure_dynamic(
+    cfg: &mut web::ServiceConfig,
+    settings: &Settings,
+    perf_metrics_enabled: bool,
+    registry: TenantRuntimeRegistry,
+) {
+    configure_with_cors(
+        cfg,
+        settings,
+        perf_metrics_enabled,
+        cors::CorsPolicy::dynamic(registry),
+    );
+}
+
+fn configure_with_cors(
+    cfg: &mut web::ServiceConfig,
+    settings: &Settings,
+    perf_metrics_enabled: bool,
+    cors_policy: cors::CorsPolicy<'_>,
+) {
     let enable_openid4vci_issuer = settings.modules.enable_openid4vci_issuer;
-    // Actix scopes consume every request under their prefix, including paths
-    // that are not registered inside the scope. Keep all /.well-known routes
-    // in this single scope so later top-level resources cannot be shadowed.
+    // Actix scopes consume every request under their prefix. Register the
+    // exact control-tenant resource before this public discovery scope.
     let well_known = web::scope("/.well-known")
-        .wrap(cors::cors_well_known(settings))
-        .service(
-            web::resource("/nazoauth-control")
-                .app_data(web::JsonConfig::default().limit(2 * 1024))
-                .route(web::post().to(control_discovery)),
-        )
+        .wrap(cors_policy.well_known())
         .route("/openid-configuration", web::get().to(discovery))
         .route(
             "/oauth-authorization-server",
@@ -126,18 +181,61 @@ pub(crate) fn configure(
         well_known
     };
     cfg.service(
+        web::resource("/.well-known/nazoauth-control")
+            .app_data(web::JsonConfig::default().limit(2 * 1024))
+            .wrap(cors_policy.well_known())
+            .wrap(from_fn(control_tenant_only))
+            .route(web::post().to(control_discovery)),
+    );
+    // Register exact deployment-level scopes before the broad `/admin`
+    // scope. Actix runs the last wrapper first, so the tenant gate also runs
+    // before CORS can answer a preflight without calling the inner service.
+    cfg.service(
+        web::scope("/admin/runtime-modules")
+            .wrap(cors_policy.admin())
+            .wrap(from_fn(control_tenant_only))
+            .route("", web::get().to(admin_runtime_modules))
+            .route("/events", web::get().to(admin_runtime_module_events))
+            .route("/{module_id}", web::patch().to(admin_patch_runtime_module)),
+    );
+    cfg.service(
+        web::scope("/admin/controller-registry")
+            .app_data(web::JsonConfig::default().limit(8 * 1024))
+            .wrap(cors_policy.admin())
+            .wrap(from_fn(control_tenant_only))
+            .route("/slots", web::post().to(admin_controller_slot_commit))
+            .route(
+                "/slots/rotate",
+                web::post().to(admin_controller_slot_rotate),
+            )
+            .route(
+                "/slots/revoke",
+                web::post().to(admin_controller_slot_revoke),
+            )
+            .route("/approvals", web::post().to(admin_controller_approval))
+            .route("/recovery-root", web::get().to(admin_recovery_root))
+            .route(
+                "/recovery-root/approvals",
+                web::post().to(admin_recovery_root_approval),
+            )
+            .route(
+                "/recovery-root/rotate",
+                web::post().to(admin_recovery_root_rotate),
+            ),
+    );
+    cfg.service(
         web::resource("/health")
-            .wrap(cors::cors_well_known(settings))
+            .wrap(cors_policy.well_known())
             .route(web::get().to(ready)),
     );
     cfg.service(
         web::resource("/live")
-            .wrap(cors::cors_well_known(settings))
+            .wrap(cors_policy.well_known())
             .route(web::get().to(live)),
     );
     cfg.service(
         web::resource("/startup")
-            .wrap(cors::cors_well_known(settings))
+            .wrap(cors_policy.well_known())
             .route(web::get().to(startup)),
     );
     // NO CORS: /authorize
@@ -164,7 +262,7 @@ pub(crate) fn configure(
         // CORS: non-credentialed browser token management — /token
         .service(
             web::resource("/token")
-                .wrap(cors::cors_browser_token_management(settings))
+                .wrap(cors_policy.browser_token_management())
                 .route(web::post().to(token)),
         )
         // NO CORS: /logout (backchannel)
@@ -178,7 +276,7 @@ pub(crate) fn configure(
         // CORS: non-credentialed browser token management — /revoke
         .service(
             web::resource("/revoke")
-                .wrap(cors::cors_browser_token_management(settings))
+                .wrap(cors_policy.browser_token_management())
                 .route(web::post().to(revoke)),
         )
         // NO CORS: /introspect (backchannel)
@@ -194,20 +292,20 @@ pub(crate) fn configure(
         // CORS: cors_well_known — /jwks.json
         .service(
             web::resource("/jwks.json")
-                .wrap(cors::cors_well_known(settings))
+                .wrap(cors_policy.well_known())
                 .route(web::get().to(jwks)),
         )
         // CORS: non-credentialed browser bearer/DPoP access — /userinfo
         .service(
             web::resource("/userinfo")
-                .wrap(cors::cors_browser_userinfo(settings))
+                .wrap(cors_policy.browser_userinfo())
                 .route(web::get().to(userinfo))
                 .route(web::post().to(userinfo)),
         )
         // CORS: cors_scim — /scim/v2/*
         .service(
             web::scope("/scim/v2")
-                .wrap(cors::cors_scim(settings))
+                .wrap(cors_policy.scim())
                 .route(
                     "/ServiceProviderConfig",
                     web::get().to(scim_service_provider_config),
@@ -254,7 +352,7 @@ pub(crate) fn configure(
                 // CORS: cors_auth_api — /auth/me/*
                 .service(
                     web::scope("/me")
-                        .wrap(cors::cors_auth_api(settings))
+                        .wrap(cors_policy.auth_api())
                         .route("", web::get().to(profile_me))
                         .route("", web::patch().to(profile_update))
                         .configure(configure_passkey_profile_routes)
@@ -284,28 +382,27 @@ pub(crate) fn configure(
                 .route("/ciba/{auth_req_id}", web::post().to(ciba_decision))
                 .route("/logout", web::post().to(profile_logout)),
         )
-        // Public, exact-deployment Controller Slot metadata. This is a
-        // read-only diagnostics/reconciliation surface; all identity changes
-        // remain under `/admin/controller-registry`.
-        .route(
-            "/controller-registry/slots",
-            web::get().to(controller_slots),
+        // Exact-deployment Controller Slot metadata is visible only through
+        // the control tenant, like the mutation routes below.
+        .service(
+            web::resource("/controller-registry/slots")
+                .wrap(from_fn(control_tenant_only))
+                .route(web::get().to(controller_slots)),
         )
         // CORS: cors_admin — /admin/*
         .service(
             web::scope("/admin")
-                .wrap(cors::cors_admin(settings))
+                .wrap(cors_policy.admin())
                 .route("/users", web::get().to(admin_users))
                 .route("/users", web::post().to(admin_create_user))
                 .route("/users/{user_id}", web::patch().to(admin_patch_user))
-                .route("/runtime-modules", web::get().to(admin_runtime_modules))
-                .route(
-                    "/runtime-modules/events",
-                    web::get().to(admin_runtime_module_events),
-                )
-                .route(
-                    "/runtime-modules/{module_id}",
-                    web::patch().to(admin_patch_runtime_module),
+                .service(
+                    web::scope("/tenants")
+                        .wrap(from_fn(control_tenant_only))
+                        .route(
+                            "/{tenant_id}/users/{user_id}/admin",
+                            web::patch().to(system_set_tenant_admin),
+                        ),
                 )
                 .route("/clients", web::get().to(admin_clients))
                 .route("/clients", web::post().to(admin_create_client))
@@ -318,33 +415,6 @@ pub(crate) fn configure(
                 )
                 .route("/grants", web::get().to(admin_grants))
                 .route("/grants/revoke", web::post().to(admin_revoke_grant))
-                // Controller Registry (D01/D02/D05): authoritative per-deployment
-                // controller key enrollment behind fresh-2FA approvals.
-                .service(
-                    web::scope("/controller-registry")
-                        .app_data(web::JsonConfig::default().limit(8 * 1024))
-                        .route("/slots", web::post().to(admin_controller_slot_commit))
-                        .route(
-                            "/slots/rotate",
-                            web::post().to(admin_controller_slot_rotate),
-                        )
-                        .route(
-                            "/slots/revoke",
-                            web::post().to(admin_controller_slot_revoke),
-                        )
-                        .route("/approvals", web::post().to(admin_controller_approval))
-                        // Recovery Root (04A D12): proactive rotation behind
-                        // the same fresh-2FA approval machinery.
-                        .route("/recovery-root", web::get().to(admin_recovery_root))
-                        .route(
-                            "/recovery-root/approvals",
-                            web::post().to(admin_recovery_root_approval),
-                        )
-                        .route(
-                            "/recovery-root/rotate",
-                            web::post().to(admin_recovery_root_rotate),
-                        ),
-                )
                 .route("/access-requests", web::get().to(admin_access_requests))
                 .route(
                     "/mtls-trust-requests",
@@ -389,13 +459,13 @@ pub(crate) fn configure(
                     }
                 }),
         );
-    // Break-glass controller recovery (04A D11): unauthenticated by design
-    // because the administrator identity may be the unavailable part; every
-    // guard lives in the challenge lifecycle (single use, fixed TTL, exact
-    // key-material binding, capped attempts, one pending per deployment).
+    // Break-glass recovery is unauthenticated within the control tenant; its
+    // challenge lifecycle still owns single-use, TTL, binding, and attempt
+    // limits.
     cfg.service(
         web::scope("/controller-recovery")
             .app_data(web::JsonConfig::default().limit(8 * 1024))
+            .wrap(from_fn(control_tenant_only))
             .route("/challenges", web::post().to(controller_recovery_challenge))
             .route("/recover", web::post().to(controller_recovery_commit)),
     );
@@ -459,7 +529,11 @@ pub(crate) fn configure(
         );
     }
     if perf_metrics_enabled {
-        cfg.route("/__perf/metrics", web::get().to(perf_metrics));
+        cfg.service(
+            web::resource("/__perf/metrics")
+                .wrap(from_fn(control_tenant_only))
+                .route(web::get().to(perf_metrics)),
+        );
     }
 }
 

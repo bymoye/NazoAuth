@@ -111,12 +111,32 @@ pub struct IssuedRotationApprovalView {
 #[derive(Clone)]
 pub struct RecoveryRootService {
     repository: Arc<dyn RecoveryRootPort>,
+    deployment_id: String,
+}
+
+fn ensure_local_deployment(
+    local_deployment_id: &str,
+    caller_deployment_id: &str,
+) -> Result<(), RecoveryRootServiceError> {
+    if caller_deployment_id != local_deployment_id {
+        return Err(RecoveryRootServiceError::Invalid(
+            "deployment_id 与当前部署不匹配.",
+        ));
+    }
+    Ok(())
 }
 
 impl RecoveryRootService {
     #[must_use]
-    pub fn new(repository: Arc<dyn RecoveryRootPort>) -> Self {
-        Self { repository }
+    pub fn new(repository: Arc<dyn RecoveryRootPort>, deployment_id: &str) -> Self {
+        Self {
+            repository,
+            deployment_id: deployment_id.to_owned(),
+        }
+    }
+
+    fn ensure_local_deployment(&self, deployment_id: &str) -> Result<(), RecoveryRootServiceError> {
+        ensure_local_deployment(&self.deployment_id, deployment_id)
     }
 
     // -- Views ---------------------------------------------------------------
@@ -126,6 +146,7 @@ impl RecoveryRootService {
         &self,
         deployment_id: &str,
     ) -> Result<Option<StoredRecoveryRoot>, RecoveryRootServiceError> {
+        self.ensure_local_deployment(deployment_id)?;
         Ok(self.repository.current_root(deployment_id).await?)
     }
 
@@ -140,6 +161,7 @@ impl RecoveryRootService {
         request: &RecoveryRootChangeRequest,
         now: DateTime<Utc>,
     ) -> Result<IssuedRotationApprovalView, RecoveryRootServiceError> {
+        self.ensure_local_deployment(&request.deployment_id)?;
         let rotation = validate_rotation_request(request)?;
         let issued: IssuedIdentityApproval = self
             .repository
@@ -164,6 +186,7 @@ impl RecoveryRootService {
         request: &RecoveryRootChangeRequest,
         now: DateTime<Utc>,
     ) -> Result<StoredRecoveryRoot, RecoveryRootServiceError> {
+        self.ensure_local_deployment(&request.deployment_id)?;
         let rotation = validate_rotation_request(request)?;
         Ok(self
             .repository
@@ -191,6 +214,7 @@ impl RecoveryRootService {
         now: DateTime<Utc>,
     ) -> Result<nazo_persistence::control_plane::IssuedRecoveryChallenge, RecoveryRootServiceError>
     {
+        self.ensure_local_deployment(&request.deployment_id)?;
         let proposal = validate_challenge_request(request)?;
         let next_material = self
             .repository
@@ -206,6 +230,7 @@ impl RecoveryRootService {
         request: &RecoveryAnswerRequest,
         now: DateTime<Utc>,
     ) -> Result<RecoveredSlotCommit, RecoveryRootServiceError> {
+        self.ensure_local_deployment(&request.deployment_id)?;
         let submission = validate_answer_request(request)?;
         Ok(self
             .repository

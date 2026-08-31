@@ -1,6 +1,10 @@
 use diesel::{QueryableByName, sql_query, sql_types};
 use diesel_async::RunQueryDsl;
-use nazo_identity::{TenantContext, ports::RepositoryError};
+use nazo_identity::{
+    OrganizationId, RealmId, TenantContext, TenantDirectoryBinding, TenantDirectorySnapshot,
+    TenantId, ports::RepositoryError,
+};
+use nazo_persistence::TenantDirectoryStore;
 use uuid::Uuid;
 
 use crate::{DbPool, get_conn};
@@ -12,6 +16,11 @@ use crate::{DbPool, get_conn};
 /// placements belonging to that tenant.
 #[derive(Clone)]
 pub struct ActiveTenantBoundaryRepository {
+    pool: DbPool,
+}
+
+#[derive(Clone)]
+pub struct TenantDirectoryRepository {
     pool: DbPool,
 }
 
@@ -33,6 +42,28 @@ struct ActiveTenantBoundaryRow {
     organization_tenant_id: Option<Uuid>,
     #[diesel(sql_type = sql_types::Nullable<sql_types::Text>)]
     organization_status: Option<String>,
+}
+
+#[derive(Debug, QueryableByName)]
+struct TenantDirectoryRow {
+    #[diesel(sql_type = sql_types::BigInt)]
+    revision: i64,
+    #[diesel(sql_type = sql_types::Nullable<sql_types::Uuid>)]
+    tenant_id: Option<Uuid>,
+    #[diesel(sql_type = sql_types::Nullable<sql_types::Uuid>)]
+    realm_id: Option<Uuid>,
+    #[diesel(sql_type = sql_types::Nullable<sql_types::Uuid>)]
+    organization_id: Option<Uuid>,
+    #[diesel(sql_type = sql_types::Nullable<sql_types::Text>)]
+    issuer: Option<String>,
+    #[diesel(sql_type = sql_types::Nullable<sql_types::Text>)]
+    external_host: Option<String>,
+}
+
+#[derive(Debug, QueryableByName)]
+struct TenantDirectoryRevisionRow {
+    #[diesel(sql_type = sql_types::BigInt)]
+    revision: i64,
 }
 
 impl ActiveTenantBoundaryRepository {
@@ -80,6 +111,76 @@ impl nazo_persistence::ActiveTenantBoundaryStore for ActiveTenantBoundaryReposit
         context: TenantContext,
     ) -> futures_util::future::BoxFuture<'_, Result<(), RepositoryError>> {
         Box::pin(async move { ActiveTenantBoundaryRepository::preflight(self, context).await })
+    }
+}
+
+impl TenantDirectoryRepository {
+    #[must_use]
+    pub fn new(pool: DbPool) -> Self {
+        Self { pool }
+    }
+
+    pub async fn current_revision(&self) -> Result<u64, RepositoryError> {
+        let mut connection = get_conn(&self.pool)
+            .await
+            .map_err(|_| RepositoryError::Unavailable)?;
+        let row = sql_query(
+            "SELECT revision
+             FROM tenant_runtime_directory_state
+             WHERE singleton",
+        )
+        .get_result::<TenantDirectoryRevisionRow>(&mut connection)
+        .await
+        .map_err(map_query_error)?;
+        decode_directory_revision(row.revision)
+    }
+
+    pub async fn load_active(&self) -> Result<TenantDirectorySnapshot, RepositoryError> {
+        let mut connection = get_conn(&self.pool)
+            .await
+            .map_err(|_| RepositoryError::Unavailable)?;
+        let rows = sql_query(
+            "SELECT directory.revision,
+                    active.tenant_id, active.realm_id, active.organization_id,
+                    active.issuer, active.external_host
+             FROM tenant_runtime_directory_state AS directory
+             LEFT JOIN (
+                 SELECT binding.tenant_id, binding.realm_id, binding.organization_id,
+                        binding.issuer, binding.external_host
+                 FROM tenant_runtime_bindings AS binding
+                 JOIN tenants AS tenant
+                   ON tenant.id = binding.tenant_id AND tenant.status = 'active'
+                 JOIN realms AS realm
+                   ON realm.id = binding.realm_id
+                  AND realm.tenant_id = binding.tenant_id
+                  AND realm.status = 'active'
+                 JOIN organizations AS organization
+                   ON organization.id = binding.organization_id
+                  AND organization.tenant_id = binding.tenant_id
+                  AND organization.status = 'active'
+             ) AS active ON TRUE
+             WHERE directory.singleton
+             ORDER BY active.external_host, active.tenant_id",
+        )
+        .load::<TenantDirectoryRow>(&mut connection)
+        .await
+        .map_err(map_query_error)?;
+
+        directory_snapshot(rows)
+    }
+}
+
+impl TenantDirectoryStore for TenantDirectoryRepository {
+    fn current_revision(
+        &self,
+    ) -> futures_util::future::BoxFuture<'_, Result<u64, RepositoryError>> {
+        Box::pin(async move { TenantDirectoryRepository::current_revision(self).await })
+    }
+
+    fn load_active(
+        &self,
+    ) -> futures_util::future::BoxFuture<'_, Result<TenantDirectorySnapshot, RepositoryError>> {
+        Box::pin(async move { TenantDirectoryRepository::load_active(self).await })
     }
 }
 
@@ -137,6 +238,71 @@ fn validate_active_boundary(
     }
 
     Ok(())
+}
+
+fn directory_snapshot(
+    rows: Vec<TenantDirectoryRow>,
+) -> Result<TenantDirectorySnapshot, RepositoryError> {
+    let stored_revision = rows
+        .as_slice()
+        .first()
+        .map(|row| row.revision)
+        .ok_or_else(|| {
+            RepositoryError::Consistency("tenant directory state is missing".to_owned())
+        })?;
+    let revision = decode_directory_revision(stored_revision)?;
+    let mut tenants = Vec::with_capacity(rows.len());
+    for row in rows {
+        if row.revision != stored_revision {
+            return Err(RepositoryError::Consistency(
+                "tenant directory snapshot contains mixed revisions".to_owned(),
+            ));
+        }
+        match (
+            row.tenant_id,
+            row.realm_id,
+            row.organization_id,
+            row.issuer,
+            row.external_host,
+        ) {
+            (None, None, None, None, None) => {}
+            (
+                Some(tenant_id),
+                Some(realm_id),
+                Some(organization_id),
+                Some(issuer),
+                Some(external_host),
+            ) => tenants.push(TenantDirectoryBinding {
+                tenant: TenantContext {
+                    tenant_id: TenantId::new(tenant_id).map_err(|_| {
+                        RepositoryError::Consistency("tenant directory tenant id is nil".to_owned())
+                    })?,
+                    realm_id: RealmId::new(realm_id).map_err(|_| {
+                        RepositoryError::Consistency("tenant directory realm id is nil".to_owned())
+                    })?,
+                    organization_id: OrganizationId::new(organization_id).map_err(|_| {
+                        RepositoryError::Consistency(
+                            "tenant directory organization id is nil".to_owned(),
+                        )
+                    })?,
+                },
+                issuer,
+                external_host,
+            }),
+            _ => {
+                return Err(RepositoryError::Consistency(
+                    "tenant directory binding is incomplete".to_owned(),
+                ));
+            }
+        }
+    }
+    Ok(TenantDirectorySnapshot { revision, tenants })
+}
+
+fn decode_directory_revision(value: i64) -> Result<u64, RepositoryError> {
+    u64::try_from(value).map_err(|_| {
+        RepositoryError::Consistency("tenant directory revision is invalid".to_owned())
+    })
 }
 
 // The focused unit test is mounted here so the production module remains the

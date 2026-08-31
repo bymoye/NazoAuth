@@ -48,6 +48,24 @@ pub trait AdminUserRepositoryPort: Send + Sync {
         target_id: UserId,
         update: AdminUserUpdate,
     ) -> RepositoryFuture<'_, crate::AdminUserUpdateOutcome>;
+
+    /// Explicit system-boundary operation for managing an administrator in a
+    /// different tenant. Implementations must re-check both tenant bindings
+    /// and the actor's system-admin level in the same transaction.
+    fn set_tenant_admin_authorized(
+        &self,
+        _control_tenant_id: TenantId,
+        _actor_id: UserId,
+        _target_tenant_id: TenantId,
+        _target_id: UserId,
+        _admin_level: i32,
+    ) -> RepositoryFuture<'_, crate::AdminUserUpdateOutcome> {
+        Box::pin(async {
+            Ok(crate::AdminUserUpdateOutcome::Denied(
+                crate::AdminPolicyError::ActorNotAuthorized,
+            ))
+        })
+    }
 }
 
 pub trait UserRepositoryPort: Send + Sync {

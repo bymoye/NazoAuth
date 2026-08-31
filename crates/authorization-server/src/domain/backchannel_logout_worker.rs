@@ -243,7 +243,9 @@ fn classify_backchannel_status(status: u16) -> BackchannelResponseAction {
 }
 
 #[cfg(not(test))]
-pub(crate) fn spawn_backchannel_logout_delivery_worker(worker: BackchannelLogoutWorker) {
+pub(crate) fn spawn_backchannel_logout_delivery_worker(
+    worker: BackchannelLogoutWorker,
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         loop {
             if let Err(error) = worker.process_due_batch().await {
@@ -251,7 +253,7 @@ pub(crate) fn spawn_backchannel_logout_delivery_worker(worker: BackchannelLogout
             }
             tokio::time::sleep(StdDuration::from_secs(5)).await;
         }
-    });
+    })
 }
 
 fn next_retry_at(

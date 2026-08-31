@@ -154,6 +154,7 @@ async fn connection_rejects_cluster_topology_before_connecting() {
         Duration::from_secs(1),
         "test",
         uuid::Uuid::now_v7(),
+        tenant(1),
     )
     .await
     .expect_err("multi-key scripts require an explicitly standalone topology");

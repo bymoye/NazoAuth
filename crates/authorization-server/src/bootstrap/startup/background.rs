@@ -94,8 +94,10 @@ pub(super) fn spawn_runtime_reconciler(runtime_modules: web::Data<RuntimeModules
     RuntimeModules::spawn_reconciler(runtime_modules);
 }
 
-pub(super) fn spawn_key_lifecycle(keyset: nazo_key_management::KeyManager) {
-    tokio::spawn(keyset.run_lifecycle());
+pub(super) fn spawn_key_lifecycle(
+    keyset: nazo_key_management::KeyManager,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(keyset.run_lifecycle())
 }
 
 #[cfg(not(test))]
@@ -103,28 +105,31 @@ pub(super) fn spawn_ciba_ping_worker(
     deliveries: Arc<dyn crate::bootstrap::CibaPingDeliveryPort>,
     settings: &Settings,
     runtime_modules: &RuntimeModules,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Option<tokio::task::JoinHandle<()>>> {
     if nazo_auth::module_admissible(
         runtime_modules.registry.snapshot().as_ref(),
         nazo_runtime_modules::ModuleId::Ciba,
         nazo_auth::CapabilityAdmission::NewRequest,
     ) {
-        spawn_ciba_ping_delivery_worker(CibaPingDeliveryWorker::new(
-            deliveries,
-            &settings.ciba.ciba_notification_private_origins,
-        )?);
+        return Ok(Some(spawn_ciba_ping_delivery_worker(
+            CibaPingDeliveryWorker::new(
+                deliveries,
+                &settings.ciba.ciba_notification_private_origins,
+            )?,
+        )));
     }
-    Ok(())
+    Ok(None)
 }
 
 #[cfg(not(test))]
 pub(super) fn spawn_backchannel_logout_worker(
     logout_deliveries: Arc<dyn nazo_persistence::BackchannelLogoutDeliveryStore>,
     settings: &Settings,
-) -> anyhow::Result<()> {
-    spawn_backchannel_logout_delivery_worker(BackchannelLogoutWorker::from_port(
-        logout_deliveries,
-        &settings.modules.backchannel_logout_private_origins,
-    )?);
-    Ok(())
+) -> anyhow::Result<tokio::task::JoinHandle<()>> {
+    Ok(spawn_backchannel_logout_delivery_worker(
+        BackchannelLogoutWorker::from_port(
+            logout_deliveries,
+            &settings.modules.backchannel_logout_private_origins,
+        )?,
+    ))
 }

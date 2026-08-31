@@ -1,0 +1,8 @@
+DROP TRIGGER trg_organizations_runtime_status_revision ON organizations;
+DROP TRIGGER trg_realms_runtime_status_revision ON realms;
+DROP TRIGGER trg_tenants_runtime_status_revision ON tenants;
+DROP TRIGGER trg_tenant_runtime_bindings_truncate_revision ON tenant_runtime_bindings;
+DROP TRIGGER trg_tenant_runtime_bindings_revision ON tenant_runtime_bindings;
+DROP FUNCTION nazo_bump_tenant_runtime_directory_revision();
+DROP TABLE tenant_runtime_bindings;
+DROP TABLE tenant_runtime_directory_state;

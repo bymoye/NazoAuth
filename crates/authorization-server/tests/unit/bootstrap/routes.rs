@@ -1,22 +1,28 @@
-use actix_web::{App, http::StatusCode, test};
+use actix_web::{App, http::StatusCode, test, web};
 
 use super::*;
 
 #[actix_web::test]
-async fn controller_slot_list_has_one_public_route_and_no_admin_get_alias() {
+async fn controller_slot_list_has_one_control_tenant_route_and_no_admin_get_alias() {
     let settings = Settings::from_config(&crate::config::ConfigSource::default()).unwrap();
-    let app =
-        test::init_service(App::new().configure(|cfg| configure(cfg, &settings, false))).await;
+    let context = nazo_identity::TenantContext::default_system();
+    let app = test::init_service(
+        App::new()
+            .app_data(web::Data::new(context))
+            .app_data(web::Data::new(ControlTenantId::new(context.tenant_id)))
+            .configure(|cfg| configure(cfg, &settings, false)),
+    )
+    .await;
 
-    let public = test::call_service(
+    let control = test::call_service(
         &app,
         test::TestRequest::get()
             .uri("/controller-registry/slots?deployment_id=deployment-a")
             .to_request(),
     )
     .await;
-    assert_ne!(public.status(), StatusCode::NOT_FOUND);
-    assert_ne!(public.status(), StatusCode::METHOD_NOT_ALLOWED);
+    assert_ne!(control.status(), StatusCode::NOT_FOUND);
+    assert_ne!(control.status(), StatusCode::METHOD_NOT_ALLOWED);
 
     let old_admin_get = test::call_service(
         &app,

@@ -35,6 +35,305 @@ fn active_tenant_context_is_explicit_and_rejects_nil_identifiers() {
 }
 
 #[test]
+fn structured_tenants_create_isolated_runtime_snapshots() {
+    let tenants = serde_json::json!([
+        {
+            "tenant_id": "00000000-0000-0000-0000-000000000011",
+            "realm_id": "00000000-0000-0000-0000-000000000012",
+            "organization_id": "00000000-0000-0000-0000-000000000013",
+            "issuer": "https://AUTH-A.example.test"
+        },
+        {
+            "tenant_id": "00000000-0000-0000-0000-000000000021",
+            "realm_id": "00000000-0000-0000-0000-000000000022",
+            "organization_id": "00000000-0000-0000-0000-000000000023",
+            "issuer": "https://auth-b.example.test"
+        }
+    ])
+    .to_string();
+    let config = ConfigSource::from_owned_pairs_for_test([
+        ("TENANTS_JSON".to_owned(), tenants),
+        (
+            "PUBLIC_BASE_URL".to_owned(),
+            "http://127.0.0.1:8000".to_owned(),
+        ),
+        ("TRANSPORT_MODE".to_owned(), "trusted-proxy".to_owned()),
+        ("TRUSTED_PROXY_CIDRS".to_owned(), "127.0.0.1/32".to_owned()),
+        ("MTLS_CERTIFICATE_SOURCE".to_owned(), "rfc9440".to_owned()),
+        (
+            "CLIENT_SECRET_PEPPER".to_owned(),
+            "0123456789abcdef0123456789abcdef".to_owned(),
+        ),
+    ]);
+
+    let settings = Settings::from_config_all(&config).expect("tenant snapshots should load");
+    assert_eq!(settings.len(), 2);
+    assert_eq!(settings[0].tenant.host, "auth-a.example.test");
+    assert_eq!(settings[1].tenant.host, "auth-b.example.test");
+    assert_eq!(settings[0].endpoint.issuer, "https://AUTH-A.example.test");
+    assert_eq!(
+        settings[0].endpoint.frontend_base_url,
+        "https://AUTH-A.example.test/ui/"
+    );
+    assert_eq!(
+        settings[1].endpoint.cors_allowed_origins,
+        ["https://auth-b.example.test"]
+    );
+    assert_ne!(settings[0].keys.jwk_keys_dir, settings[1].keys.jwk_keys_dir);
+    assert!(
+        settings[0]
+            .keys
+            .jwk_keys_dir
+            .ends_with("tenants/00000000-0000-0000-0000-000000000011/keys")
+    );
+}
+
+fn directory_binding(issuer: &str, external_host: &str) -> nazo_identity::TenantDirectoryBinding {
+    nazo_identity::TenantDirectoryBinding {
+        tenant: nazo_identity::TenantContext {
+            tenant_id: nazo_identity::TenantId::new(
+                uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000011").unwrap(),
+            )
+            .unwrap(),
+            realm_id: nazo_identity::RealmId::new(
+                uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000012").unwrap(),
+            )
+            .unwrap(),
+            organization_id: nazo_identity::OrganizationId::new(
+                uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000013").unwrap(),
+            )
+            .unwrap(),
+        },
+        issuer: issuer.to_owned(),
+        external_host: external_host.to_owned(),
+    }
+}
+
+#[test]
+fn directory_tenant_uses_the_authoritative_host_and_tenant_storage_roots() {
+    let config = ConfigSource::from_pairs_for_test([
+        ("DATA_DIR", "test-runtime/directory-tenant"),
+        ("TRANSPORT_MODE", "trusted-proxy"),
+        ("TRUSTED_PROXY_CIDRS", "127.0.0.1/32"),
+        ("MTLS_CERTIFICATE_SOURCE", "rfc9440"),
+        ("CLIENT_SECRET_PEPPER", "0123456789abcdef0123456789abcdef"),
+    ]);
+    let settings = Settings::from_directory_binding(
+        &config,
+        &directory_binding("https://AUTH.example.test:8443/issuer", "auth.example.test"),
+    )
+    .expect("directory tenant should build from the process baseline");
+    let data_dir = std::fs::canonicalize(".")
+        .unwrap()
+        .join("test-runtime/directory-tenant");
+
+    assert_eq!(settings.tenant.host, "auth.example.test");
+    assert_eq!(
+        settings.endpoint.issuer,
+        "https://AUTH.example.test:8443/issuer"
+    );
+    assert_eq!(
+        settings.keys.jwk_keys_dir,
+        data_dir.join("tenants/00000000-0000-0000-0000-000000000011/keys")
+    );
+    assert_eq!(
+        settings.storage.avatar_storage_dir,
+        data_dir.join("tenants/00000000-0000-0000-0000-000000000011/avatars")
+    );
+}
+
+#[test]
+fn directory_tenant_rejects_host_mismatch_and_non_dynamic_safe_modes() {
+    let base = [
+        ("TRANSPORT_MODE", "trusted-proxy"),
+        ("TRUSTED_PROXY_CIDRS", "127.0.0.1/32"),
+        ("MTLS_CERTIFICATE_SOURCE", "rfc9440"),
+        ("CLIENT_SECRET_PEPPER", "0123456789abcdef0123456789abcdef"),
+    ];
+    let mismatch = ConfigSource::from_pairs_for_test(base);
+    assert!(
+        Settings::from_directory_binding(
+            &mismatch,
+            &directory_binding("https://auth.example.test", "other.example.test"),
+        )
+        .err()
+        .expect("issuer and external host mismatch must fail")
+        .to_string()
+        .contains("does not match external_host")
+    );
+
+    let direct = ConfigSource::from_pairs_for_test([
+        ("TRANSPORT_MODE", "direct-tls"),
+        ("CLIENT_SECRET_PEPPER", "0123456789abcdef0123456789abcdef"),
+    ]);
+    assert!(
+        Settings::from_directory_binding(
+            &direct,
+            &directory_binding("https://auth.example.test", "auth.example.test"),
+        )
+        .err()
+        .expect("directory tenant must reject direct TLS")
+        .to_string()
+        .contains("directory-managed tenants require TRANSPORT_MODE=trusted-proxy")
+    );
+
+    let keys = ConfigSource::from_owned_pairs_for_test([
+        (
+            "JWK_KEYS_DIR".to_owned(),
+            "test-runtime/shared-keys".to_owned(),
+        ),
+        ("TRANSPORT_MODE".to_owned(), "trusted-proxy".to_owned()),
+        ("TRUSTED_PROXY_CIDRS".to_owned(), "127.0.0.1/32".to_owned()),
+        ("MTLS_CERTIFICATE_SOURCE".to_owned(), "rfc9440".to_owned()),
+        (
+            "CLIENT_SECRET_PEPPER".to_owned(),
+            "0123456789abcdef0123456789abcdef".to_owned(),
+        ),
+    ]);
+    assert!(
+        Settings::from_directory_binding(
+            &keys,
+            &directory_binding("https://auth.example.test", "auth.example.test"),
+        )
+        .err()
+        .expect("directory tenant must reject shared key path")
+        .to_string()
+        .contains("JWK_KEYS_DIR must not be configured")
+    );
+
+    let avatars = ConfigSource::from_pairs_for_test([
+        ("AVATAR_STORAGE_DIR", "test-runtime/shared-avatars"),
+        ("TRANSPORT_MODE", "trusted-proxy"),
+        ("TRUSTED_PROXY_CIDRS", "127.0.0.1/32"),
+        ("MTLS_CERTIFICATE_SOURCE", "rfc9440"),
+        ("CLIENT_SECRET_PEPPER", "0123456789abcdef0123456789abcdef"),
+    ]);
+    assert!(
+        Settings::from_directory_binding(
+            &avatars,
+            &directory_binding("https://auth.example.test", "auth.example.test"),
+        )
+        .err()
+        .expect("directory tenant must reject shared avatar path")
+        .to_string()
+        .contains("AVATAR_STORAGE_DIR must not be configured")
+    );
+}
+
+#[test]
+fn structured_tenants_reject_ambiguous_identity_and_routing() {
+    let tenant = |tenant_id: &str, issuer: &str| {
+        serde_json::json!({
+            "tenant_id": tenant_id,
+            "realm_id": uuid::Uuid::now_v7(),
+            "organization_id": uuid::Uuid::now_v7(),
+            "issuer": issuer
+        })
+    };
+    let cases = [
+        (
+            serde_json::json!([
+                tenant(
+                    "00000000-0000-0000-0000-000000000011",
+                    "https://a.example.test"
+                ),
+                tenant(
+                    "00000000-0000-0000-0000-000000000011",
+                    "https://b.example.test"
+                )
+            ]),
+            "duplicate tenant_id",
+        ),
+        (
+            serde_json::json!([
+                tenant(
+                    "00000000-0000-0000-0000-000000000011",
+                    "https://a.example.test"
+                ),
+                tenant(
+                    "00000000-0000-0000-0000-000000000021",
+                    "https://a.example.test"
+                )
+            ]),
+            "duplicate issuer",
+        ),
+        (
+            serde_json::json!([
+                tenant(
+                    "00000000-0000-0000-0000-000000000011",
+                    "https://a.example.test/one"
+                ),
+                tenant(
+                    "00000000-0000-0000-0000-000000000021",
+                    "https://a.example.test/two"
+                )
+            ]),
+            "duplicate host",
+        ),
+    ];
+
+    for (tenants, expected) in cases {
+        let config = ConfigSource::from_owned_pairs_for_test([(
+            "TENANTS_JSON".to_owned(),
+            tenants.to_string(),
+        )]);
+        let error = Settings::from_config_all(&config)
+            .err()
+            .expect("ambiguity must fail closed");
+        assert!(error.to_string().contains(expected), "{error}");
+    }
+}
+
+#[test]
+fn multiple_tenants_require_trusted_proxy_and_do_not_mix_legacy_settings() {
+    let tenants = serde_json::json!([
+        {
+            "tenant_id": "00000000-0000-0000-0000-000000000011",
+            "realm_id": "00000000-0000-0000-0000-000000000012",
+            "organization_id": "00000000-0000-0000-0000-000000000013",
+            "issuer": "https://a.example.test"
+        },
+        {
+            "tenant_id": "00000000-0000-0000-0000-000000000021",
+            "realm_id": "00000000-0000-0000-0000-000000000022",
+            "organization_id": "00000000-0000-0000-0000-000000000023",
+            "issuer": "https://b.example.test"
+        }
+    ])
+    .to_string();
+    let direct = ConfigSource::from_owned_pairs_for_test([
+        ("TENANTS_JSON".to_owned(), tenants.clone()),
+        ("TRANSPORT_MODE".to_owned(), "direct-tls".to_owned()),
+        (
+            "CLIENT_SECRET_PEPPER".to_owned(),
+            "0123456789abcdef0123456789abcdef".to_owned(),
+        ),
+    ]);
+    assert!(
+        Settings::from_config_all(&direct)
+            .err()
+            .expect("direct TLS multi-tenant config must fail")
+            .to_string()
+            .contains("multiple tenants require TRANSPORT_MODE=trusted-proxy")
+    );
+
+    let mixed = ConfigSource::from_owned_pairs_for_test([
+        ("TENANTS_JSON".to_owned(), tenants),
+        (
+            "TENANT_ID".to_owned(),
+            "00000000-0000-0000-0000-000000000099".to_owned(),
+        ),
+    ]);
+    assert_eq!(
+        Settings::from_config_all(&mixed)
+            .err()
+            .expect("mixed tenant configuration must fail")
+            .to_string(),
+        "TENANT_ID must not be configured together with TENANTS_JSON"
+    );
+}
+
+#[test]
 fn key_attestation_policy_can_defer_trust_to_scoped_runtime_policy() {
     let config = ConfigSource::from_pairs_for_test([
         ("ENABLE_OPENID4VCI_ISSUER", "true"),

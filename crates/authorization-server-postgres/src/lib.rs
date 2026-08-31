@@ -15,8 +15,8 @@ use nazo_postgres::{
     MtlsTrustAnchorRepository, OAuthClientRepository, Openid4vciDatasetRepository,
     Openid4vciRepository, Openid4vpRepository, PasskeyRepository, PostgresHealthCheck,
     PostgresPoolMetrics, PostgresTenantResourceExecutor, RecoveryRootRepository,
-    RuntimeModuleRepository, ScimEventRepository, ScimRepository, TenantResourceRepository,
-    TokenIssuanceRepository, TokenRepository, UserRepository,
+    RuntimeModuleRepository, ScimEventRepository, ScimRepository, TenantDirectoryRepository,
+    TenantResourceRepository, TokenIssuanceRepository, TokenRepository, UserRepository,
 };
 
 const DEFAULT_DATABASE_URL: &str = "postgresql://postgres:postgres@127.0.0.1:5432/oauth";
@@ -38,6 +38,10 @@ impl PostgresProvider {
 impl ServerPersistenceProvider for PostgresProvider {
     fn active_tenant_boundary(&self) -> Arc<dyn nazo_persistence::ActiveTenantBoundaryStore> {
         Arc::new(ActiveTenantBoundaryRepository::new(self.pool.clone()))
+    }
+
+    fn tenant_directory(&self) -> Arc<dyn nazo_persistence::TenantDirectoryStore> {
+        Arc::new(TenantDirectoryRepository::new(self.pool.clone()))
     }
 
     fn security_audit_ledger(&self) -> Arc<dyn nazo_persistence::SecurityAuditLedger> {

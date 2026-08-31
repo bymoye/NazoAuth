@@ -30,11 +30,13 @@ pub(crate) use profile_services::{
 };
 pub(crate) use registration_services::{LocalRegistrationService, RegistrationSecretHasher};
 pub use startup::run;
+pub(crate) use startup::tenant_runtime::TenantRuntimeRegistry;
 #[cfg(test)]
 pub(crate) use startup::{load_revocation_policy, read_revocation_snapshot};
 pub use transient_state::{
     CibaPingDelivery, CibaPingDeliveryPort, CibaPingFinishOutcome, CibaPingFinishResult,
-    ServerTransientStateBindings, ServerTransientStateProvider, TransientStateError,
+    ServerStateBackendBindings, ServerTransientStateBindings, ServerTransientStateProvider,
+    TenantDirectoryCachePort, TenantTransientStateFactory, TransientStateError,
     TransientStateFuture, TransientStateHealthPort,
 };
 

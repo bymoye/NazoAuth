@@ -364,6 +364,15 @@ pub trait ActiveTenantBoundaryStore: Send + Sync {
     ) -> BoxFuture<'_, Result<(), RepositoryError>>;
 }
 
+/// Authoritative read side of the dynamic tenant directory.
+pub trait TenantDirectoryStore: Send + Sync {
+    fn current_revision(&self) -> BoxFuture<'_, Result<u64, RepositoryError>>;
+
+    fn load_active(
+        &self,
+    ) -> BoxFuture<'_, Result<nazo_identity::TenantDirectorySnapshot, RepositoryError>>;
+}
+
 #[derive(Clone)]
 pub enum ClientTrustPolicy {
     Unbound,

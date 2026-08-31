@@ -13,7 +13,8 @@ use nazo_oauth_server::{
     FapiHttpSignatureReplayStoreError,
     bootstrap::{
         CibaPingDelivery, CibaPingDeliveryPort, CibaPingFinishOutcome, CibaPingFinishResult,
-        ServerTransientStateBindings, ServerTransientStateProvider, TransientStateError,
+        ServerStateBackendBindings, ServerTransientStateBindings, ServerTransientStateProvider,
+        TenantDirectoryCachePort, TenantTransientStateFactory, TransientStateError,
         TransientStateFuture, TransientStateHealthPort,
     },
     cli::{LauncherFuture, TransientStateLauncher},
@@ -149,6 +150,47 @@ struct ValkeyProvider {
     connection: nazo_valkey::ValkeyConnection,
 }
 
+#[derive(Clone)]
+struct ValkeyProviderFactory {
+    client: nazo_valkey::ValkeyClient,
+}
+
+impl TenantTransientStateFactory for ValkeyProviderFactory {
+    fn for_tenant(
+        &self,
+        tenant_id: nazo_identity::TenantId,
+    ) -> Result<ServerTransientStateBindings, TransientStateError> {
+        Ok(ServerTransientStateBindings::new(Arc::new(
+            ValkeyProvider {
+                connection: self.client.for_tenant(tenant_id),
+            },
+        )))
+    }
+}
+
+#[derive(Clone)]
+struct ValkeyTenantDirectoryCache {
+    cache: nazo_valkey::TenantDirectoryCache,
+}
+
+impl TenantDirectoryCachePort for ValkeyTenantDirectoryCache {
+    fn load(&self) -> TransientStateFuture<'_, Option<nazo_identity::TenantDirectorySnapshot>> {
+        Box::pin(async move { self.cache.load().await.map_err(map_transient_state_error) })
+    }
+
+    fn publish_authoritative<'a>(
+        &'a self,
+        snapshot: &'a nazo_identity::TenantDirectorySnapshot,
+    ) -> TransientStateFuture<'a, bool> {
+        Box::pin(async move {
+            self.cache
+                .publish_authoritative(snapshot)
+                .await
+                .map_err(map_transient_state_error)
+        })
+    }
+}
+
 impl ServerTransientStateProvider for ValkeyProvider {
     fn health(&self) -> Arc<dyn TransientStateHealthPort> {
         Arc::new(ValkeyHealth {
@@ -272,8 +314,7 @@ impl TransientStateLauncher for ValkeyTransientStateLauncher {
         &'a self,
         source: &'a ConfigSource,
         deployment_id: &'a str,
-        tenant_id: nazo_identity::TenantId,
-    ) -> LauncherFuture<'a, ServerTransientStateBindings> {
+    ) -> LauncherFuture<'a, ServerStateBackendBindings> {
         Box::pin(async move {
             let state_epoch = source.transient_state_epoch()?;
             let url = source.string("VALKEY_URL", "redis://127.0.0.1:6379/0");
@@ -281,22 +322,21 @@ impl TransientStateLauncher for ValkeyTransientStateLauncher {
             if command_timeout_ms == 0 {
                 anyhow::bail!("VALKEY_COMMAND_TIMEOUT_MS must be greater than zero");
             }
-            let connection = nazo_valkey::ValkeyConnection::connect(
+            let client = nazo_valkey::ValkeyClient::connect(
                 &url,
                 std::time::Duration::from_millis(command_timeout_ms),
                 deployment_id,
                 state_epoch,
             )
             .await?;
-            connection
-                .bind_tenant_owner(tenant_id)
-                .await
-                .map_err(|error| {
-                    anyhow::anyhow!("transient-state tenant ownership preflight failed: {error}")
-                })?;
-            Ok(ServerTransientStateBindings::new(Arc::new(
-                ValkeyProvider { connection },
-            )))
+            Ok(ServerStateBackendBindings::new(
+                Arc::new(ValkeyProviderFactory {
+                    client: client.clone(),
+                }),
+                Arc::new(ValkeyTenantDirectoryCache {
+                    cache: nazo_valkey::TenantDirectoryCache::new(&client),
+                }),
+            ))
         })
     }
 }

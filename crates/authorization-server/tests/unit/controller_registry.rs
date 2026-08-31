@@ -9,7 +9,7 @@ use sha2::{Digest as _, Sha256};
 
 use super::{
     ControllerKeyWarning, IdentityChange, RevokeRequest, RotateRequest, SlotChangeRequest,
-    expiry_warning, validate_slot_request,
+    ensure_local_deployment, expiry_warning, validate_slot_request,
 };
 
 fn public_key_text(seed: u8) -> String {
@@ -160,4 +160,10 @@ fn expiry_warnings_fire_at_seven_days_and_twenty_four_hours() {
         expiry_warning(expires + Duration::hours(1), expires),
         Some(ControllerKeyWarning::Urgent)
     );
+}
+
+#[test]
+fn deployment_binding_accepts_local_and_rejects_foreign_callers() {
+    assert!(ensure_local_deployment("deployment-a", "deployment-a").is_ok());
+    assert!(ensure_local_deployment("deployment-a", "deployment-b").is_err());
 }

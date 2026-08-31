@@ -14,6 +14,7 @@ use nazo_identity::ports::{
     DeliveryStorePort, EmailVerificationStorePort, FederationStatePort, LoginSessionPort,
     LoginThrottlePort, MfaAttemptThrottlePort, PasskeyCeremonyPort, SessionStorePort,
 };
+use nazo_identity::{TenantDirectorySnapshot, TenantId};
 
 pub type TransientStateFuture<'a, T> =
     Pin<Box<dyn Future<Output = Result<T, TransientStateError>> + Send + 'a>>;
@@ -109,6 +110,34 @@ pub trait ServerTransientStateProvider: Send + Sync {
     fn delivery(&self) -> Arc<dyn DeliveryStorePort>;
 }
 
+/// Shared, backend-neutral cache for the authoritative tenant directory.
+///
+/// This port is used only by the runtime refresher. Request handlers resolve a
+/// tenant from the process-local snapshot and never call this cache.
+pub trait TenantDirectoryCachePort: Send + Sync {
+    fn load(&self) -> TransientStateFuture<'_, Option<TenantDirectorySnapshot>>;
+
+    /// Publishes a snapshot loaded from the authoritative database.
+    ///
+    /// A missing, corrupt, older, or same-revision-but-different cache entry is
+    /// replaced. A valid entry with a higher revision, or the exact same
+    /// snapshot, is retained and returns `false`. Cache-derived snapshots must
+    /// never be passed back into this method.
+    fn publish_authoritative<'a>(
+        &'a self,
+        snapshot: &'a TenantDirectorySnapshot,
+    ) -> TransientStateFuture<'a, bool>;
+}
+
+/// Creates tenant-bound semantic state capabilities from one initialized
+/// deployment backend. Implementations must not reconnect for each tenant.
+pub trait TenantTransientStateFactory: Send + Sync {
+    fn for_tenant(
+        &self,
+        tenant_id: TenantId,
+    ) -> Result<ServerTransientStateBindings, TransientStateError>;
+}
+
 #[derive(Clone)]
 pub struct ServerTransientStateBindings {
     provider: Arc<dyn ServerTransientStateProvider>,
@@ -122,5 +151,38 @@ impl ServerTransientStateBindings {
 
     pub(super) fn provider(&self) -> &Arc<dyn ServerTransientStateProvider> {
         &self.provider
+    }
+}
+
+/// Deployment-level state capabilities initialized once by the selected
+/// backend launcher.
+#[derive(Clone)]
+pub struct ServerStateBackendBindings {
+    tenant_state: Arc<dyn TenantTransientStateFactory>,
+    tenant_directory_cache: Arc<dyn TenantDirectoryCachePort>,
+}
+
+impl ServerStateBackendBindings {
+    #[must_use]
+    pub fn new(
+        tenant_state: Arc<dyn TenantTransientStateFactory>,
+        tenant_directory_cache: Arc<dyn TenantDirectoryCachePort>,
+    ) -> Self {
+        Self {
+            tenant_state,
+            tenant_directory_cache,
+        }
+    }
+
+    pub fn for_tenant(
+        &self,
+        tenant_id: TenantId,
+    ) -> Result<ServerTransientStateBindings, TransientStateError> {
+        self.tenant_state.for_tenant(tenant_id)
+    }
+
+    #[must_use]
+    pub fn tenant_directory_cache(&self) -> Arc<dyn TenantDirectoryCachePort> {
+        self.tenant_directory_cache.clone()
     }
 }

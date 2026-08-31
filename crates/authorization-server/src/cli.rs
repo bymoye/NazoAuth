@@ -69,8 +69,7 @@ pub trait TransientStateLauncher: Send + Sync {
         &'a self,
         config: &'a ConfigSource,
         deployment_id: &'a str,
-        tenant_id: nazo_identity::TenantId,
-    ) -> LauncherFuture<'a, crate::bootstrap::ServerTransientStateBindings>;
+    ) -> LauncherFuture<'a, crate::bootstrap::ServerStateBackendBindings>;
 }
 
 pub async fn run(

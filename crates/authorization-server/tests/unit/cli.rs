@@ -56,8 +56,7 @@ impl TransientStateLauncher for UnusedTransientStateLauncher {
         &'a self,
         _config: &'a ConfigSource,
         _deployment_id: &'a str,
-        _tenant_id: nazo_identity::TenantId,
-    ) -> LauncherFuture<'a, crate::bootstrap::ServerTransientStateBindings> {
+    ) -> LauncherFuture<'a, crate::bootstrap::ServerStateBackendBindings> {
         unreachable!("help and release identity do not initialize transient state")
     }
 }

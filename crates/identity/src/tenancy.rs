@@ -1,4 +1,5 @@
 use serde::{Deserialize, Deserializer, Serialize, de};
+use url::Url;
 use uuid::Uuid;
 
 use crate::IdentityModelError;
@@ -65,6 +66,71 @@ pub struct TenantContext {
     pub organization_id: OrganizationId,
 }
 
+/// One active tenant's public routing identity and default placement.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct TenantDirectoryBinding {
+    pub tenant: TenantContext,
+    pub issuer: String,
+    pub external_host: String,
+}
+
+/// Immutable, revisioned view of every active tenant.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct TenantDirectorySnapshot {
+    pub revision: u64,
+    pub tenants: Vec<TenantDirectoryBinding>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TenantHostError(&'static str);
+
+impl std::fmt::Display for TenantHostError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.0)
+    }
+}
+
+impl std::error::Error for TenantHostError {}
+
+/// Canonicalizes the host identity shared by routing and directory caches.
+pub fn canonical_tenant_host(host: &str) -> Result<String, TenantHostError> {
+    let host = host.trim();
+    if host.is_empty() {
+        return Err(TenantHostError("tenant host must not be empty"));
+    }
+    if host.starts_with('[') {
+        if !host.ends_with(']') {
+            return Err(TenantHostError("tenant host must be a host without a port"));
+        }
+    } else if host.contains(':') {
+        return Err(TenantHostError("tenant host must not include a port"));
+    }
+
+    let parsed = Url::parse(&format!("https://{host}/"))
+        .map_err(|_| TenantHostError("tenant host is invalid"))?;
+    if !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.port().is_some()
+        || parsed.path() != "/"
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+    {
+        return Err(TenantHostError(
+            "tenant host must be a host without userinfo, path, query, fragment, or port",
+        ));
+    }
+    let canonical = match parsed.host() {
+        Some(url::Host::Domain(domain)) => domain.trim_end_matches('.').to_ascii_lowercase(),
+        Some(url::Host::Ipv4(address)) => address.to_string(),
+        Some(url::Host::Ipv6(address)) => format!("[{address}]"),
+        None => return Err(TenantHostError("tenant host is invalid")),
+    };
+    if canonical.is_empty() {
+        return Err(TenantHostError("tenant host must not be empty"));
+    }
+    Ok(canonical)
+}
+
 impl TenantContext {
     #[must_use]
     pub fn default_system() -> Self {
@@ -103,5 +169,24 @@ impl TenantContext {
 impl Default for TenantContext {
     fn default() -> Self {
         Self::default_system()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::canonical_tenant_host;
+
+    #[test]
+    fn tenant_host_has_one_canonical_form() {
+        assert_eq!(
+            canonical_tenant_host(" Auth.Example. ").expect("DNS host should canonicalize"),
+            "auth.example"
+        );
+        assert_eq!(
+            canonical_tenant_host("[2001:db8::1]").expect("IPv6 host should canonicalize"),
+            "[2001:db8::1]"
+        );
+        assert!(canonical_tenant_host("auth.example:443").is_err());
+        assert!(canonical_tenant_host("https://auth.example").is_err());
     }
 }

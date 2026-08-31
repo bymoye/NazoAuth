@@ -3,7 +3,9 @@ use diesel_async::{
     AsyncConnection as _, AsyncPgConnection, RunQueryDsl, SimpleAsyncConnection as _,
 };
 use nazo_identity::{OrganizationId, RealmId, TenantContext, TenantId};
-use nazo_postgres::{ActiveTenantBoundaryRepository, create_pool, get_conn};
+use nazo_postgres::{
+    ActiveTenantBoundaryRepository, TenantDirectoryRepository, create_pool, get_conn,
+};
 use uuid::Uuid;
 
 mod support;
@@ -57,6 +59,7 @@ async fn active_tenant_boundary_preflight_is_fail_closed() {
     run_isolated_application_migrations(&isolated_url).await;
     let pool = create_pool(isolated_url, 4).expect("pool should create");
     let repository = ActiveTenantBoundaryRepository::new(pool.clone());
+    let directory = TenantDirectoryRepository::new(pool.clone());
     let active = TenantContext::default_system();
 
     repository
@@ -67,6 +70,32 @@ async fn active_tenant_boundary_preflight_is_fail_closed() {
     let mut connection = get_conn(&pool)
         .await
         .expect("pool should provide connection");
+    sql_query(
+        "INSERT INTO tenant_runtime_bindings
+            (tenant_id, realm_id, organization_id, issuer, external_host)
+         VALUES ($1, $2, $3, 'https://auth.example', 'auth.example')",
+    )
+    .bind::<sql_types::Uuid, _>(active.tenant_id.as_uuid())
+    .bind::<sql_types::Uuid, _>(active.realm_id.as_uuid())
+    .bind::<sql_types::Uuid, _>(active.organization_id.as_uuid())
+    .execute(&mut connection)
+    .await
+    .expect("active tenant directory binding should insert");
+    let initial_directory = directory
+        .load_active()
+        .await
+        .expect("active directory should load");
+    assert_eq!(initial_directory.revision, 1);
+    assert_eq!(initial_directory.tenants.len(), 1);
+    assert_eq!(initial_directory.tenants[0].tenant, active);
+    assert_eq!(
+        directory
+            .current_revision()
+            .await
+            .expect("directory revision should load"),
+        initial_directory.revision
+    );
+
     sql_query("UPDATE tenants SET status = 'suspended' WHERE id = $1")
         .bind::<sql_types::Uuid, _>(active.tenant_id.as_uuid())
         .execute(&mut connection)
@@ -77,6 +106,12 @@ async fn active_tenant_boundary_preflight_is_fail_closed() {
         repository.preflight(active).await,
         Err(nazo_identity::ports::RepositoryError::Consistency(_))
     ));
+    let suspended_directory = directory
+        .load_active()
+        .await
+        .expect("suspended directory should load");
+    assert_eq!(suspended_directory.revision, 2);
+    assert!(suspended_directory.tenants.is_empty());
 
     let mut connection = get_conn(&pool)
         .await
@@ -86,6 +121,12 @@ async fn active_tenant_boundary_preflight_is_fail_closed() {
         .execute(&mut connection)
         .await
         .expect("tenant status should restore");
+    let restored_directory = directory
+        .load_active()
+        .await
+        .expect("restored directory should load");
+    assert_eq!(restored_directory.revision, 3);
+    assert_eq!(restored_directory.tenants.len(), 1);
 
     let foreign_realm_tenant = Uuid::now_v7();
     let foreign_realm = Uuid::now_v7();

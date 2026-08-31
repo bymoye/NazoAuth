@@ -5,6 +5,7 @@ use super::*;
 /// Identity, session, administration, and local-login endpoints.  These
 /// adapters share session/cookie policy and are kept together so that the
 /// factory only has to register the already-composed handles.
+#[derive(Clone)]
 pub(super) struct IdentityServices {
     pub(super) profile_logout_endpoint: web::Data<SessionLogoutEndpoint>,
     pub(super) runtime_module_admin_endpoint: web::Data<RuntimeModuleAdminEndpoint>,
@@ -134,8 +135,6 @@ pub(super) async fn build(
         core.device_config.clone(),
         core.authorization_runtime.clone(),
     ));
-    #[cfg(not(test))]
-    let logout_deliveries = persistence.logout_delivery_store();
     let oidc_logout_operations = OidcLogoutHandles::new(
         session_profiles.get_ref().clone(),
         persistence.logout_clients(),
@@ -201,11 +200,13 @@ pub(super) async fn build(
     let controller_registry =
         web::Data::new(crate::controller_registry::ControllerRegistryService::new(
             persistence.controller_registry(),
+            startup.control_discovery.deployment_id(),
         ));
     // 04A D10/D11/D12: Recovery Root anchor, break-glass challenges and
     // approved rotations share the registry's database authority.
     let recovery_root = web::Data::new(crate::recovery_root::RecoveryRootService::new(
         persistence.recovery_root(),
+        startup.control_discovery.deployment_id(),
     ));
     let mtls_trust_anchors: web::Data<MtlsTrustAnchorService> =
         web::Data::from(persistence.mtls_trust_anchors());
@@ -394,12 +395,6 @@ pub(super) async fn build(
         session.session_ttl_seconds,
         session.cookie_secure,
     ));
-
-    #[cfg(not(test))]
-    super::super::background::spawn_backchannel_logout_worker(
-        logout_deliveries,
-        &startup.settings,
-    )?;
 
     Ok(IdentityServices {
         profile_logout_endpoint,
