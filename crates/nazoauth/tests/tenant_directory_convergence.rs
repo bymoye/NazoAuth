@@ -29,6 +29,7 @@ use tokio::{
 use uuid::Uuid;
 
 const CONVERGENCE_WINDOW: Duration = Duration::from_secs(30);
+const STARTUP_WINDOW: Duration = Duration::from_secs(90);
 const DISCOVERY_PATH: &str = "/.well-known/openid-configuration";
 const DEPLOYMENT_ID: &str = "t1-convergence";
 const STATE_EPOCH: &str = "0198f7d1-0000-7000-8000-000000000001";
@@ -98,8 +99,37 @@ fn write_config(path: &Path, yaml: &str) {
 
 struct ServerProcess {
     child: Child,
-    #[allow(dead_code)]
     port: u16,
+    log_path: PathBuf,
+}
+
+impl ServerProcess {
+    fn wait_until_ready(&mut self, host: &str) -> Duration {
+        let started = Instant::now();
+        loop {
+            let status = discovery_status(self.port, host);
+            if status == 200 {
+                return started.elapsed();
+            }
+            if let Some(exit) = self
+                .child
+                .try_wait()
+                .expect("server process status should be readable")
+            {
+                let log = std::fs::read_to_string(&self.log_path).unwrap_or_default();
+                panic!(
+                    "server on port {} exited with {exit} before readiness (last status {status}):\n{log}",
+                    self.port
+                );
+            }
+            assert!(
+                started.elapsed() < STARTUP_WINDOW,
+                "server on port {} did not become ready within the startup window (last status {status})",
+                self.port
+            );
+            std::thread::sleep(Duration::from_millis(500));
+        }
+    }
 }
 
 /// Environment variables that would override the per-process `.env.yaml`:
@@ -137,20 +167,22 @@ fn child_command(subcommand: &str, config: &Path) -> Command {
 }
 
 fn spawn_server(config: &Path, port: u16) -> ServerProcess {
-    let log = std::fs::File::create(
-        config
-            .parent()
-            .expect("config has a parent")
-            .join("server.log"),
-    )
-    .expect("server log file should create");
+    let log_path = config
+        .parent()
+        .expect("config has a parent")
+        .join("server.log");
+    let log = std::fs::File::create(&log_path).expect("server log file should create");
     let error_log = log.try_clone().expect("server error log file should clone");
     let child = child_command("server", config)
         .stdout(Stdio::from(log))
         .stderr(Stdio::from(error_log))
         .spawn()
         .expect("server process should spawn");
-    ServerProcess { child, port }
+    ServerProcess {
+        child,
+        port,
+        log_path,
+    }
 }
 
 fn run_cli(command: &str, config: &Path) {
@@ -434,6 +466,9 @@ async fn two_processes_converge_on_lifecycle_mutations_and_survive_cache_failure
     );
     let mut server_a = spawn_server(&config_a, port_a);
     let mut server_b = spawn_server(&config_b, port_b);
+    let startup_a = server_a.wait_until_ready("127.0.0.1");
+    let startup_b = server_b.wait_until_ready("127.0.0.1");
+    println!("server startup: process A {startup_a:?}, process B {startup_b:?}");
 
     let outcome = exercise_lifecycle(&isolated_url, &mut proxy, port_a, port_b).await;
 
@@ -464,11 +499,6 @@ async fn exercise_lifecycle(
     port_a: u16,
     port_b: u16,
 ) -> anyhow::Result<()> {
-    // Both processes route the bootstrapped system tenant.
-    let elapsed_a = wait_for_routing(port_a, "127.0.0.1", 200);
-    let elapsed_b = wait_for_routing(port_b, "127.0.0.1", 200);
-    println!("system tenant routing: process A {elapsed_a:?}, process B {elapsed_b:?}");
-
     let pool = create_pool(isolated_url.to_owned(), 4)?;
     let repository = TenantDirectoryRepository::new(pool);
     let revision = repository.current_revision().await?;
