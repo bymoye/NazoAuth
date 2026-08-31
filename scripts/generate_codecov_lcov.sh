@@ -319,7 +319,10 @@ cargo test --locked -p nazo-postgres --test migrations \
 TEST_OBJECT_MANIFEST="$COVERAGE_DIR/test-objects.jsonl"
 cargo test --locked --workspace --all-features --lib --bins --tests \
   --no-run --message-format=json > "$TEST_OBJECT_MANIFEST"
-cargo test --locked --workspace --all-features --lib --bins --tests
+# LLVM coverage instrumentation changes scheduler timing. The ordinary
+# code-quality gate owns the 30-second dynamic-directory convergence SLO.
+cargo test --locked --workspace --all-features --lib --bins --tests -- \
+  --skip two_processes_converge_on_lifecycle_mutations_and_survive_cache_failures
 
 # These integration-heavy protocol tests are intentionally excluded from the
 # default workspace run because they require live PostgreSQL and Valkey. This

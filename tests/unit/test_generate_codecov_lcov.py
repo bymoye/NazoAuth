@@ -39,7 +39,7 @@ class CoveragePhaseIsolationTests(unittest.TestCase):
             "cargo test --locked -p nazo-postgres --test migrations", switch_database
         )
         run_workspace = self.source.index(
-            "cargo test --locked --workspace --all-features --lib --bins --tests\n",
+            "cargo test --locked --workspace --all-features --lib --bins --tests --",
             migrate_workspace,
         )
 
@@ -50,10 +50,15 @@ class CoveragePhaseIsolationTests(unittest.TestCase):
 
     def test_live_protocol_coverage_uses_an_explicit_local_service_allowlist(self) -> None:
         workspace_tests = self.source.index(
-            "cargo test --locked --workspace --all-features --lib --bins --tests\n"
+            "cargo test --locked --workspace --all-features --lib --bins --tests --"
         )
         live_tests = self.source.index("COVERAGE_LIVE_TESTS=(", workspace_tests)
         coverage_export = self.source.index("test_objects=()", live_tests)
+
+        self.assertIn(
+            "--skip two_processes_converge_on_lifecycle_mutations_and_survive_cache_failures",
+            self.source[workspace_tests:live_tests],
+        )
 
         for test_name in (
             "live_immediate_offer_pre_authorized_credential_replay_and_notification",
