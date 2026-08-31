@@ -71,7 +71,10 @@ pub use recovery_root::{
 pub use runtime_modules::{RuntimeModuleEventPage, RuntimeModuleRepository};
 pub use scim::ScimRepository;
 pub use scim_events::ScimEventRepository;
-pub use tenancy::{ActiveTenantBoundaryRepository, TenantDirectoryRepository};
+pub use tenancy::{
+    ActiveTenantBoundaryRepository, TenantBoundaryDefinition, TenantDirectoryRepository,
+    TenantProvisioningRequest, TenantRuntimeStatus,
+};
 pub use tenant_resources::{
     NewStoredOpenid4vcTrustPolicy, NewTenantResourceBinding, Openid4vcTrustPolicyClientBind,
     Openid4vcTrustPolicyForClient, Openid4vcTrustPolicyRevoke, Openid4vcTrustPolicyWrite,

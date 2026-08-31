@@ -24,6 +24,7 @@ chrono.workspace = true
 diesel = { workspace = true, features = ["postgres_backend"] }
 diesel-async = { workspace = true, features = ["postgres"] }
 ed25519-dalek.workspace = true
+nazo-identity.workspace = true
 nazo-operator-protocol.workspace = true
 nazo-postgres.workspace = true
 rand.workspace = true

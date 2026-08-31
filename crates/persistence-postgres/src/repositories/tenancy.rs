@@ -1,8 +1,8 @@
 use diesel::{OptionalExtension as _, QueryableByName, sql_query, sql_types};
-use diesel_async::{AsyncConnection as _, RunQueryDsl};
+use diesel_async::{AsyncConnection as _, AsyncPgConnection, RunQueryDsl};
 use nazo_identity::{
     OrganizationId, RealmId, TenantContext, TenantDirectoryBinding, TenantDirectorySnapshot,
-    TenantId, ports::RepositoryError,
+    TenantId, canonical_tenant_host, ports::RepositoryError,
 };
 use nazo_persistence::TenantDirectoryStore;
 use uuid::Uuid;
@@ -277,6 +277,520 @@ fn map_query_error(error: diesel::result::Error) -> RepositoryError {
     match error {
         diesel::result::Error::NotFound => RepositoryError::NotFound,
         error => RepositoryError::Unexpected(error.to_string()),
+    }
+}
+
+/// One identity boundary row a provisioning request must place or bind.
+#[derive(Clone, Debug)]
+pub struct TenantBoundaryDefinition<Id> {
+    pub id: Id,
+    pub slug: String,
+    pub display_name: String,
+}
+
+/// A complete tenant boundary plus its canonical routing binding. The
+/// transaction either creates every referenced row or proves that an existing
+/// row already satisfies the request; it never rewrites a provisioned
+/// binding.
+#[derive(Clone, Debug)]
+pub struct TenantProvisioningRequest {
+    pub tenant: TenantBoundaryDefinition<TenantId>,
+    pub realm: TenantBoundaryDefinition<RealmId>,
+    pub organization: TenantBoundaryDefinition<OrganizationId>,
+    pub binding: TenantDirectoryBinding,
+}
+
+/// Runtime lifecycle status of one tenant row. The directory snapshot only
+/// routes tenants whose row is active.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TenantRuntimeStatus {
+    Active,
+    Suspended,
+    Deleted,
+}
+
+impl TenantRuntimeStatus {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Suspended => "suspended",
+            Self::Deleted => "deleted",
+        }
+    }
+}
+
+/// Transaction-scoped error for the directory mutations. The transaction
+/// boundary requires `From<diesel::result::Error>`; `RepositoryError` is a
+/// foreign type, so the mutation commits roll through this wrapper.
+enum DirectoryMutationError {
+    Repository(RepositoryError),
+    Query(diesel::result::Error),
+}
+
+impl From<diesel::result::Error> for DirectoryMutationError {
+    fn from(error: diesel::result::Error) -> Self {
+        Self::Query(error)
+    }
+}
+
+impl From<RepositoryError> for DirectoryMutationError {
+    fn from(error: RepositoryError) -> Self {
+        Self::Repository(error)
+    }
+}
+
+impl From<DirectoryMutationError> for RepositoryError {
+    fn from(error: DirectoryMutationError) -> Self {
+        match error {
+            DirectoryMutationError::Repository(repository) => repository,
+            DirectoryMutationError::Query(query) => map_query_error(query),
+        }
+    }
+}
+
+/// Locks the singleton directory state row and returns the current revision.
+/// Every mutation must hold this lock before comparing its expected revision.
+async fn lock_directory_revision(
+    connection: &mut AsyncPgConnection,
+) -> Result<u64, DirectoryMutationError> {
+    let row = sql_query(
+        "SELECT revision
+         FROM tenant_runtime_directory_state
+         WHERE singleton
+         FOR UPDATE",
+    )
+    .get_result::<TenantDirectoryRevisionRow>(connection)
+    .await
+    .map_err(map_query_error)?;
+    Ok(decode_directory_revision(row.revision)?)
+}
+
+/// Re-reads the revision advanced by the mutation trigger inside the same
+/// transaction. The held state row lock guarantees no concurrent writer can
+/// interleave between the mutation and this read.
+async fn read_directory_revision(
+    connection: &mut AsyncPgConnection,
+) -> Result<u64, DirectoryMutationError> {
+    let row = sql_query("SELECT revision FROM tenant_runtime_directory_state WHERE singleton")
+        .get_result::<TenantDirectoryRevisionRow>(connection)
+        .await
+        .map_err(map_query_error)?;
+    Ok(decode_directory_revision(row.revision)?)
+}
+
+/// Inserts one tenant, realm, or organization row when absent and proves that
+/// an existing row is active and, for realms and organizations, owned by the
+/// provisioning tenant.
+async fn upsert_active_tenant_boundary(
+    connection: &mut AsyncPgConnection,
+    id: Uuid,
+    slug: &str,
+    display_name: &str,
+) -> Result<(), RepositoryError> {
+    sql_query(
+        "INSERT INTO tenants (id, slug, display_name) VALUES ($1, $2, $3)
+         ON CONFLICT (id) DO NOTHING",
+    )
+    .bind::<sql_types::Uuid, _>(id)
+    .bind::<sql_types::Text, _>(slug)
+    .bind::<sql_types::Text, _>(display_name)
+    .execute(connection)
+    .await
+    .map_err(map_query_error)?;
+    let row = sql_query("SELECT status FROM tenants WHERE id = $1 FOR UPDATE")
+        .bind::<sql_types::Uuid, _>(id)
+        .get_result::<BoundaryStatusRow>(connection)
+        .await
+        .map_err(map_query_error)?;
+    if row.status.as_deref() != Some("active") {
+        return Err(RepositoryError::Consistency(
+            "provisioned tenant boundary row is not active".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+/// Inserts one realm or organization row when absent and proves that an
+/// existing row is active and owned by the provisioning tenant.
+async fn upsert_active_owned_boundary(
+    connection: &mut AsyncPgConnection,
+    table: OwnedBoundaryTable,
+    id: Uuid,
+    tenant_id: Uuid,
+    slug: &str,
+    display_name: &str,
+) -> Result<(), RepositoryError> {
+    let (table, status_query) = match table {
+        OwnedBoundaryTable::Realm => (
+            "realms",
+            "SELECT tenant_id, status FROM realms WHERE id = $1 FOR UPDATE",
+        ),
+        OwnedBoundaryTable::Organization => (
+            "organizations",
+            "SELECT tenant_id, status FROM organizations WHERE id = $1 FOR UPDATE",
+        ),
+    };
+    sql_query(format!(
+        "INSERT INTO {table} (id, tenant_id, slug, display_name)
+         VALUES ($1, $2, $3, $4)
+         ON CONFLICT (id) DO NOTHING"
+    ))
+    .bind::<sql_types::Uuid, _>(id)
+    .bind::<sql_types::Uuid, _>(tenant_id)
+    .bind::<sql_types::Text, _>(slug)
+    .bind::<sql_types::Text, _>(display_name)
+    .execute(connection)
+    .await
+    .map_err(map_query_error)?;
+    let row = sql_query(status_query)
+        .bind::<sql_types::Uuid, _>(id)
+        .get_result::<BoundaryOwnershipRow>(connection)
+        .await
+        .map_err(map_query_error)?;
+    if row.tenant_id != Some(tenant_id) {
+        return Err(RepositoryError::Consistency(
+            "boundary row belongs to another tenant".to_owned(),
+        ));
+    }
+    if row.status.as_deref() != Some("active") {
+        return Err(RepositoryError::Consistency(
+            "boundary row is not active".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum OwnedBoundaryTable {
+    Realm,
+    Organization,
+}
+
+#[derive(Debug, QueryableByName)]
+struct TenantBindingPresenceRow {
+    #[diesel(sql_type = sql_types::Uuid)]
+    tenant_id: Uuid,
+}
+
+#[derive(Debug, QueryableByName)]
+struct BoundaryStatusRow {
+    #[diesel(sql_type = sql_types::Nullable<sql_types::Text>)]
+    status: Option<String>,
+}
+
+#[derive(Debug, QueryableByName)]
+struct BoundaryOwnershipRow {
+    #[diesel(sql_type = sql_types::Nullable<sql_types::Uuid>)]
+    tenant_id: Option<Uuid>,
+    #[diesel(sql_type = sql_types::Nullable<sql_types::Text>)]
+    status: Option<String>,
+}
+
+fn binding_rows_equal(row: &TenantDirectoryBindingRow, binding: &TenantDirectoryBinding) -> bool {
+    row.tenant_id == binding.tenant.tenant_id.as_uuid()
+        && row.realm_id == binding.tenant.realm_id.as_uuid()
+        && row.organization_id == binding.tenant.organization_id.as_uuid()
+        && row.issuer == binding.issuer
+        && row.external_host == binding.external_host
+}
+
+/// Applies the same routing-identity rules as the runtime snapshot reader so
+/// an invalid binding fails closed before the transaction can commit.
+fn validate_binding_routing_identity(
+    issuer: &str,
+    external_host: &str,
+) -> Result<(), RepositoryError> {
+    nazo_auth::validate_issuer_url(issuer).map_err(|error| {
+        RepositoryError::Consistency(format!("tenant issuer is invalid: {error}"))
+    })?;
+    let host = canonical_tenant_host(external_host).map_err(|error| {
+        RepositoryError::Consistency(format!("tenant external host is invalid: {error}"))
+    })?;
+    if host != external_host {
+        return Err(RepositoryError::Consistency(
+            "tenant external host is not canonical".to_owned(),
+        ));
+    }
+    let issuer_url = url::Url::parse(issuer).map_err(|error| {
+        RepositoryError::Consistency(format!("tenant issuer is invalid: {error}"))
+    })?;
+    let issuer_host = issuer_url.host().ok_or_else(|| {
+        RepositoryError::Consistency("tenant issuer must include a host".to_owned())
+    })?;
+    let issuer_host = match issuer_host {
+        url::Host::Domain(domain) => canonical_tenant_host(domain),
+        url::Host::Ipv4(address) => canonical_tenant_host(&address.to_string()),
+        url::Host::Ipv6(address) => canonical_tenant_host(&format!("[{address}]")),
+    }
+    .map_err(|error| {
+        RepositoryError::Consistency(format!("tenant issuer host is invalid: {error}"))
+    })?;
+    if issuer_host != host {
+        return Err(RepositoryError::Consistency(format!(
+            "tenant issuer host {issuer_host} does not match external_host {host}"
+        )));
+    }
+    Ok(())
+}
+
+impl TenantDirectoryRepository {
+    /// Creates the tenant boundary and its canonical binding under one
+    /// revision-fenced transaction:
+    ///
+    /// ```text
+    /// lock/recheck current revision
+    ///   -> validate referenced tenant/realm/organization
+    ///   -> apply boundary and binding writes
+    ///   -> database trigger advances the revision
+    ///   -> commit
+    /// ```
+    ///
+    /// Replaying the identical request succeeds without moving the revision;
+    /// a different request for an already-provisioned tenant fails closed.
+    pub async fn provision_tenant_binding(
+        &self,
+        expected_revision: u64,
+        request: TenantProvisioningRequest,
+    ) -> Result<u64, RepositoryError> {
+        validate_binding_routing_identity(&request.binding.issuer, &request.binding.external_host)?;
+        if request.tenant.id != request.binding.tenant.tenant_id {
+            return Err(RepositoryError::Consistency(
+                "provisioned tenant row id does not match the binding tenant".to_owned(),
+            ));
+        }
+        if request.binding.tenant.realm_id != request.realm.id
+            || request.binding.tenant.organization_id != request.organization.id
+        {
+            return Err(RepositoryError::Consistency(
+                "provisioning request boundary ids do not match the binding context".to_owned(),
+            ));
+        }
+        let mut connection = get_conn(&self.pool)
+            .await
+            .map_err(|_| RepositoryError::Unavailable)?;
+        connection
+            .transaction::<_, DirectoryMutationError, _>(async move |connection| {
+                let current = lock_directory_revision(connection).await?;
+                if current != expected_revision {
+                    return Err(RepositoryError::Conflict.into());
+                }
+
+                upsert_active_tenant_boundary(
+                    connection,
+                    request.tenant.id.as_uuid(),
+                    &request.tenant.slug,
+                    &request.tenant.display_name,
+                )
+                .await?;
+                upsert_active_owned_boundary(
+                    connection,
+                    OwnedBoundaryTable::Realm,
+                    request.realm.id.as_uuid(),
+                    request.binding.tenant.tenant_id.as_uuid(),
+                    &request.realm.slug,
+                    &request.realm.display_name,
+                )
+                .await?;
+                upsert_active_owned_boundary(
+                    connection,
+                    OwnedBoundaryTable::Organization,
+                    request.organization.id.as_uuid(),
+                    request.binding.tenant.tenant_id.as_uuid(),
+                    &request.organization.slug,
+                    &request.organization.display_name,
+                )
+                .await?;
+
+                let inserted = sql_query(
+                    "INSERT INTO tenant_runtime_bindings
+                        (tenant_id, realm_id, organization_id, issuer, external_host)
+                     VALUES ($1, $2, $3, $4, $5)
+                     ON CONFLICT (tenant_id) DO NOTHING",
+                )
+                .bind::<sql_types::Uuid, _>(request.binding.tenant.tenant_id.as_uuid())
+                .bind::<sql_types::Uuid, _>(request.binding.tenant.realm_id.as_uuid())
+                .bind::<sql_types::Uuid, _>(request.binding.tenant.organization_id.as_uuid())
+                .bind::<sql_types::Text, _>(&request.binding.issuer)
+                .bind::<sql_types::Text, _>(&request.binding.external_host)
+                .execute(connection)
+                .await
+                .map_err(map_query_error)?;
+                if inserted == 0 {
+                    let existing = sql_query(
+                        "SELECT tenant_id, realm_id, organization_id, issuer, external_host
+                         FROM tenant_runtime_bindings
+                         WHERE tenant_id = $1
+                         FOR UPDATE",
+                    )
+                    .bind::<sql_types::Uuid, _>(request.binding.tenant.tenant_id.as_uuid())
+                    .get_result::<TenantDirectoryBindingRow>(connection)
+                    .await
+                    .map_err(map_query_error)?;
+                    if !binding_rows_equal(&existing, &request.binding) {
+                        return Err(RepositoryError::Consistency(
+                            "tenant runtime directory is already provisioned with a different binding"
+                                .to_owned(),
+                        ).into());
+                    }
+                }
+                read_directory_revision(connection).await
+            })
+            .await
+            .map_err(RepositoryError::from)
+    }
+
+    /// Updates the canonical issuer/host of one existing binding under the
+    /// revision fence. Replaying identical values is a bounded no-op that
+    /// returns the current revision without advancing it.
+    pub async fn update_tenant_binding(
+        &self,
+        expected_revision: u64,
+        tenant_id: TenantId,
+        issuer: String,
+        external_host: String,
+    ) -> Result<u64, RepositoryError> {
+        validate_binding_routing_identity(&issuer, &external_host)?;
+        let mut connection = get_conn(&self.pool)
+            .await
+            .map_err(|_| RepositoryError::Unavailable)?;
+        connection
+            .transaction::<_, DirectoryMutationError, _>(async move |connection| {
+                let current = lock_directory_revision(connection).await?;
+                if current != expected_revision {
+                    return Err(RepositoryError::Conflict.into());
+                }
+                let existing = sql_query(
+                    "SELECT tenant_id, realm_id, organization_id, issuer, external_host
+                     FROM tenant_runtime_bindings
+                     WHERE tenant_id = $1
+                     FOR UPDATE",
+                )
+                .bind::<sql_types::Uuid, _>(tenant_id.as_uuid())
+                .get_result::<TenantDirectoryBindingRow>(connection)
+                .await
+                .optional()
+                .map_err(map_query_error)?
+                .ok_or(RepositoryError::NotFound)?;
+                if existing.issuer == issuer && existing.external_host == external_host {
+                    return Ok(current);
+                }
+                sql_query(
+                    "UPDATE tenant_runtime_bindings
+                     SET issuer = $2, external_host = $3, updated_at = CURRENT_TIMESTAMP
+                     WHERE tenant_id = $1",
+                )
+                .bind::<sql_types::Uuid, _>(tenant_id.as_uuid())
+                .bind::<sql_types::Text, _>(&issuer)
+                .bind::<sql_types::Text, _>(&external_host)
+                .execute(connection)
+                .await
+                .map_err(map_query_error)?;
+                read_directory_revision(connection).await
+            })
+            .await
+            .map_err(RepositoryError::from)
+    }
+
+    /// Changes one routed tenant's lifecycle status under the revision fence.
+    /// The tenant must currently own a binding, so every accepted transition
+    /// is visible through the directory revision. Replaying the same status is
+    /// a bounded no-op that returns the current revision without advancing it.
+    pub async fn set_tenant_runtime_status(
+        &self,
+        expected_revision: u64,
+        tenant_id: TenantId,
+        status: TenantRuntimeStatus,
+    ) -> Result<u64, RepositoryError> {
+        let mut connection = get_conn(&self.pool)
+            .await
+            .map_err(|_| RepositoryError::Unavailable)?;
+        connection
+            .transaction::<_, DirectoryMutationError, _>(async move |connection| {
+                let current = lock_directory_revision(connection).await?;
+                if current != expected_revision {
+                    return Err(RepositoryError::Conflict.into());
+                }
+                let bound = sql_query(
+                    "SELECT tenant_id FROM tenant_runtime_bindings
+                     WHERE tenant_id = $1
+                     FOR UPDATE",
+                )
+                .bind::<sql_types::Uuid, _>(tenant_id.as_uuid())
+                .get_result::<TenantBindingPresenceRow>(connection)
+                .await
+                .optional()
+                .map_err(map_query_error)?;
+                match bound {
+                    Some(row) if row.tenant_id == tenant_id.as_uuid() => {}
+                    _ => return Err(RepositoryError::NotFound.into()),
+                }
+                let row = sql_query("SELECT status FROM tenants WHERE id = $1 FOR UPDATE")
+                    .bind::<sql_types::Uuid, _>(tenant_id.as_uuid())
+                    .get_result::<BoundaryStatusRow>(connection)
+                    .await
+                    .optional()
+                    .map_err(map_query_error)?
+                    .ok_or(RepositoryError::NotFound)?;
+                if row.status.as_deref() == Some(status.as_str()) {
+                    return Ok(current);
+                }
+                sql_query(
+                    "UPDATE tenants SET status = $2, updated_at = CURRENT_TIMESTAMP WHERE id = $1",
+                )
+                .bind::<sql_types::Uuid, _>(tenant_id.as_uuid())
+                .bind::<sql_types::Text, _>(status.as_str())
+                .execute(connection)
+                .await
+                .map_err(map_query_error)?;
+                read_directory_revision(connection).await
+            })
+            .await
+            .map_err(RepositoryError::from)
+    }
+
+    /// Removes the binding of one routed tenant under the revision fence. A
+    /// tenant already finalized to `deleted` status is an idempotent no-op;
+    /// every other missing binding fails closed.
+    pub async fn remove_tenant_binding(
+        &self,
+        expected_revision: u64,
+        tenant_id: TenantId,
+    ) -> Result<u64, RepositoryError> {
+        let mut connection = get_conn(&self.pool)
+            .await
+            .map_err(|_| RepositoryError::Unavailable)?;
+        connection
+            .transaction::<_, DirectoryMutationError, _>(async move |connection| {
+                let current = lock_directory_revision(connection).await?;
+                if current != expected_revision {
+                    return Err(RepositoryError::Conflict.into());
+                }
+                let deleted = sql_query("DELETE FROM tenant_runtime_bindings WHERE tenant_id = $1")
+                    .bind::<sql_types::Uuid, _>(tenant_id.as_uuid())
+                    .execute(connection)
+                    .await
+                    .map_err(map_query_error)?;
+                if deleted == 0 {
+                    let status = sql_query("SELECT status FROM tenants WHERE id = $1 FOR UPDATE")
+                        .bind::<sql_types::Uuid, _>(tenant_id.as_uuid())
+                        .get_result::<BoundaryStatusRow>(connection)
+                        .await
+                        .optional()
+                        .map_err(map_query_error)?;
+                    let finalized = matches!(
+                        status.as_ref().and_then(|row| row.status.as_deref()),
+                        Some("deleted")
+                    );
+                    return if finalized {
+                        Ok(current)
+                    } else {
+                        Err(RepositoryError::NotFound.into())
+                    };
+                }
+                read_directory_revision(connection).await
+            })
+            .await
+            .map_err(RepositoryError::from)
     }
 }
 

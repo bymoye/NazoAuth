@@ -2996,6 +2996,7 @@ dependencies = [
  "diesel",
  "diesel-async",
  "ed25519-dalek 3.0.0",
+ "nazo-identity",
  "nazo-oauth-server",
  "nazo-oauth-server-postgres",
  "nazo-oauth-server-valkey",

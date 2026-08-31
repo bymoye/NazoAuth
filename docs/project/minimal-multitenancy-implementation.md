@@ -91,7 +91,7 @@ T3 与 T4 只有在 T1/T2 的 tenant、revision、material 和 lifecycle 契约�
 
 | 能力 | 当前事实 | 剩余工作 | 状态 |
 |---|---|---|---|
-| 动态目录 | DB 权威、Valkey 缓存、本机索引已实现 | 真实 DB/Valkey、多进程收敛和完整 mutation 生命周期证据 | PARTIAL |
+| 动态目录 | DB 权威、Valkey 缓存、本机索引已实现；revision-fenced 目录 mutation 原子边界已交付 | 多进程收敛黑盒证据已建立；证书/密钥/凭证等非路由 material 尚未进入 binding snapshot | PARTIAL |
 | 管理权限 | control tenant 与 `admin_level >= 2` 系统管理员；已有跨租户 admin PATCH | 统一 tenant lifecycle 操作、审计 receipt、并发/幂等验收 | PARTIAL |
 | trusted proxy / loopback | 动态 Host 路由已支持 | 与动态 Direct TLS 的同租户一致性矩阵 | PARTIAL |
 | Direct TLS | process-global TLS snapshot 代码仍存在，但目录 runtime 明确拒绝激活 | SNI 时选择完整 tenant TLS context，并绑定 HTTP Host | NOT STARTED |
@@ -165,3 +165,35 @@ T3 与 T4 只有在 T1/T2 的 tenant、revision、material 和 lifecycle 契约�
 - NazoAuthCtl `6c31c7b0`：容器与 systemd 均在启动前执行 tenant-bootstrap，本地 16 项测试与 GitHub 四平台 CI 全部通过。
 
 未完成：真实 Valkey 多进程收敛、动态 Direct TLS、动态 OpenID4VC 和 NazoAuthCtl 端到端部署验证。
+
+## T1 运行时目录与生命周期：已交付证据
+
+实现提交（分支 `feat/dynamic-multitenancy`）在现有 `TenantDirectoryRepository` 上补齐了
+revision-fenced 权威 mutation 原子边界（`provision_tenant_binding`、
+`update_tenant_binding`、`set_tenant_runtime_status`、`remove_tenant_binding`）。
+每个操作在一个 PostgreSQL 事务内完成：`FOR UPDATE` 锁定目录 state 行 →
+比对 expected revision（stale 返回 Conflict）→ 校验 boundary 归属与 active 状态 →
+应用变更 → 触发器推进 revision → 读取新 revision 后提交。
+相同输入重放为有界 no-op（不推进 revision）；不同输入对已初始化目录失败关闭；
+路由身份（canonical host、issuer host 一致性）在写入前按运行时快照同一规则校验。
+
+验证证据（本地 PostgreSQL 18.4 / Valkey 8.1.8 容器，分支 `feat/dynamic-multitenancy`）：
+
+- `cargo fmt --all -- --check`：通过；
+- `cargo clippy --locked --offline -p nazo-postgres -p nazoauth --all-targets -j1 -- -D warnings -A linker_messages`：通过；
+- `cargo test --locked --offline -p nazo-postgres --test tenant_directory -j1`（DATABASE_URL 指向真实实例）：6 通过——
+  provisioning 推进 revision 且幂等重放不推进、stale expected revision 返回 Conflict、
+  update/disable/finalize 幂等语义、unbound/unknown tenant 失败关闭、
+  并发写者经 revision fence 序列化（恰好一个成功）、受限 runtime 角色无法直写 revision state
+  （trigger 为唯一写路径）；
+- `cargo test --locked --offline -p nazoauth --test tenant_directory_convergence -j1`
+  （真实 PG + Valkey + 两个真实 `nazoauth server` 进程 + migrate/tenant-bootstrap 命令链）：1 通过，37.9s——
+  两进程在窗口内收敛新增（A 3.5–4.5s / B 亚秒）、host 更新旧值失败关闭、
+  Valkey 代理完全中断时 5 秒 DB 对账仍送达 mutation（A ~6s）、
+  高 revision 毒化快照经 DB 权威修复、disable 后两进程停止路由且 baseline/system tenant 可观测状态不变；
+- 既有 13 个 refresher 单元测试（stale/equal/ahead、candidate 失败保留 last-good、
+  Arc 复用、in-flight 请求）与本改动共存通过。
+
+未验证边界：目录 mutation 的 HTTP/控制器入口（T2 交付）； Valkey 故障注入期间的真实多实例
+安全矩阵（CI `conformance-security` 后续按 exact-head 复核）；按 tenant 的非路由 material
+（证书/OpenID4VC）revision 绑定（T3/T4 交付）。
