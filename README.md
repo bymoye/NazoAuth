@@ -24,30 +24,6 @@ tracked in the future roadmap rather than advertised as a current default
 capability. It uses PostgreSQL for durable state and Valkey for short-lived
 protocol state.
 
-## OpenAI Build Week 2026
-
-NazoAuth predates OpenAI Build Week. The hackathon submission covers only the
-work completed after the submission period opened at
-`2026-07-13T16:00:00Z`. The last pre-period commit is
-[`ef7df3e`](https://github.com/nazozero/NazoAuth/commit/ef7df3e4606953002bb768a66a1897a06b42a332),
-and the complete review range is
-[`ef7df3e..main`](https://github.com/nazozero/NazoAuth/compare/ef7df3e4606953002bb768a66a1897a06b42a332...main).
-
-During the submission period, Codex with GPT-5.6 helped turn the existing
-server into a modular Rust workspace, implement OpenID4VC Final issuer and
-verifier roles, add FAPI-CIBA mTLS/ping and RFC 9967 SCIM security-event
-delivery, and harden the browser client and onboarding flow. Codex
-accelerated repository audits, implementation, tests, specification
-cross-checks, CI diagnosis, and deployment verification. The maintainer chose
-the product and security boundaries, required standards-first behavior instead
-of external-client shortcuts, reviewed the changes, and controlled deployment
-and merge decisions.
-
-See the [Build Week engineering record](docs/project/openai-build-week-2026.md)
-for the before/after boundary, dated pull requests, measured change volume,
-Codex collaboration details, setup instructions, and a no-rebuild public test
-path. The live demo is available at <https://auth.nazo.run/ui/auth>.
-
 ## Status
 
 | Item | Value |
@@ -251,7 +227,6 @@ See [docs/project/roadmap.md](docs/project/roadmap.md) for the current scope rec
 | --- | --- |
 | Documentation index | [docs/README.md](docs/README.md) |
 | Workspace architecture | [docs/project/architecture.md](docs/project/architecture.md) |
-| OpenAI Build Week 2026 engineering record | [docs/project/openai-build-week-2026.md](docs/project/openai-build-week-2026.md) |
 | Configuration | [docs/operations/configuration.md](docs/operations/configuration.md) |
 | Deployment | [docs/operations/deployment.md](docs/operations/deployment.md) |
 | Chinese deployment guide | [docs/operations/deployment.zh-CN.md](docs/operations/deployment.zh-CN.md) |

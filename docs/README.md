@@ -15,7 +15,6 @@ set can be scanned from one place.
 | Change history | [../CHANGELOG.md](../CHANGELOG.md) |
 | Current scope and roadmap | [project/roadmap.md](project/roadmap.md) |
 | Workspace and runtime-module architecture | [project/architecture.md](project/architecture.md) |
-| OpenAI Build Week 2026 engineering record | [project/openai-build-week-2026.md](project/openai-build-week-2026.md) |
 | Deployment | [operations/deployment.md](operations/deployment.md) |
 | Chinese deployment | [operations/deployment.zh-CN.md](operations/deployment.zh-CN.md) |
 | Fresh production activation | [operations/fresh-production-activation.md](operations/fresh-production-activation.md) |
