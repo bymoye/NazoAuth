@@ -106,20 +106,44 @@ pub async fn run(
                 operator_persistence.as_ref(),
             )
             .await?;
+            ensure_system_tenant_material(&config, operator_persistence.as_ref()).await?;
             Ok(())
         }
         Command::TenantBootstrap => {
             let config = ConfigSource::load_for_migrations()?;
             let initial_binding = Settings::initial_tenant_directory_binding(&config)?;
-            persistence
-                .operator_persistence(&config)
-                .await?
+            let operator_persistence = persistence.operator_persistence(&config).await?;
+            operator_persistence
                 .initialize_tenant_directory(initial_binding)
                 .await?;
+            ensure_system_tenant_material(&config, operator_persistence.as_ref()).await?;
             Ok(())
         }
         Command::AdminProvision => run_admin_provision(persistence.as_ref()).await,
     }
+}
+
+async fn ensure_system_tenant_material(
+    config: &ConfigSource,
+    persistence: &dyn crate::operator_task::OperatorPersistence,
+) -> anyhow::Result<()> {
+    let system_tenant = nazo_identity::TenantContext::default_system().tenant_id;
+    let directory = persistence.tenant_directory().load_active().await?;
+    let binding = directory
+        .tenants
+        .iter()
+        .find(|binding| binding.tenant.tenant_id == system_tenant)
+        .ok_or_else(|| anyhow::anyhow!("tenant directory has no active system tenant"))?;
+    let settings = Settings::from_directory_binding(config, binding)?;
+    if settings.openid4vc.signing_certificate_chain_file.is_some() {
+        crate::keyctl::operator_generate_local_for_tenant(
+            binding,
+            "ES256",
+            &["credential".to_owned(), "presentation_request".to_owned()],
+        )
+        .await?;
+    }
+    Ok(())
 }
 
 async fn run_admin_provision(launcher: &dyn PersistenceLauncher) -> anyhow::Result<()> {
