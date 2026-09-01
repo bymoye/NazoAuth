@@ -76,6 +76,7 @@ fn refresh_interval(prepublish_window: chrono::Duration) -> Duration {
 
 pub(crate) async fn load_or_create_keyset(settings: &KeySettings) -> anyhow::Result<LoadedKeyset> {
     tokio::fs::create_dir_all(&settings.keys_dir).await?;
+    let _lock = crate::lock::acquire_keyset_lock(&settings.keys_dir).await?;
     let keyset_path = settings.keys_dir.join("keyset.json");
     if try_load_keyset(settings, &keyset_path).await?.is_some() {
         maintain_keyset_lifecycle(settings, &keyset_path).await?;

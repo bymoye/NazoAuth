@@ -78,6 +78,7 @@ pub(crate) async fn register_local_key(
     }
     let algorithm = crate::serialization::signing_algorithm_name(registration.algorithm)
         .ok_or_else(|| anyhow!("unsupported signing alg"))?;
+    let _lock = crate::lock::acquire_keyset_lock(&settings.keys_dir).await?;
     let path = settings.keys_dir.join("keyset.json");
     let mut keyset = load_keyset_json(settings).await?;
     for key in keyset_keys(&keyset)? {

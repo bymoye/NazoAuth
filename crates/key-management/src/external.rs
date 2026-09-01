@@ -534,6 +534,7 @@ pub(crate) async fn register_external_key(
     let algorithm = signing_algorithm_name(registration.algorithm)
         .ok_or_else(|| anyhow::anyhow!("unsupported signing alg"))?;
     let public_jwk = registration.public_jwk;
+    let _lock = crate::lock::acquire_keyset_lock(&settings.keys_dir).await?;
     let path = settings.keys_dir.join("keyset.json");
     let creating_keyset = !path.exists();
     let mut keyset = if creating_keyset {

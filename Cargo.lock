@@ -2672,6 +2672,7 @@ dependencies = [
  "chrono",
  "der 0.8.1",
  "ed25519-dalek 3.0.0",
+ "fs2",
  "hmac 0.13.0",
  "jsonwebtoken",
  "nazo-auth",
