@@ -86,6 +86,8 @@ pub trait OperatorPersistence: Send + Sync {
         &self,
     ) -> Arc<dyn nazo_persistence::directory_control::TenantDirectoryControlPort>;
 
+    fn tenant_directory(&self) -> Arc<dyn nazo_persistence::TenantDirectoryStore>;
+
     fn run_migrations(&self) -> OperatorBackendFuture<'_, bool>;
 
     fn initialize_tenant_directory(

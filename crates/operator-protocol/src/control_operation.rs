@@ -56,9 +56,9 @@ use crate::wire::{
 use crate::{MAX_COMPACT_JWS_BYTES, MAX_TENANT_RESOURCE_IDENTITIES, ProtocolError};
 
 /// Wire schema tag for [`ControlOperation`].
-pub const CONTROL_OPERATION_SCHEMA: u32 = 2;
+pub const CONTROL_OPERATION_SCHEMA: u32 = 3;
 /// Wire schema tag for [`ControlResult`].
-pub const CONTROL_RESULT_SCHEMA: u32 = 1;
+pub const CONTROL_RESULT_SCHEMA: u32 = 2;
 /// Fixed JWS media type for signed control operations.  Not caller-chosen.
 pub const CONTROL_OPERATION_JWS_TYPE: &str = "nazoauth-control-operation+jwt";
 /// Maximum canonical [`ControlOperation`] payload size in bytes.
@@ -114,6 +114,11 @@ pub enum ControlOperationPayload {
     KeysList,
     KeysValidate,
     KeysGenerateLocal {
+        alg: String,
+        purposes: Vec<String>,
+    },
+    TenantKeysGenerateLocal {
+        tenant_id: String,
         alg: String,
         purposes: Vec<String>,
     },
@@ -230,6 +235,19 @@ impl<'de> Deserialize<'de> for ControlOperationPayload {
                 let purposes = take_string_vec_member(&mut members, "purposes")
                     .map_err(serde::de::Error::custom)?;
                 ControlOperationPayload::KeysGenerateLocal { alg, purposes }
+            }
+            "tenant-keys-generate-local" => {
+                let tenant_id = take_string_member(&mut members, "tenant_id")
+                    .map_err(serde::de::Error::custom)?;
+                let alg =
+                    take_string_member(&mut members, "alg").map_err(serde::de::Error::custom)?;
+                let purposes = take_string_vec_member(&mut members, "purposes")
+                    .map_err(serde::de::Error::custom)?;
+                ControlOperationPayload::TenantKeysGenerateLocal {
+                    tenant_id,
+                    alg,
+                    purposes,
+                }
             }
             "keys-register-external" => {
                 let kid =
@@ -538,6 +556,15 @@ pub struct ControlResult {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum ControlResultData {
+    /// Public receipt for a freshly generated tenant-local signing key. The
+    /// certificate bundle contains public material only; private key bytes
+    /// never leave the managed tenant key directory.
+    TenantKeyGenerated {
+        tenant_id: String,
+        kid: String,
+        keyset_revision: String,
+        certificate_chain_pem: String,
+    },
     /// Authoritative outcome of an applied tenant-resource change set.
     TenantResourceApply {
         revision: u64,
@@ -599,6 +626,15 @@ impl<'de> Deserialize<'de> for ControlResultData {
         };
         let kind = take_string_member(&mut members, "kind").map_err(serde::de::Error::custom)?;
         let data = match kind.as_str() {
+            "tenant-key-generated" => ControlResultData::TenantKeyGenerated {
+                tenant_id: take_string_member(&mut members, "tenant_id")
+                    .map_err(serde::de::Error::custom)?,
+                kid: take_string_member(&mut members, "kid").map_err(serde::de::Error::custom)?,
+                keyset_revision: take_string_member(&mut members, "keyset_revision")
+                    .map_err(serde::de::Error::custom)?,
+                certificate_chain_pem: take_string_member(&mut members, "certificate_chain_pem")
+                    .map_err(serde::de::Error::custom)?,
+            },
             "tenant-resource-apply" | "tenant-resource-revoke" | "tenant-resource-enumerate" => {
                 let revision = match members.remove("revision") {
                     Some(serde_json::Value::Number(number)) => {
@@ -779,13 +815,15 @@ fn validate_control_payload(payload: &ControlOperationPayload) -> Result<(), Pro
         | ControlOperationPayload::KeysList
         | ControlOperationPayload::KeysValidate => {}
         ControlOperationPayload::KeysGenerateLocal { alg, purposes } => {
-            validate_identifier(alg)?;
-            if purposes.is_empty() || purposes.len() > 8 {
-                return Err(ProtocolError::Policy("invalid signing purposes"));
-            }
-            for purpose in purposes {
-                validate_identifier(purpose)?;
-            }
+            validate_generate_local_fields(alg, purposes)?;
+        }
+        ControlOperationPayload::TenantKeysGenerateLocal {
+            tenant_id,
+            alg,
+            purposes,
+        } => {
+            validate_uuid(tenant_id)?;
+            validate_generate_local_fields(alg, purposes)?;
         }
         ControlOperationPayload::KeysRegisterExternal {
             kid,
@@ -889,6 +927,17 @@ fn validate_control_payload(payload: &ControlOperationPayload) -> Result<(), Pro
             tenant_id,
         } => validate_uuid(tenant_id)?,
         ControlOperationPayload::TenantDirectoryDescribe => {}
+    }
+    Ok(())
+}
+
+fn validate_generate_local_fields(alg: &str, purposes: &[String]) -> Result<(), ProtocolError> {
+    validate_identifier(alg)?;
+    if purposes.is_empty() || purposes.len() > 8 {
+        return Err(ProtocolError::Policy("invalid signing purposes"));
+    }
+    for purpose in purposes {
+        validate_identifier(purpose)?;
     }
     Ok(())
 }
@@ -1311,6 +1360,26 @@ fn validate_control_result_data(data: &ControlResultData) -> Result<(), Protocol
         return Ok(());
     }
     let (resources, resource_mappings, resource_manifest_sha256, is_apply) = match data {
+        ControlResultData::TenantKeyGenerated {
+            tenant_id,
+            kid,
+            keyset_revision,
+            certificate_chain_pem,
+        } => {
+            validate_uuid(tenant_id)?;
+            validate_file_identifier(kid)?;
+            validate_lower_hex(keyset_revision, 64)?;
+            if certificate_chain_pem.is_empty()
+                || certificate_chain_pem.len() > 32 * 1024
+                || !certificate_chain_pem.starts_with("-----BEGIN CERTIFICATE-----\n")
+                || !certificate_chain_pem.ends_with("-----END CERTIFICATE-----\n")
+            {
+                return Err(ProtocolError::Policy(
+                    "invalid tenant key certificate chain",
+                ));
+            }
+            return Ok(());
+        }
         ControlResultData::TenantDirectoryMutation {
             action,
             tenant_id,

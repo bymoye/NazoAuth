@@ -279,8 +279,22 @@ impl Settings {
             .unwrap_or_default();
         let _ = mfa_totp_key_ring(config)?;
         validate_optional_token_issuance_response_key_config(config)?;
-        let enable_openid4vci_issuer = config.bool("ENABLE_OPENID4VCI_ISSUER", false)?;
-        let enable_openid4vp_verifier = config.bool("ENABLE_OPENID4VP_VERIFIER", false)?;
+        let enable_openid4vci_issuer = if tenant_specific {
+            config.bool(
+                "ENABLE_DIRECTORY_OPENID4VCI_ISSUER",
+                config.bool("ENABLE_OPENID4VCI_ISSUER", false)?,
+            )?
+        } else {
+            config.bool("ENABLE_OPENID4VCI_ISSUER", false)?
+        };
+        let enable_openid4vp_verifier = if tenant_specific {
+            config.bool(
+                "ENABLE_DIRECTORY_OPENID4VP_VERIFIER",
+                config.bool("ENABLE_OPENID4VP_VERIFIER", false)?,
+            )?
+        } else {
+            config.bool("ENABLE_OPENID4VP_VERIFIER", false)?
+        };
         let openid4vc_enabled = enable_openid4vci_issuer || enable_openid4vp_verifier;
         let mut openid4vc_data_encryption_key = config
             .optional_string("OPENID4VC_DATA_ENCRYPTION_KEY")
@@ -377,7 +391,8 @@ impl Settings {
             30,
             "OPENID4VC_REVOCATION_RELOAD_INTERVAL_SECONDS",
         )?;
-        if openid4vc_revocation_policy != Openid4vcRevocationPolicy::Disabled
+        if openid4vc_enabled
+            && openid4vc_revocation_policy != Openid4vcRevocationPolicy::Disabled
             && openid4vc_revocation_snapshot_file.is_none()
             && !tenant_specific
         {
@@ -418,7 +433,8 @@ impl Settings {
                 "OPENID4VC_CLIENT_ATTESTATION_ISSUER requires OPENID4VC_CLIENT_ATTESTATION_JWKS_JSON"
             );
         }
-        if enable_openid4vp_verifier && wallet_authorization_origins.is_empty() {
+        if enable_openid4vp_verifier && wallet_authorization_origins.is_empty() && !tenant_specific
+        {
             bail!(
                 "OPENID4VP_WALLET_AUTHORIZATION_ORIGINS is required when the VP verifier is enabled"
             );
@@ -428,8 +444,18 @@ impl Settings {
                 "OPENID4VP_VERIFIER_MANAGEMENT_TOKEN is required when the VP verifier is enabled"
             );
         }
-        let dynamic_client_registration_initial_access_token =
+        let mut dynamic_client_registration_initial_access_token =
             config.optional_string("DYNAMIC_CLIENT_REGISTRATION_INITIAL_ACCESS_TOKEN");
+        if tenant_specific {
+            dynamic_client_registration_initial_access_token =
+                dynamic_client_registration_initial_access_token.map(|root| {
+                    derive_tenant_management_token(
+                        root,
+                        tenant.context.tenant_id,
+                        b"nazoauth/dynamic-client-registration/initial-access/v1",
+                    )
+                });
+        }
         let email_code_dev_response_enabled =
             config.bool("EMAIL_CODE_DEV_RESPONSE_ENABLED", false)?;
         if email_code_dev_response_enabled

@@ -103,17 +103,17 @@ fn golden_canonical_bytes_and_request_hash_are_stable() {
     let bytes = canonical_control_operation_bytes(&operation).unwrap();
     assert_eq!(
         std::str::from_utf8(&bytes).unwrap(),
-        "{\"config_revision\":\"config-revision-1\",\"deployment_id\":\"deployment-1\",\"kid\":\"43q81579CNuUUYqQOVL_6fivfotGhLY1kWMc746Iccg\",\"operation\":{\"name\":\"migrate-apply\"},\"operation_id\":\"019c8ca2-30a6-7000-8000-000000000005\",\"schema\":2}",
+        "{\"config_revision\":\"config-revision-1\",\"deployment_id\":\"deployment-1\",\"kid\":\"43q81579CNuUUYqQOVL_6fivfotGhLY1kWMc746Iccg\",\"operation\":{\"name\":\"migrate-apply\"},\"operation_id\":\"019c8ca2-30a6-7000-8000-000000000005\",\"schema\":3}",
     );
     assert_eq!(
         control_operation_request_hash(&operation).unwrap(),
-        "0ff7bc5850c4bde34889ddba6973889269bf15cab7e28bf9a28f7a27db7e5c23",
+        "8261e7f3ece52ee7b063689c98ead4265f2f4e5e5b40c09b2fe3909af31eceff",
     );
     // Ed25519 is deterministic, so the full compact JWS is reproducible too.
     let compact = crate::sign_control_operation(&operation, &controller_key()).unwrap();
     assert_eq!(
         compact,
-        "eyJhbGciOiJFZERTQSIsImtpZCI6IjQzcTgxNTc5Q051VVVZcVFPVkxfNmZpdmZvdEdoTFkxa1dNYzc0NkljY2ciLCJ0eXAiOiJuYXpvYXV0aC1jb250cm9sLW9wZXJhdGlvbitqd3QifQ.eyJjb25maWdfcmV2aXNpb24iOiJjb25maWctcmV2aXNpb24tMSIsImRlcGxveW1lbnRfaWQiOiJkZXBsb3ltZW50LTEiLCJraWQiOiI0M3E4MTU3OUNOdVVVWXFRT1ZMXzZmaXZmb3RHaExZMWtXTWM3NDZJY2NnIiwib3BlcmF0aW9uIjp7Im5hbWUiOiJtaWdyYXRlLWFwcGx5In0sIm9wZXJhdGlvbl9pZCI6IjAxOWM4Y2EyLTMwYTYtNzAwMC04MDAwLTAwMDAwMDAwMDAwNSIsInNjaGVtYSI6Mn0.OKo8WNyoIrZcgxxXJR9qDEwU8xu_NV1cFL_B66XxcDiSZPeWngYE_HX6cbjqY8xYIgGW7RjubUTbyeRZOtXOBg"
+        "eyJhbGciOiJFZERTQSIsImtpZCI6IjQzcTgxNTc5Q051VVVZcVFPVkxfNmZpdmZvdEdoTFkxa1dNYzc0NkljY2ciLCJ0eXAiOiJuYXpvYXV0aC1jb250cm9sLW9wZXJhdGlvbitqd3QifQ.eyJjb25maWdfcmV2aXNpb24iOiJjb25maWctcmV2aXNpb24tMSIsImRlcGxveW1lbnRfaWQiOiJkZXBsb3ltZW50LTEiLCJraWQiOiI0M3E4MTU3OUNOdVVVWXFRT1ZMXzZmaXZmb3RHaExZMWtXTWM3NDZJY2NnIiwib3BlcmF0aW9uIjp7Im5hbWUiOiJtaWdyYXRlLWFwcGx5In0sIm9wZXJhdGlvbl9pZCI6IjAxOWM4Y2EyLTMwYTYtNzAwMC04MDAwLTAwMDAwMDAwMDAwNSIsInNjaGVtYSI6M30.__QjcrIzfNFJTfMmihviVhgwtlKJLsTPad71ZWHrpJmh_u99c4Qh0J9BphS1CedkdPLKRUFjDD6BCAcRFHYCBA"
     );
 }
 
@@ -139,7 +139,10 @@ fn two_encodings_of_one_logical_request_produce_identical_bytes() {
     );
     root.insert("kid".to_owned(), serde_json::json!(operation.kid));
     root.insert("operation_id".to_owned(), serde_json::json!(OPERATION_ID));
-    root.insert("schema".to_owned(), serde_json::json!(2));
+    root.insert(
+        "schema".to_owned(),
+        serde_json::json!(CONTROL_OPERATION_SCHEMA),
+    );
     let reordered = canonicalize_json_value(serde_json::Value::Object(root));
     assert_eq!(
         serde_json::to_vec(&reordered).unwrap(),
@@ -150,7 +153,7 @@ fn two_encodings_of_one_logical_request_produce_identical_bytes() {
     // Whitespace layout and \uXXXX escape spelling are equally irrelevant.
     let pretty = format!(
         r#"{{
-            "schema": 2,
+            "schema": {CONTROL_OPERATION_SCHEMA},
             "operation_id": "{OPERATION_ID}",
             "kid": "{}",
             "deployment_id": "deployment-1",
@@ -867,4 +870,28 @@ fn oversize_canonical_payloads_are_refused() {
         Err(ProtocolError::TooLarge)
     ));
     assert!(control_operation_request_hash(&operation).is_err());
+}
+
+#[test]
+fn tenant_key_generation_is_tenant_bound_and_returns_public_material_only() {
+    let mut operation = operation();
+    operation.operation = ControlOperationPayload::TenantKeysGenerateLocal {
+        tenant_id: "00000000-0000-0000-0000-000000000001".to_owned(),
+        alg: "ES256".to_owned(),
+        purposes: vec!["credential".to_owned(), "presentation_request".to_owned()],
+    };
+    validate_control_operation(&operation).unwrap();
+    let encoded = serde_json::to_vec(&operation.operation).unwrap();
+    let decoded: ControlOperationPayload = serde_json::from_slice(&encoded).unwrap();
+    assert_eq!(decoded, operation.operation);
+
+    let mut result = result_entry();
+    result.result = Some(ControlResultData::TenantKeyGenerated {
+        tenant_id: "00000000-0000-0000-0000-000000000001".to_owned(),
+        kid: "tenant-key".to_owned(),
+        keyset_revision: "a".repeat(64),
+        certificate_chain_pem:
+            "-----BEGIN CERTIFICATE-----\npublic-only\n-----END CERTIFICATE-----\n".to_owned(),
+    });
+    validate_control_result(&result).unwrap();
 }

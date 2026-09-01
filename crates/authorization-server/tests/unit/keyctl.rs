@@ -177,6 +177,7 @@ async fn credential_key_bootstrap_creates_a_matching_idempotent_certificate_chai
     ));
     let certificate = directory.join("openid4vc-certificate-bundle.pem");
     let anchors = certificate.clone();
+    let revocation_snapshot = directory.join("revocation-snapshot.json");
     let config = ConfigSource::from_owned_pairs_for_test([
         ("JWK_KEYS_DIR".to_owned(), directory.display().to_string()),
         (
@@ -205,6 +206,7 @@ async fn credential_key_bootstrap_creates_a_matching_idempotent_certificate_chai
     let paths = Openid4vcCertificatePaths {
         chain: certificate.clone(),
         anchors: anchors.clone(),
+        revocation_snapshot: Some(revocation_snapshot.clone()),
         hostname: "auth.example".to_owned(),
     };
     let (kid, first_revision) =
@@ -246,6 +248,12 @@ async fn credential_key_bootstrap_creates_a_matching_idempotent_certificate_chai
         first_certificate
     );
     assert_eq!(tokio::fs::read(&anchors).await.unwrap(), first_certificate);
+    let snapshot = nazo_digital_credentials::CertificateRevocationSnapshot::from_json(
+        &tokio::fs::read(&revocation_snapshot).await.unwrap(),
+    )
+    .unwrap();
+    snapshot.validate_freshness_at(chrono::Utc::now()).unwrap();
+    assert!(snapshot.entries.is_empty());
 
     tokio::fs::write(&certificate, b"not-a-certificate")
         .await
@@ -289,6 +297,7 @@ async fn openid4vc_certificate_paths_and_existing_bundle_fail_closed() {
     let paths = Openid4vcCertificatePaths {
         chain: certificate.clone(),
         anchors: certificate.clone(),
+        revocation_snapshot: None,
         hostname: "auth.example".to_owned(),
     };
     let options = parse_generate_local("ES256", &["credential".to_owned()]).unwrap();
@@ -308,6 +317,7 @@ async fn openid4vc_certificate_paths_and_existing_bundle_fail_closed() {
     let split_paths = Openid4vcCertificatePaths {
         chain: directory.join("chain.pem"),
         anchors: directory.join("anchors.pem"),
+        revocation_snapshot: None,
         hostname: "auth.example".to_owned(),
     };
     assert!(
@@ -352,6 +362,7 @@ async fn openid4vc_certificate_paths_and_existing_bundle_fail_closed() {
     let wrong_hostname = Openid4vcCertificatePaths {
         chain: certificate.clone(),
         anchors: certificate.clone(),
+        revocation_snapshot: None,
         hostname: "other.example".to_owned(),
     };
     assert!(

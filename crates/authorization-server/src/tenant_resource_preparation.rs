@@ -141,10 +141,11 @@ pub(crate) struct ControlPlaneTenantResources {
 /// backend-specific client repository behind the semantic port.
 pub(crate) async fn control_plane_resources(
     clients: Arc<dyn nazo_auth::AdminClientRepositoryPort>,
+    binding: &nazo_identity::TenantDirectoryBinding,
 ) -> anyhow::Result<ControlPlaneTenantResources> {
     let config = crate::config::ConfigSource::load()
         .context("tenant-resource operations require the application configuration")?;
-    let settings = Settings::from_config(&config)
+    let settings = Settings::from_directory_binding(&config, binding)
         .context("tenant-resource operations require valid application settings")?;
     let keyset = nazo_key_management::KeyManager::load_or_create(settings.key_settings()).await?;
     let service = ServerAdminClientService::new(

@@ -178,8 +178,8 @@ fn directory_openid4vc_derives_tenant_secrets_and_deterministic_material_paths()
         ("TRUSTED_PROXY_CIDRS", "127.0.0.1/32"),
         ("MTLS_CERTIFICATE_SOURCE", "rfc9440"),
         ("CLIENT_SECRET_PEPPER", "0123456789abcdef0123456789abcdef"),
-        ("ENABLE_OPENID4VCI_ISSUER", "true"),
-        ("ENABLE_OPENID4VP_VERIFIER", "true"),
+        ("ENABLE_DIRECTORY_OPENID4VCI_ISSUER", "true"),
+        ("ENABLE_DIRECTORY_OPENID4VP_VERIFIER", "true"),
         (
             "OPENID4VC_DATA_ENCRYPTION_KEY",
             "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
@@ -202,6 +202,9 @@ fn directory_openid4vc_derives_tenant_secrets_and_deterministic_material_paths()
         ),
         ("OPENID4VC_REVOCATION_POLICY", "required"),
     ]);
+    let system = Settings::from_config(&config).unwrap();
+    assert!(!system.modules.enable_openid4vci_issuer);
+    assert!(!system.modules.enable_openid4vp_verifier);
     let first_binding = directory_binding("https://one.example", "one.example");
     let mut second_binding = directory_binding("https://two.example", "two.example");
     second_binding.tenant.tenant_id = nazo_identity::TenantId::new(
@@ -210,6 +213,9 @@ fn directory_openid4vc_derives_tenant_secrets_and_deterministic_material_paths()
     .unwrap();
     let first = Settings::from_directory_binding(&config, &first_binding).unwrap();
     let second = Settings::from_directory_binding(&config, &second_binding).unwrap();
+
+    assert!(first.modules.enable_openid4vci_issuer);
+    assert!(first.modules.enable_openid4vp_verifier);
 
     assert_ne!(
         first.openid4vc.data_encryption_key,

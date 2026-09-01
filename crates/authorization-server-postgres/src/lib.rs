@@ -313,6 +313,10 @@ impl OperatorPersistence for PostgresOperatorPersistence {
         Arc::new(TenantDirectoryControlRepository::new(self.pool.clone()))
     }
 
+    fn tenant_directory(&self) -> Arc<dyn nazo_persistence::TenantDirectoryStore> {
+        Arc::new(TenantDirectoryRepository::new(self.pool.clone()))
+    }
+
     fn run_migrations(&self) -> OperatorBackendFuture<'_, bool> {
         Box::pin(async move {
             let runtime_role = std::env::var(MIGRATION_RUNTIME_ROLE_ENV)

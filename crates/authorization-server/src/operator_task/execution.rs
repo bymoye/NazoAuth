@@ -68,6 +68,7 @@ pub(super) fn resume_allowed(operation: &ControlOperationPayload) -> bool {
         ControlOperationPayload::MigrateApply => true,
         ControlOperationPayload::KeysList | ControlOperationPayload::KeysValidate => true,
         ControlOperationPayload::KeysGenerateLocal { .. } => false,
+        ControlOperationPayload::TenantKeysGenerateLocal { .. } => true,
         ControlOperationPayload::KeysRegisterExternal { .. } => true,
         ControlOperationPayload::TenantResourceApply { .. }
         | ControlOperationPayload::TenantResourceEnumerate { .. }
@@ -112,6 +113,22 @@ pub(super) async fn execute_inner(
             Ok(crate::keyctl::operator_generate_local(alg, purposes)
                 .await
                 .map(|_| None)?)
+        }
+        ControlOperationPayload::TenantKeysGenerateLocal {
+            tenant_id,
+            alg,
+            purposes,
+        } => {
+            let persistence = require_persistence(persistence)?;
+            let binding = active_tenant_binding(persistence, tenant_id).await?;
+            let (kid, keyset_revision, certificate_chain_pem) =
+                crate::keyctl::operator_generate_local_for_tenant(&binding, alg, purposes).await?;
+            Ok(Some(ControlResultData::TenantKeyGenerated {
+                tenant_id: tenant_id.clone(),
+                kid,
+                keyset_revision,
+                certificate_chain_pem,
+            }))
         }
         ControlOperationPayload::KeysRegisterExternal {
             kid,
@@ -332,16 +349,26 @@ pub(super) async fn execute_inner(
             tenant_id,
         } => {
             let persistence = require_persistence(persistence)?;
-            run_directory_control_operation(
+            let tenant_id = parse_control_tenant_id(tenant_id)?;
+            let outcome = run_directory_control_operation(
                 DirectoryControlAction::Finalize {
                     expected_revision: *expected_revision,
-                    tenant_id: parse_control_tenant_id(tenant_id)?,
+                    tenant_id,
                 },
                 context,
                 persistence,
             )
-            .await
-            .map(Some)
+            .await?;
+            crate::keyctl::remove_tenant_material(tenant_id)
+                .await
+                .map_err(|error| {
+                    SideEffectError::Retryable(
+                        error.context(
+                            "tenant directory finalized but local material cleanup failed",
+                        ),
+                    )
+                })?;
+            Ok(Some(outcome))
         }
         ControlOperationPayload::TenantDirectoryDescribe => {
             let persistence = require_persistence(persistence)?;
@@ -511,14 +538,17 @@ async fn run_tenant_resource_operation(
     context: &ExecutionContext<'_>,
     persistence: &dyn OperatorPersistence,
 ) -> Result<ControlTenantResourceOutcome, SideEffectError> {
-    let composed =
-        crate::tenant_resource_preparation::control_plane_resources(persistence.admin_clients())
-            .await
-            .map_err(|error| {
-                SideEffectError::Retryable(
-                    error.context("tenant-resource registration policy bridge is unavailable"),
-                )
-            })?;
+    let binding = active_tenant_binding(persistence, tenant_id).await?;
+    let composed = crate::tenant_resource_preparation::control_plane_resources(
+        persistence.admin_clients(),
+        &binding,
+    )
+    .await
+    .map_err(|error| {
+        SideEffectError::Retryable(
+            error.context("tenant-resource registration policy bridge is unavailable"),
+        )
+    })?;
     let executor = persistence.tenant_resource_executor(
         composed.tenant,
         composed.data_encryption_key,
@@ -542,6 +572,48 @@ async fn run_tenant_resource_operation(
         })
         .await
         .map_err(map_engine_error)
+}
+
+async fn active_tenant_binding(
+    persistence: &dyn OperatorPersistence,
+    tenant_id: &str,
+) -> Result<nazo_identity::TenantDirectoryBinding, SideEffectError> {
+    let tenant_id = parse_control_tenant_id(tenant_id)?;
+    let snapshot = persistence
+        .tenant_directory()
+        .load_active()
+        .await
+        .map_err(map_tenant_directory_read_error)?;
+    snapshot
+        .tenants
+        .into_iter()
+        .find(|binding| binding.tenant.tenant_id == tenant_id)
+        .ok_or_else(|| {
+            SideEffectError::Terminal(anyhow::anyhow!(
+                "operation requires an active tenant binding"
+            ))
+        })
+}
+
+fn map_tenant_directory_read_error(
+    error: nazo_identity::ports::RepositoryError,
+) -> SideEffectError {
+    match error {
+        nazo_identity::ports::RepositoryError::Conflict => SideEffectError::Terminal(
+            anyhow::anyhow!("tenant directory read conflicted with durable authority"),
+        ),
+        nazo_identity::ports::RepositoryError::Consistency(message) => {
+            SideEffectError::Terminal(anyhow::anyhow!(message))
+        }
+        nazo_identity::ports::RepositoryError::Unavailable
+        | nazo_identity::ports::RepositoryError::Unexpected(_) => SideEffectError::Retryable(
+            anyhow::anyhow!("tenant directory persistence is unavailable"),
+        ),
+        nazo_identity::ports::RepositoryError::NotFound
+        | nazo_identity::ports::RepositoryError::AlreadyProcessed => SideEffectError::Terminal(
+            anyhow::anyhow!("tenant directory rejected the resource operation"),
+        ),
+    }
 }
 
 pub(super) fn map_engine_error(error: TenantResourceExecutorError) -> SideEffectError {
