@@ -5,7 +5,7 @@ use actix_web::{
     Error, HttpResponse,
     body::{EitherBody, MessageBody},
     dev::{ServiceRequest, ServiceResponse},
-    middleware::{Next, from_fn},
+    middleware::{Condition, Next, from_fn},
     web,
 };
 use nazo_http_actix::{
@@ -169,6 +169,7 @@ pub(crate) fn configure(
         settings,
         perf_metrics_enabled,
         cors::CorsPolicy::from_settings(settings),
+        false,
     );
 }
 
@@ -183,6 +184,7 @@ pub(super) fn configure_dynamic(
         settings,
         perf_metrics_enabled,
         cors::CorsPolicy::dynamic(registry),
+        true,
     );
 }
 
@@ -191,6 +193,7 @@ fn configure_with_cors(
     settings: &Settings,
     perf_metrics_enabled: bool,
     cors_policy: cors::CorsPolicy<'_>,
+    dynamic_tenant_routes: bool,
 ) {
     let register_openid4vci_routes = settings.modules.register_openid4vci_routes;
     // Actix scopes consume every request under their prefix. Register the
@@ -213,7 +216,10 @@ fn configure_with_cors(
     let well_known = if register_openid4vci_routes {
         well_known.service(
             web::resource("/openid-credential-issuer")
-                .wrap(from_fn(openid4vci_enabled))
+                .wrap(Condition::new(
+                    dynamic_tenant_routes,
+                    from_fn(openid4vci_enabled),
+                ))
                 .route(web::get().to(credential_issuer_metadata)),
         )
     } else {
@@ -487,7 +493,10 @@ fn configure_with_cors(
                     if register_openid4vci_routes {
                         admin.service(
                             web::scope("/openid4vci")
-                                .wrap(from_fn(openid4vci_enabled))
+                                .wrap(Condition::new(
+                                    dynamic_tenant_routes,
+                                    from_fn(openid4vci_enabled),
+                                ))
                                 .service(
                                     web::resource(
                                         "/credential-datasets/{subject_id}/{configuration_id}",
@@ -520,7 +529,10 @@ fn configure_with_cors(
     if register_openid4vci_routes {
         cfg.service(
             web::scope("/openid4vci")
-                .wrap(from_fn(openid4vci_enabled))
+                .wrap(Condition::new(
+                    dynamic_tenant_routes,
+                    from_fn(openid4vci_enabled),
+                ))
                 .route("/offers", web::post().to(create_credential_offer))
                 .route("/offers/{offer_id}", web::get().to(credential_offer))
                 .route("/nonce", web::post().to(credential_nonce))
@@ -532,7 +544,10 @@ fn configure_with_cors(
     if settings.modules.register_openid4vp_routes {
         cfg.service(
             web::scope("/openid4vp")
-                .wrap(from_fn(openid4vp_enabled))
+                .wrap(Condition::new(
+                    dynamic_tenant_routes,
+                    from_fn(openid4vp_enabled),
+                ))
                 .route(
                     "/complete/{transaction_id}",
                     web::get().to(presentation_complete),
