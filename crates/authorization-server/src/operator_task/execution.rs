@@ -98,7 +98,9 @@ pub(super) async fn execute_inner(
     match operation {
         ControlOperationPayload::MigrateApply => {
             let persistence = require_persistence(persistence)?;
-            Ok(persistence.run_migrations().await.map(|_| None)?)
+            Ok(super::migrate_and_initialize_tenant_directory(persistence)
+                .await
+                .map(|_| None)?)
         }
         ControlOperationPayload::KeysList => {
             Ok(crate::keyctl::operator_list().await.map(|_| None)?)

@@ -427,7 +427,7 @@ async fn two_processes_converge_on_lifecycle_mutations_and_survive_cache_failure
     let mut proxy = ValkeyProxy::start(upstream, proxy_port).await;
     let proxied_valkey = format!("redis://127.0.0.1:{proxy_port}");
 
-    // Production install chain: migrate -> tenant-bootstrap -> servers.
+    // Production install chain: one persistence transition, then servers.
     let bootstrap_dir = temporary_directory("bootstrap");
     let bootstrap_config = bootstrap_dir.join(".env.yaml");
     write_config(
@@ -448,7 +448,6 @@ async fn two_processes_converge_on_lifecycle_mutations_and_survive_cache_failure
         drop(role_coordinator);
     }
     run_cli("migrate", &bootstrap_config);
-    run_cli("tenant-bootstrap", &bootstrap_config);
 
     // Two independent processes share the directory and the cache.
     let process_a_dir = temporary_directory("process-a");

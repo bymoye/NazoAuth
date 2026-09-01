@@ -101,11 +101,11 @@ pub async fn run(
         }
         Command::Migrate => {
             let config = ConfigSource::load_for_migrations()?;
-            persistence
-                .operator_persistence(&config)
-                .await?
-                .run_migrations()
-                .await?;
+            let operator_persistence = persistence.operator_persistence(&config).await?;
+            crate::operator_task::migrate_and_initialize_tenant_directory(
+                operator_persistence.as_ref(),
+            )
+            .await?;
             Ok(())
         }
         Command::TenantBootstrap => {

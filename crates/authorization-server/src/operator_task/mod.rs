@@ -94,6 +94,22 @@ pub trait OperatorPersistence: Send + Sync {
     ) -> OperatorBackendFuture<'_, bool>;
 }
 
+/// Apply the schema and establish the initial authoritative tenant binding as
+/// one idempotent persistence transition. A runtime must never be startable in
+/// the half-migrated state where the directory tables exist but contain no
+/// system tenant.
+pub(crate) async fn migrate_and_initialize_tenant_directory(
+    persistence: &dyn OperatorPersistence,
+) -> anyhow::Result<bool> {
+    let config = crate::config::ConfigSource::load_for_migrations()?;
+    let initial_binding = crate::settings::Settings::initial_tenant_directory_binding(&config)?;
+    let migrated = persistence.run_migrations().await?;
+    let initialized = persistence
+        .initialize_tenant_directory(initial_binding)
+        .await?;
+    Ok(migrated || initialized)
+}
+
 pub async fn run(persistence: Arc<dyn OperatorPersistence>) -> anyhow::Result<()> {
     let mut compact = String::new();
     std::io::stdin()
