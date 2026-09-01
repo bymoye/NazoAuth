@@ -235,11 +235,11 @@ fn directory_openid4vc_derives_tenant_secrets_and_deterministic_material_paths()
         .join("tenants/00000000-0000-0000-0000-000000000011/openid4vc");
     assert_eq!(
         first.openid4vc.signing_certificate_chain_file,
-        Some(first_material.join("signing-certificate-chain.pem"))
+        Some(first_material.join("certificate-bundle.pem"))
     );
     assert_eq!(
         first.openid4vc.trust_anchors_file,
-        Some(first_material.join("trust-anchors.pem"))
+        Some(first_material.join("certificate-bundle.pem"))
     );
     assert_eq!(
         first.openid4vc.revocation_snapshot_file,

@@ -482,9 +482,9 @@ impl Settings {
                     .join("tenants")
                     .join(tenant_id.as_uuid().to_string())
                     .join("openid4vc");
-                openid4vc_signing_certificate_chain_file =
-                    Some(material_dir.join("signing-certificate-chain.pem"));
-                openid4vc_trust_anchors_file = Some(material_dir.join("trust-anchors.pem"));
+                let certificate_bundle = material_dir.join("certificate-bundle.pem");
+                openid4vc_signing_certificate_chain_file = Some(certificate_bundle.clone());
+                openid4vc_trust_anchors_file = Some(certificate_bundle);
                 if openid4vc_revocation_policy != Openid4vcRevocationPolicy::Disabled {
                     openid4vc_revocation_snapshot_file =
                         Some(material_dir.join("revocation-snapshot.json"));
