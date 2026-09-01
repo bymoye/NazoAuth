@@ -106,7 +106,8 @@ pub async fn run(
                 operator_persistence.as_ref(),
             )
             .await?;
-            ensure_system_tenant_material(&config, operator_persistence.as_ref()).await?;
+            let runtime_config = ConfigSource::load()?;
+            ensure_system_tenant_material(&runtime_config, operator_persistence.as_ref()).await?;
             Ok(())
         }
         Command::TenantBootstrap => {
@@ -116,7 +117,8 @@ pub async fn run(
             operator_persistence
                 .initialize_tenant_directory(initial_binding)
                 .await?;
-            ensure_system_tenant_material(&config, operator_persistence.as_ref()).await?;
+            let runtime_config = ConfigSource::load()?;
+            ensure_system_tenant_material(&runtime_config, operator_persistence.as_ref()).await?;
             Ok(())
         }
         Command::AdminProvision => run_admin_provision(persistence.as_ref()).await,
