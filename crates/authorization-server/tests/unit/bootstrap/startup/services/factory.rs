@@ -261,7 +261,7 @@ async fn request_data_container_tracks_runtime_host_index_updates() {
 }
 
 #[actix_web::test]
-async fn system_routes_are_gated_by_the_bound_host_tenant() {
+async fn deployment_routes_are_gated_but_runtime_modules_are_tenant_scoped() {
     let registry = Arc::new(ArcSwap::from_pointee(HashMap::from([
         (
             "system.example".to_owned(),
@@ -320,11 +320,11 @@ async fn system_routes_are_gated_by_the_bound_host_tenant() {
             .to_request()
     };
 
-    let tenant_system_route =
+    let tenant_runtime_modules =
         test::call_service(&app, preflight("tenant.example", "/admin/runtime-modules")).await;
     assert_eq!(
-        tenant_system_route.status(),
-        actix_web::http::StatusCode::NOT_FOUND
+        tenant_runtime_modules.status(),
+        actix_web::http::StatusCode::OK
     );
 
     let system_route =

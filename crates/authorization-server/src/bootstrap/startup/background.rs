@@ -83,8 +83,10 @@ pub(crate) fn spawn_revocation_snapshot_reloader(
 /// Start tasks whose ownership is the process lifetime rather than an HTTP
 /// worker.  Keeping these calls here prevents the server factory from
 /// accidentally starting one copy per Actix worker.
-pub(super) fn spawn_runtime_reconciler(runtime_modules: web::Data<RuntimeModules>) {
-    RuntimeModules::spawn_reconciler(runtime_modules);
+pub(super) fn spawn_runtime_reconciler(
+    runtime_modules: web::Data<RuntimeModules>,
+) -> tokio::task::JoinHandle<()> {
+    RuntimeModules::spawn_reconciler(runtime_modules)
 }
 
 pub(super) fn spawn_key_lifecycle(

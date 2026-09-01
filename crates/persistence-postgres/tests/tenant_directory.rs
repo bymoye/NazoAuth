@@ -12,9 +12,10 @@ use nazo_identity::{
     ports::RepositoryError,
 };
 use nazo_postgres::{
-    TenantBoundaryDefinition, TenantDirectoryRepository, TenantProvisioningRequest,
-    TenantRuntimeStatus, create_pool, run_pending_migrations,
+    RuntimeModuleRepository, TenantBoundaryDefinition, TenantDirectoryRepository,
+    TenantProvisioningRequest, TenantRuntimeStatus, create_pool, run_pending_migrations,
 };
+use nazo_runtime_modules::{DesiredMode, ModuleId, ModuleStateRepository as _};
 use uuid::Uuid;
 
 fn database_url() -> Option<String> {
@@ -95,6 +96,88 @@ async fn current_revision(repository: &TenantDirectoryRepository) -> u64 {
         .current_revision()
         .await
         .expect("directory revision should read")
+}
+
+#[derive(Debug, diesel::QueryableByName)]
+struct CountRow {
+    #[diesel(sql_type = sql_types::BigInt)]
+    count: i64,
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn provision_seeds_full_tenant_capabilities_without_overwriting_switches_on_replay() {
+    let Some(IsolatedDirectory { pool, repository }) = isolated_directory().await else {
+        return;
+    };
+    let (_, request) = provisioning_request(0, "capabilities", "capabilities.example");
+    let tenant_id = request.tenant.id.as_uuid();
+    let revision = repository
+        .provision_tenant_binding(0, request.clone())
+        .await
+        .expect("tenant provisioning should apply");
+    let (_, peer_request) = provisioning_request(0, "peer", "peer.example");
+    let peer_tenant_id = peer_request.tenant.id.as_uuid();
+    let revision = repository
+        .provision_tenant_binding(revision, peer_request)
+        .await
+        .expect("peer tenant provisioning should apply");
+    let mut connection = pool.get().await.expect("pool should connect");
+    let enabled = sql_query(
+        "SELECT COUNT(*) AS count FROM runtime_module_desired_states \
+         WHERE tenant_id = $1 AND desired_mode = 'enabled'",
+    )
+    .bind::<sql_types::Uuid, _>(tenant_id)
+    .get_result::<CountRow>(&mut connection)
+    .await
+    .expect("tenant runtime capability baseline should load");
+    assert_eq!(enabled.count, 16);
+
+    sql_query(
+        "UPDATE runtime_module_desired_states SET desired_mode = 'disabled', revision = revision + 1 \
+         WHERE tenant_id = $1 AND module_id = 'dynamic_client_registration'",
+    )
+    .bind::<sql_types::Uuid, _>(tenant_id)
+    .execute(&mut connection)
+    .await
+    .expect("tenant capability switch should update");
+    drop(connection);
+
+    let tenant_modules = RuntimeModuleRepository::for_tenant(pool.clone(), tenant_id);
+    let peer_modules = RuntimeModuleRepository::for_tenant(pool.clone(), peer_tenant_id);
+    assert_eq!(
+        tenant_modules
+            .read_desired(ModuleId::DynamicClientRegistration)
+            .await
+            .expect("tenant capability should load")
+            .expect("tenant capability baseline should exist")
+            .mode,
+        DesiredMode::Disabled
+    );
+    assert_eq!(
+        peer_modules
+            .read_desired(ModuleId::DynamicClientRegistration)
+            .await
+            .expect("peer capability should load")
+            .expect("peer capability baseline should exist")
+            .mode,
+        DesiredMode::Enabled
+    );
+
+    repository
+        .provision_tenant_binding(revision, request)
+        .await
+        .expect("identical provisioning replay should succeed");
+    let mut connection = pool.get().await.expect("pool should connect");
+    let disabled = sql_query(
+        "SELECT COUNT(*) AS count FROM runtime_module_desired_states \
+         WHERE tenant_id = $1 AND module_id = 'dynamic_client_registration' \
+           AND desired_mode = 'disabled'",
+    )
+    .bind::<sql_types::Uuid, _>(tenant_id)
+    .get_result::<CountRow>(&mut connection)
+    .await
+    .expect("tenant capability switch should load");
+    assert_eq!(disabled.count, 1);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

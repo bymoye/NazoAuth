@@ -25,7 +25,11 @@ pub(super) async fn read_instance(
 ) -> Result<Option<InstanceStateRecord>, RepositoryError> {
     let mut connection = repository.connection().await?;
     runtime_module_instance_states::table
-        .find((requested_instance_id, module_id(requested_module_id)))
+        .find((
+            repository.tenant_id(),
+            requested_instance_id,
+            module_id(requested_module_id),
+        ))
         .select(InstanceStateRow::as_select())
         .first::<InstanceStateRow>(&mut connection)
         .await
@@ -41,6 +45,7 @@ pub(super) async fn read_all_instances(
 ) -> Result<Vec<InstanceStateRecord>, RepositoryError> {
     let mut connection = repository.connection().await?;
     runtime_module_instance_states::table
+        .filter(runtime_module_instance_states::tenant_id.eq(repository.tenant_id()))
         .filter(runtime_module_instance_states::instance_id.eq(requested_instance_id))
         .select(InstanceStateRow::as_select())
         .load::<InstanceStateRow>(&mut connection)
@@ -63,13 +68,14 @@ pub(super) async fn compare_and_set_instance(
             async |connection| {
                 let change = mutation.change;
                 let key = format!(
-                    "{}:{}",
+                    "{}:{}:{}",
+                    repository.tenant_id(),
                     change.next.instance_id,
                     module_id(change.next.module_id)
                 );
                 lock_key(connection, &key).await?;
                 let durable_desired_revision = runtime_module_desired_states::table
-                    .find(module_id(change.next.module_id))
+                    .find((repository.tenant_id(), module_id(change.next.module_id)))
                     .select(runtime_module_desired_states::revision)
                     .for_update()
                     .first::<i64>(connection)
@@ -81,14 +87,16 @@ pub(super) async fn compare_and_set_instance(
                             .map_err(RuntimeTransactionError::Repository)?,
                     )
                 {
-                    let current = load_instance(connection, &change.next).await?;
-                    append_runtime_event(connection, &mutation.stale_event)
+                    let current =
+                        load_instance(connection, repository.tenant_id(), &change.next).await?;
+                    append_runtime_event(connection, repository.tenant_id(), &mutation.stale_event)
                         .await
                         .map_err(RuntimeTransactionError::Repository)?;
                     return Ok(CasOutcome::Stale { current });
                 }
                 let current = runtime_module_instance_states::table
                     .find((
+                        repository.tenant_id(),
                         change.next.instance_id.as_str(),
                         module_id(change.next.module_id),
                     ))
@@ -103,7 +111,7 @@ pub(super) async fn compare_and_set_instance(
                 if current.as_ref().map(|record| record.transition_revision)
                     != change.expected_revision
                 {
-                    append_runtime_event(connection, &mutation.stale_event)
+                    append_runtime_event(connection, repository.tenant_id(), &mutation.stale_event)
                         .await
                         .map_err(RuntimeTransactionError::Repository)?;
                     return Ok(CasOutcome::Stale { current });
@@ -132,6 +140,7 @@ pub(super) async fn compare_and_set_instance(
                     let updated = diesel::update(
                         runtime_module_instance_states::table
                             .find((
+                                repository.tenant_id(),
                                 change.next.instance_id.as_str(),
                                 module_id(change.next.module_id),
                             ))
@@ -152,15 +161,21 @@ pub(super) async fn compare_and_set_instance(
                     .execute(connection)
                     .await?;
                     if updated != 1 {
-                        let current = load_instance(connection, &change.next).await?;
-                        append_runtime_event(connection, &mutation.stale_event)
-                            .await
-                            .map_err(RuntimeTransactionError::Repository)?;
+                        let current =
+                            load_instance(connection, repository.tenant_id(), &change.next).await?;
+                        append_runtime_event(
+                            connection,
+                            repository.tenant_id(),
+                            &mutation.stale_event,
+                        )
+                        .await
+                        .map_err(RuntimeTransactionError::Repository)?;
                         return Ok(CasOutcome::Stale { current });
                     }
                 } else {
                     diesel::insert_into(runtime_module_instance_states::table)
                         .values((
+                            runtime_module_instance_states::tenant_id.eq(repository.tenant_id()),
                             runtime_module_instance_states::instance_id
                                 .eq(change.next.instance_id.as_str()),
                             runtime_module_instance_states::module_id
@@ -178,7 +193,7 @@ pub(super) async fn compare_and_set_instance(
                         .execute(connection)
                         .await?;
                 }
-                append_runtime_event(connection, &mutation.applied_event)
+                append_runtime_event(connection, repository.tenant_id(), &mutation.applied_event)
                     .await
                     .map_err(RuntimeTransactionError::Repository)?;
                 Ok(CasOutcome::Applied(change.next))
@@ -237,10 +252,15 @@ fn validate_instance_mutation(
 
 async fn load_instance(
     connection: &mut AsyncPgConnection,
+    tenant_id: uuid::Uuid,
     next: &InstanceStateRecord,
 ) -> Result<Option<InstanceStateRecord>, RuntimeTransactionError> {
     runtime_module_instance_states::table
-        .find((next.instance_id.as_str(), module_id(next.module_id)))
+        .find((
+            tenant_id,
+            next.instance_id.as_str(),
+            module_id(next.module_id),
+        ))
         .select(InstanceStateRow::as_select())
         .first::<InstanceStateRow>(connection)
         .await

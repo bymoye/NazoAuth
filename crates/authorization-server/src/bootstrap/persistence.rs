@@ -32,7 +32,10 @@ pub trait ServerPersistenceProvider: Send + Sync {
     fn security_audit_ledger(&self) -> Arc<dyn nazo_persistence::SecurityAuditLedger>;
     fn database_health(&self) -> Arc<dyn nazo_persistence::DatabaseHealthPort>;
     fn database_pool_metrics(&self) -> Arc<dyn nazo_persistence::DatabasePoolMetricsPort>;
-    fn runtime_modules(&self) -> Arc<dyn nazo_persistence::RuntimeModuleStore>;
+    fn runtime_modules(
+        &self,
+        tenant_id: uuid::Uuid,
+    ) -> Arc<dyn nazo_persistence::RuntimeModuleStore>;
 
     fn authorization_repository(
         &self,

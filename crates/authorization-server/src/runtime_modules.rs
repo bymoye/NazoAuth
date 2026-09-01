@@ -207,14 +207,13 @@ impl RuntimeModules {
         })
     }
 
-    pub(crate) fn spawn_reconciler(modules: web::Data<Self>) {
-        for module_id in ModuleId::ALL {
-            let modules = modules.clone();
-            tokio::spawn(async move {
-                let mut interval = tokio::time::interval(Duration::from_secs(1));
-                interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-                loop {
-                    interval.tick().await;
+    pub(crate) fn spawn_reconciler(modules: web::Data<Self>) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(1));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                interval.tick().await;
+                for module_id in ModuleId::ALL {
                     match modules.registry.reconcile_once(module_id).await {
                         Ok(ReconcileOutcome::NoChange) => {}
                         Ok(outcome) => {
@@ -225,8 +224,8 @@ impl RuntimeModules {
                         }
                     }
                 }
-            });
-        }
+            }
+        })
     }
 }
 

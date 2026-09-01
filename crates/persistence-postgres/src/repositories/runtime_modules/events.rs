@@ -26,11 +26,13 @@ pub(super) async fn page_events(
     }
     let mut connection = repository.connection().await?;
     let total = runtime_module_state_events::table
+        .filter(runtime_module_state_events::tenant_id.eq(repository.tenant_id()))
         .count()
         .get_result::<i64>(&mut connection)
         .await
         .map_err(map_error)?;
     let rows = runtime_module_state_events::table
+        .filter(runtime_module_state_events::tenant_id.eq(repository.tenant_id()))
         .order((
             runtime_module_state_events::occurred_at.desc(),
             runtime_module_state_events::event_id.desc(),

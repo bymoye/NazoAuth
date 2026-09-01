@@ -4,6 +4,8 @@ use uuid::Uuid;
 #[derive(Clone, Debug, diesel::Queryable, diesel::Selectable)]
 #[diesel(table_name = crate::schema::runtime_module_desired_states)]
 pub(crate) struct DesiredStateRow {
+    #[diesel(column_name = tenant_id)]
+    pub(crate) _tenant_id: Uuid,
     pub(crate) module_id: String,
     pub(crate) desired_mode: String,
     pub(crate) revision: i64,
@@ -15,6 +17,8 @@ pub(crate) struct DesiredStateRow {
 #[derive(Clone, Debug, diesel::Queryable, diesel::Selectable)]
 #[diesel(table_name = crate::schema::runtime_module_instance_states)]
 pub(crate) struct InstanceStateRow {
+    #[diesel(column_name = tenant_id)]
+    pub(crate) _tenant_id: Uuid,
     pub(crate) instance_id: String,
     pub(crate) module_id: String,
     pub(crate) actual_state: String,
@@ -29,6 +33,8 @@ pub(crate) struct InstanceStateRow {
 #[diesel(table_name = crate::schema::runtime_module_state_events)]
 pub(crate) struct ModuleEventRow {
     pub(crate) event_id: Uuid,
+    #[diesel(column_name = tenant_id)]
+    pub(crate) _tenant_id: Uuid,
     pub(crate) module_id: String,
     pub(crate) event_type: String,
     pub(crate) revision: i64,

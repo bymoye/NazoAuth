@@ -18,12 +18,23 @@ pub type RuntimeModuleEventPage = ModuleEventPage;
 #[derive(Clone)]
 pub struct RuntimeModuleRepository {
     pool: DbPool,
+    tenant_id: uuid::Uuid,
 }
 
 impl RuntimeModuleRepository {
     #[must_use]
     pub fn new(pool: DbPool) -> Self {
-        Self { pool }
+        Self::for_tenant(
+            pool,
+            nazo_identity::TenantContext::default_system()
+                .tenant_id
+                .as_uuid(),
+        )
+    }
+
+    #[must_use]
+    pub fn for_tenant(pool: DbPool, tenant_id: uuid::Uuid) -> Self {
+        Self { pool, tenant_id }
     }
 
     pub(super) async fn connection(&self) -> Result<crate::DbConnection, RepositoryError> {
@@ -31,6 +42,10 @@ impl RuntimeModuleRepository {
             .get()
             .await
             .map_err(|_| RepositoryError::Unavailable)
+    }
+
+    pub(super) fn tenant_id(&self) -> uuid::Uuid {
+        self.tenant_id
     }
 
     pub async fn page_events(

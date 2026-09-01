@@ -513,6 +513,7 @@ fn require_current_logout_claim(updated: usize) -> Result<(), RepositoryError> {
 
 pub(super) async fn append_runtime_event(
     connection: &mut AsyncPgConnection,
+    tenant_id: Uuid,
     event: &ModuleEventRecord,
 ) -> Result<(), RepositoryError> {
     let event_id = Uuid::parse_str(&event.event_id).map_err(|error| {
@@ -529,6 +530,7 @@ pub(super) async fn append_runtime_event(
     diesel::insert_into(runtime_module_state_events::table)
         .values((
             runtime_module_state_events::event_id.eq(event_id),
+            runtime_module_state_events::tenant_id.eq(tenant_id),
             runtime_module_state_events::module_id.eq(module_id(event.module_id)),
             runtime_module_state_events::event_type.eq(event_type(event.event_type)),
             runtime_module_state_events::revision.eq(revision(event.revision)?),
