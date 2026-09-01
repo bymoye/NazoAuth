@@ -265,6 +265,7 @@ jobs:
           REVOKE CREATE ON SCHEMA public FROM PUBLIC;
           SQL
           docker run --rm --name nazo-oauth-e2e-migrate --network nazo-oauth-e2e-net \
+            --user "$(id -u):$(id -g)" \
             --cap-drop ALL --security-opt no-new-privileges --read-only \
             --tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m \
             -e NAZOAUTH_MIGRATION_RUNTIME_ROLE=nazoauth_e2e_app \
@@ -272,6 +273,7 @@ jobs:
             -v "$PWD/runtime/e2e/secrets:/var/lib/nazo_oauth/secrets" \
             nazo-oauth-e2e:latest nazoauth migrate
           docker run --rm --name nazo-oauth-e2e-tenant-bootstrap --network nazo-oauth-e2e-net \
+            --user "$(id -u):$(id -g)" \
             --cap-drop ALL --security-opt no-new-privileges --read-only \
             --tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m \
             -v "$PWD/runtime/e2e/.env.yaml:/app/.env.yaml:ro" \
