@@ -279,22 +279,28 @@ impl Settings {
             .unwrap_or_default();
         let _ = mfa_totp_key_ring(config)?;
         validate_optional_token_issuance_response_key_config(config)?;
+        let enable_directory_openid4vci_issuer = config.bool(
+            "ENABLE_DIRECTORY_OPENID4VCI_ISSUER",
+            config.bool("ENABLE_OPENID4VCI_ISSUER", false)?,
+        )?;
         let enable_openid4vci_issuer = if tenant_specific {
-            config.bool(
-                "ENABLE_DIRECTORY_OPENID4VCI_ISSUER",
-                config.bool("ENABLE_OPENID4VCI_ISSUER", false)?,
-            )?
+            enable_directory_openid4vci_issuer
         } else {
             config.bool("ENABLE_OPENID4VCI_ISSUER", false)?
         };
+        let enable_directory_openid4vp_verifier = config.bool(
+            "ENABLE_DIRECTORY_OPENID4VP_VERIFIER",
+            config.bool("ENABLE_OPENID4VP_VERIFIER", false)?,
+        )?;
         let enable_openid4vp_verifier = if tenant_specific {
-            config.bool(
-                "ENABLE_DIRECTORY_OPENID4VP_VERIFIER",
-                config.bool("ENABLE_OPENID4VP_VERIFIER", false)?,
-            )?
+            enable_directory_openid4vp_verifier
         } else {
             config.bool("ENABLE_OPENID4VP_VERIFIER", false)?
         };
+        let register_openid4vci_routes =
+            enable_openid4vci_issuer || enable_directory_openid4vci_issuer;
+        let register_openid4vp_routes =
+            enable_openid4vp_verifier || enable_directory_openid4vp_verifier;
         let openid4vc_enabled = enable_openid4vci_issuer || enable_openid4vp_verifier;
         let mut openid4vc_data_encryption_key = config
             .optional_string("OPENID4VC_DATA_ENCRYPTION_KEY")
@@ -686,6 +692,8 @@ impl Settings {
             modules: ModuleSettings {
                 enable_openid4vci_issuer,
                 enable_openid4vp_verifier,
+                register_openid4vci_routes,
+                register_openid4vp_routes,
                 dynamic_client_registration_initial_access_token,
                 remote_client_document_private_origins: config
                     .optional_string("REMOTE_CLIENT_DOCUMENT_PRIVATE_ORIGINS")

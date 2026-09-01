@@ -21,9 +21,10 @@ use nazo_http_actix::{
     dynamic_client_registration, userinfo,
 };
 use nazo_openid4vc_http_actix::{
-    create_credential_offer, create_presentation, credential, credential_issuer_metadata,
-    credential_nonce, credential_offer, deferred_credential, notification, presentation_complete,
-    presentation_request, presentation_response, presentation_result,
+    CredentialIssuerEndpoint, PresentationEndpoint, create_credential_offer, create_presentation,
+    credential, credential_issuer_metadata, credential_nonce, credential_offer,
+    deferred_credential, notification, presentation_complete, presentation_request,
+    presentation_response, presentation_result,
 };
 
 use crate::control_discovery::control_discovery;
@@ -119,6 +120,42 @@ where
     Ok(next.call(request).await?.map_into_left_body())
 }
 
+async fn openid4vci_enabled<B>(
+    request: ServiceRequest,
+    next: Next<B>,
+) -> Result<ServiceResponse<EitherBody<B>>, Error>
+where
+    B: MessageBody + 'static,
+{
+    if request
+        .app_data::<web::Data<CredentialIssuerEndpoint>>()
+        .is_none()
+    {
+        return Ok(request
+            .into_response(HttpResponse::NotFound().finish())
+            .map_into_right_body());
+    }
+    Ok(next.call(request).await?.map_into_left_body())
+}
+
+async fn openid4vp_enabled<B>(
+    request: ServiceRequest,
+    next: Next<B>,
+) -> Result<ServiceResponse<EitherBody<B>>, Error>
+where
+    B: MessageBody + 'static,
+{
+    if request
+        .app_data::<web::Data<PresentationEndpoint>>()
+        .is_none()
+    {
+        return Ok(request
+            .into_response(HttpResponse::NotFound().finish())
+            .map_into_right_body());
+    }
+    Ok(next.call(request).await?.map_into_left_body())
+}
+
 /// Component-test assembly for one already-selected tenant. Production uses
 /// [`configure_dynamic`] so CORS and request data share the Host registry.
 #[allow(dead_code)]
@@ -155,7 +192,7 @@ fn configure_with_cors(
     perf_metrics_enabled: bool,
     cors_policy: cors::CorsPolicy<'_>,
 ) {
-    let enable_openid4vci_issuer = settings.modules.enable_openid4vci_issuer;
+    let register_openid4vci_routes = settings.modules.register_openid4vci_routes;
     // Actix scopes consume every request under their prefix. Register the
     // exact control-tenant resource before this public discovery scope.
     let well_known = web::scope("/.well-known")
@@ -173,10 +210,11 @@ fn configure_with_cors(
             "/oauth-protected-resource/{tail:.*}",
             web::get().to(oauth_protected_resource_metadata),
         );
-    let well_known = if settings.modules.enable_openid4vci_issuer {
-        well_known.route(
-            "/openid-credential-issuer",
-            web::get().to(credential_issuer_metadata),
+    let well_known = if register_openid4vci_routes {
+        well_known.service(
+            web::resource("/openid-credential-issuer")
+                .wrap(from_fn(openid4vci_enabled))
+                .route(web::get().to(credential_issuer_metadata)),
         )
     } else {
         well_known
@@ -446,16 +484,18 @@ fn configure_with_cors(
                     web::post().to(admin_reject_access_request),
                 )
                 .configure(move |admin| {
-                    if enable_openid4vci_issuer {
+                    if register_openid4vci_routes {
                         admin.service(
-                            web::scope("/openid4vci").service(
-                                web::resource(
-                                    "/credential-datasets/{subject_id}/{configuration_id}",
-                                )
-                                .route(web::get().to(admin_get_credential_dataset))
-                                .route(web::put().to(admin_put_credential_dataset))
-                                .route(web::delete().to(admin_delete_credential_dataset)),
-                            ),
+                            web::scope("/openid4vci")
+                                .wrap(from_fn(openid4vci_enabled))
+                                .service(
+                                    web::resource(
+                                        "/credential-datasets/{subject_id}/{configuration_id}",
+                                    )
+                                    .route(web::get().to(admin_get_credential_dataset))
+                                    .route(web::put().to(admin_put_credential_dataset))
+                                    .route(web::delete().to(admin_delete_credential_dataset)),
+                                ),
                         );
                     }
                 }),
@@ -477,44 +517,40 @@ fn configure_with_cors(
                 .route(web::put().to(client_configuration_put))
                 .route(web::delete().to(client_configuration_delete)),
         );
-    if settings.modules.enable_openid4vci_issuer {
-        cfg.route(
-            "/openid4vci/offers",
-            web::post().to(create_credential_offer),
-        )
-        .route(
-            "/openid4vci/offers/{offer_id}",
-            web::get().to(credential_offer),
-        )
-        .route("/openid4vci/nonce", web::post().to(credential_nonce))
-        .route("/openid4vci/credential", web::post().to(credential))
-        .route(
-            "/openid4vci/deferred_credential",
-            web::post().to(deferred_credential),
-        )
-        .route("/openid4vci/notification", web::post().to(notification));
-    }
-    if settings.modules.enable_openid4vp_verifier {
-        cfg.route(
-            "/openid4vp/complete/{transaction_id}",
-            web::get().to(presentation_complete),
+    if register_openid4vci_routes {
+        cfg.service(
+            web::scope("/openid4vci")
+                .wrap(from_fn(openid4vci_enabled))
+                .route("/offers", web::post().to(create_credential_offer))
+                .route("/offers/{offer_id}", web::get().to(credential_offer))
+                .route("/nonce", web::post().to(credential_nonce))
+                .route("/credential", web::post().to(credential))
+                .route("/deferred_credential", web::post().to(deferred_credential))
+                .route("/notification", web::post().to(notification)),
         );
-        cfg.route(
-            "/openid4vp/presentations",
-            web::post().to(create_presentation),
-        )
-        .service(
-            web::resource("/openid4vp/request/{transaction_id}")
-                .route(web::get().to(presentation_request))
-                .route(web::post().to(presentation_request)),
-        )
-        .route(
-            "/openid4vp/response/{transaction_id}",
-            web::post().to(presentation_response),
-        )
-        .route(
-            "/openid4vp/result/{transaction_id}",
-            web::get().to(presentation_result),
+    }
+    if settings.modules.register_openid4vp_routes {
+        cfg.service(
+            web::scope("/openid4vp")
+                .wrap(from_fn(openid4vp_enabled))
+                .route(
+                    "/complete/{transaction_id}",
+                    web::get().to(presentation_complete),
+                )
+                .route("/presentations", web::post().to(create_presentation))
+                .service(
+                    web::resource("/request/{transaction_id}")
+                        .route(web::get().to(presentation_request))
+                        .route(web::post().to(presentation_request)),
+                )
+                .route(
+                    "/response/{transaction_id}",
+                    web::post().to(presentation_response),
+                )
+                .route(
+                    "/result/{transaction_id}",
+                    web::get().to(presentation_result),
+                ),
         );
     }
     if perf_metrics_enabled {

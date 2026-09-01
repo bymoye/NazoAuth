@@ -205,6 +205,8 @@ fn directory_openid4vc_derives_tenant_secrets_and_deterministic_material_paths()
     let system = Settings::from_config(&config).unwrap();
     assert!(!system.modules.enable_openid4vci_issuer);
     assert!(!system.modules.enable_openid4vp_verifier);
+    assert!(system.modules.register_openid4vci_routes);
+    assert!(system.modules.register_openid4vp_routes);
     let first_binding = directory_binding("https://one.example", "one.example");
     let mut second_binding = directory_binding("https://two.example", "two.example");
     second_binding.tenant.tenant_id = nazo_identity::TenantId::new(
@@ -216,6 +218,8 @@ fn directory_openid4vc_derives_tenant_secrets_and_deterministic_material_paths()
 
     assert!(first.modules.enable_openid4vci_issuer);
     assert!(first.modules.enable_openid4vp_verifier);
+    assert!(first.modules.register_openid4vci_routes);
+    assert!(first.modules.register_openid4vp_routes);
 
     assert_ne!(
         first.openid4vc.data_encryption_key,
@@ -729,6 +733,8 @@ fn configured_module_dependencies_default_closed_and_accept_explicit_values() {
     let defaults = Settings::from_config(&ConfigSource::default()).unwrap();
     assert!(!defaults.modules.enable_openid4vci_issuer);
     assert!(!defaults.modules.enable_openid4vp_verifier);
+    assert!(!defaults.modules.register_openid4vci_routes);
+    assert!(!defaults.modules.register_openid4vp_routes);
     assert_eq!(defaults.storage.scim_event_retention_seconds, 604_800);
     assert!(
         defaults
@@ -803,6 +809,8 @@ fn configured_module_dependencies_default_closed_and_accept_explicit_values() {
 
     assert!(settings.modules.enable_openid4vci_issuer);
     assert!(settings.modules.enable_openid4vp_verifier);
+    assert!(settings.modules.register_openid4vci_routes);
+    assert!(settings.modules.register_openid4vp_routes);
     assert_eq!(settings.storage.scim_event_retention_seconds, 86_400);
     assert_eq!(
         settings

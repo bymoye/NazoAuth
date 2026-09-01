@@ -181,6 +181,12 @@ pub(crate) struct KeyManagementSettings {
 pub(crate) struct ModuleSettings {
     pub(crate) enable_openid4vci_issuer: bool,
     pub(crate) enable_openid4vp_verifier: bool,
+    /// Route registration is process-wide, while module services are selected
+    /// from the request tenant's runtime. These flags cover both the control
+    /// tenant and directory-managed tenants without enabling either service
+    /// for the control tenant.
+    pub(crate) register_openid4vci_routes: bool,
+    pub(crate) register_openid4vp_routes: bool,
     pub(crate) dynamic_client_registration_initial_access_token: Option<String>,
     pub(crate) remote_client_document_private_origins: Vec<String>,
     pub(crate) backchannel_logout_private_origins: Vec<String>,
