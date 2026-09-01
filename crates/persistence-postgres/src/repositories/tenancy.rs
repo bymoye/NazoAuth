@@ -206,7 +206,7 @@ impl TenantDirectoryRepository {
                             && existing.runtime_revision == binding.runtime_revision as i64
                     });
                     if matches {
-                        ensure_full_runtime_module_baseline(connection, tenant_id).await?;
+                        ensure_runtime_module_defaults(connection, tenant_id).await?;
                     }
                     return Ok(if matches {
                         TenantDirectoryInitialization::AlreadyInitialized
@@ -228,7 +228,7 @@ impl TenantDirectoryRepository {
                 .bind::<sql_types::BigInt, _>(binding.runtime_revision as i64)
                 .execute(connection)
                 .await?;
-                ensure_full_runtime_module_baseline(connection, tenant_id).await?;
+                ensure_runtime_module_defaults(connection, tenant_id).await?;
                 Ok(TenantDirectoryInitialization::Inserted)
             })
             .await
@@ -637,7 +637,7 @@ pub(crate) async fn provision_tenant_binding_on_connection(
                     .into());
                 }
             }
-            ensure_full_runtime_module_baseline(connection, tenant_id)
+            ensure_runtime_module_defaults(connection, tenant_id)
                 .await
                 .map_err(map_query_error)?;
             read_directory_revision(connection).await
@@ -646,23 +646,26 @@ pub(crate) async fn provision_tenant_binding_on_connection(
         .map_err(RepositoryError::from)
 }
 
-async fn ensure_full_runtime_module_baseline(
+async fn ensure_runtime_module_defaults(
     connection: &mut AsyncPgConnection,
     tenant_id: Uuid,
 ) -> Result<(), diesel::result::Error> {
     sql_query(
-        "WITH modules(module_id) AS (
+        "WITH modules(module_id, desired_mode) AS (
              VALUES
-                ('device_authorization'), ('token_exchange'), ('jwt_bearer_grant'), ('ciba'),
-                ('dynamic_client_registration'), ('request_objects'), ('jarm'),
-                ('authorization_details'), ('http_message_signatures'), ('scim'),
-                ('scim_security_events'), ('native_sso'), ('frontchannel_logout'),
-                ('session_management'), ('openid4vci_issuer'), ('openid4vp_verifier')
+                ('device_authorization', 'enabled'), ('token_exchange', 'enabled'),
+                ('jwt_bearer_grant', 'enabled'), ('ciba', 'enabled'),
+                ('dynamic_client_registration', 'enabled'), ('request_objects', 'enabled'),
+                ('jarm', 'enabled'), ('authorization_details', 'enabled'),
+                ('http_message_signatures', 'disabled'), ('scim', 'enabled'),
+                ('scim_security_events', 'enabled'), ('native_sso', 'enabled'),
+                ('frontchannel_logout', 'enabled'), ('session_management', 'enabled'),
+                ('openid4vci_issuer', 'enabled'), ('openid4vp_verifier', 'enabled')
          ), inserted AS (
              INSERT INTO runtime_module_desired_states
                 (tenant_id, module_id, desired_mode, revision, actor_id, reason, updated_at)
-             SELECT $1, module_id, 'enabled', 1, NULL,
-                    'tenant full capability baseline', CURRENT_TIMESTAMP
+             SELECT $1, module_id, desired_mode, 1, NULL,
+                    'tenant capability defaults', CURRENT_TIMESTAMP
              FROM modules
              ON CONFLICT (tenant_id, module_id) DO NOTHING
              RETURNING tenant_id, module_id, desired_mode, revision, actor_id, reason, updated_at

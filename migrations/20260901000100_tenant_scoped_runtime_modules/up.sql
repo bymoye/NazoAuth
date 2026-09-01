@@ -36,35 +36,32 @@ ALTER TABLE runtime_module_state_events
     ADD CONSTRAINT fk_runtime_module_event_tenant
         FOREIGN KEY (tenant_id) REFERENCES tenants(id) ON DELETE CASCADE;
 
-WITH modules(module_id) AS (
+WITH modules(module_id, desired_mode) AS (
     VALUES
-        ('device_authorization'), ('token_exchange'), ('jwt_bearer_grant'), ('ciba'),
-        ('dynamic_client_registration'), ('request_objects'), ('jarm'),
-        ('authorization_details'), ('http_message_signatures'), ('scim'),
-        ('scim_security_events'), ('native_sso'), ('frontchannel_logout'),
-        ('session_management'), ('openid4vci_issuer'), ('openid4vp_verifier')
+        ('device_authorization', 'enabled'), ('token_exchange', 'enabled'),
+        ('jwt_bearer_grant', 'enabled'), ('ciba', 'enabled'),
+        ('dynamic_client_registration', 'enabled'), ('request_objects', 'enabled'),
+        ('jarm', 'enabled'), ('authorization_details', 'enabled'),
+        ('http_message_signatures', 'disabled'), ('scim', 'enabled'),
+        ('scim_security_events', 'enabled'), ('native_sso', 'enabled'),
+        ('frontchannel_logout', 'enabled'), ('session_management', 'enabled'),
+        ('openid4vci_issuer', 'enabled'), ('openid4vp_verifier', 'enabled')
 ), changed AS (
     INSERT INTO runtime_module_desired_states
         (tenant_id, module_id, desired_mode, revision, actor_id, reason, updated_at)
-    SELECT tenant.id, modules.module_id, 'enabled', 1, NULL,
-           'tenant full capability baseline', CURRENT_TIMESTAMP
+    SELECT tenant.id, modules.module_id, modules.desired_mode, 1, NULL,
+           'tenant capability defaults', CURRENT_TIMESTAMP
     FROM tenants AS tenant
     CROSS JOIN modules
-    ON CONFLICT (tenant_id, module_id) DO UPDATE
-    SET desired_mode = 'enabled',
-        revision = runtime_module_desired_states.revision + 1,
-        actor_id = NULL,
-        reason = 'tenant full capability baseline',
-        updated_at = CURRENT_TIMESTAMP
-    WHERE runtime_module_desired_states.desired_mode <> 'enabled'
-    RETURNING tenant_id, module_id, revision, actor_id, reason, updated_at
+    ON CONFLICT (tenant_id, module_id) DO NOTHING
+    RETURNING tenant_id, module_id, desired_mode, revision, actor_id, reason, updated_at
 )
 INSERT INTO runtime_module_state_events (
     event_id, tenant_id, module_id, event_type, revision, instance_id, actor_id,
     reason, before_state, after_state, outcome_code, occurred_at
 )
 SELECT uuidv7(), tenant_id, module_id, 'desired_state_changed', revision, NULL, actor_id,
-       reason, NULL, 'enabled', NULL, updated_at
+       reason, NULL, desired_mode, NULL, updated_at
 FROM changed;
 
 DROP INDEX idx_runtime_module_instance_states_module_state;

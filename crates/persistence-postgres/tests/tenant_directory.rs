@@ -105,7 +105,7 @@ struct CountRow {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn provision_seeds_full_tenant_capabilities_without_overwriting_switches_on_replay() {
+async fn provision_seeds_tenant_capabilities_without_overwriting_switches_on_replay() {
     let Some(IsolatedDirectory { pool, repository }) = isolated_directory().await else {
         return;
     };
@@ -130,7 +130,7 @@ async fn provision_seeds_full_tenant_capabilities_without_overwriting_switches_o
     .get_result::<CountRow>(&mut connection)
     .await
     .expect("tenant runtime capability baseline should load");
-    assert_eq!(enabled.count, 16);
+    assert_eq!(enabled.count, 15);
 
     sql_query(
         "UPDATE runtime_module_desired_states SET desired_mode = 'disabled', revision = revision + 1 \
@@ -161,6 +161,15 @@ async fn provision_seeds_full_tenant_capabilities_without_overwriting_switches_o
             .expect("peer capability baseline should exist")
             .mode,
         DesiredMode::Enabled
+    );
+    assert_eq!(
+        tenant_modules
+            .read_desired(ModuleId::HttpMessageSignatures)
+            .await
+            .expect("experimental capability should load")
+            .expect("experimental capability default should exist")
+            .mode,
+        DesiredMode::Disabled
     );
 
     repository
