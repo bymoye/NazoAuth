@@ -286,16 +286,17 @@ jobs:
                   revision = revision + 1,
                   reason = 'RFC 9967 CI fixture',
                   updated_at = CURRENT_TIMESTAMP
-              WHERE module_id = 'scim_security_events'
+              WHERE tenant_id = '00000000-0000-0000-0000-000000000001'
+                AND module_id = 'scim_security_events'
                 AND desired_mode = 'disabled'
-              RETURNING module_id, revision, actor_id, reason, updated_at
+              RETURNING tenant_id, module_id, revision, actor_id, reason, updated_at
           )
           INSERT INTO runtime_module_state_events (
-              event_id, module_id, event_type, revision, instance_id, actor_id,
+              event_id, tenant_id, module_id, event_type, revision, instance_id, actor_id,
               reason, before_state, after_state, outcome_code, occurred_at
           )
           SELECT
-              uuidv7(), module_id, 'desired_state_changed', revision, NULL, actor_id,
+              uuidv7(), tenant_id, module_id, 'desired_state_changed', revision, NULL, actor_id,
               reason, 'disabled', 'enabled', NULL, updated_at
           FROM changed;
           SQL
