@@ -144,6 +144,21 @@ async fn provision_seeds_tenant_capabilities_without_overwriting_switches_on_rep
 
     let tenant_modules = RuntimeModuleRepository::for_tenant(pool.clone(), tenant_id);
     let peer_modules = RuntimeModuleRepository::for_tenant(pool.clone(), peer_tenant_id);
+    let tenant_desired = tenant_modules
+        .read_all_desired()
+        .await
+        .expect("tenant capabilities should load");
+    assert!(tenant_desired.iter().any(|record| {
+        record.module_id == ModuleId::DynamicClientRegistration
+            && record.mode == DesiredMode::Disabled
+    }));
+    assert!(
+        tenant_modules
+            .read_all_instances("tenant-directory-isolation")
+            .await
+            .expect("tenant runtime instances should load")
+            .is_empty()
+    );
     assert_eq!(
         tenant_modules
             .read_desired(ModuleId::DynamicClientRegistration)

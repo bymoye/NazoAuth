@@ -167,7 +167,7 @@ impl TenantRuntime {
             });
 
         let runtime_module_reconciler =
-            background::spawn_runtime_reconciler(assembly.startup.runtime_modules.clone());
+            RuntimeModules::spawn_reconciler(assembly.startup.runtime_modules.clone());
         let key_lifecycle = background::spawn_key_lifecycle(assembly.startup.keyset.clone());
         lifecycle.runtime_module_reconciler = Some(runtime_module_reconciler);
         lifecycle.key_lifecycle = Some(key_lifecycle);
@@ -177,14 +177,12 @@ impl TenantRuntime {
     }
 
     async fn stop_lifecycle(&self) {
-        let Some(assembly) = self.assembly.as_ref() else {
-            return;
-        };
-
         // Remove this graph from the index before calling this method. The key
         // manager first receives its cooperative stop signal; its task is not
         // aborted while it may be writing key material.
-        assembly.startup.keyset.stop_lifecycle();
+        if let Some(assembly) = self.assembly.as_ref() {
+            assembly.startup.keyset.stop_lifecycle();
+        }
         let (
             runtime_module_reconciler,
             key_lifecycle,

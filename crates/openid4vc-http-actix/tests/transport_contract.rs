@@ -182,6 +182,13 @@ impl PresentationOperations for Verifier {
         transaction_id: Uuid,
     ) -> PresentationFuture<'a, Result<PresentationResult, PresentationHttpError>> {
         Box::pin(async move {
+            if transaction_id.is_nil() {
+                return Err(PresentationHttpError {
+                    status: 404,
+                    error: "not_found",
+                    description: "Presentation transaction was not found.",
+                });
+            }
             Ok(PresentationResult {
                 transaction_id,
                 credentials: Vec::new(),
@@ -212,6 +219,28 @@ async fn presentation_completion_page_reflects_a_verified_transaction() {
     assert!(body.contains("data-testid=\"vp-verification-result\""));
     assert!(body.contains("data-status=\"verified\""));
     assert!(body.contains("Presentation verified"));
+}
+
+#[test]
+async fn presentation_completion_page_does_not_claim_an_unknown_transaction_succeeded() {
+    let endpoint = web::Data::new(PresentationEndpoint::new(Arc::new(Verifier), "secret"));
+    let app = test::init_service(App::new().app_data(endpoint).route(
+        "/openid4vp/complete/{transaction_id}",
+        web::get().to(presentation_complete),
+    ))
+    .await;
+    let response = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri(&format!("/openid4vp/complete/{}", Uuid::nil()))
+            .to_request(),
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let body = test::read_body(response).await;
+    let body = std::str::from_utf8(&body).expect("error response is UTF-8");
+    assert!(!body.contains("data-status=\"verified\""));
 }
 struct CapturingVerifier {
     responses: Mutex<Vec<PresentationResponseInput>>,

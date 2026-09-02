@@ -408,3 +408,7 @@ impl PersistenceLauncher for PostgresLauncher {
         })
     }
 }
+
+#[cfg(test)]
+#[path = "../tests/unit/lib.rs"]
+mod tests;

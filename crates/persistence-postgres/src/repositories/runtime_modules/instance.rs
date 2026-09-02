@@ -137,7 +137,7 @@ pub(super) async fn compare_and_set_instance(
                 let updated_at = DateTime::<Utc>::from(change.next.updated_at);
                 let drain_deadline = change.next.drain_deadline.map(DateTime::<Utc>::from);
                 if let Some(expected) = change.expected_revision {
-                    let updated = diesel::update(
+                    diesel::update(
                         runtime_module_instance_states::table
                             .find((
                                 repository.tenant_id(),
@@ -160,18 +160,6 @@ pub(super) async fn compare_and_set_instance(
                     ))
                     .execute(connection)
                     .await?;
-                    if updated != 1 {
-                        let current =
-                            load_instance(connection, repository.tenant_id(), &change.next).await?;
-                        append_runtime_event(
-                            connection,
-                            repository.tenant_id(),
-                            &mutation.stale_event,
-                        )
-                        .await
-                        .map_err(RuntimeTransactionError::Repository)?;
-                        return Ok(CasOutcome::Stale { current });
-                    }
                 } else {
                     diesel::insert_into(runtime_module_instance_states::table)
                         .values((
