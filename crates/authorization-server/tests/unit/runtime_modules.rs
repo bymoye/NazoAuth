@@ -44,7 +44,7 @@ async fn reconciler_is_one_abortable_tenant_owned_task() {
     });
 
     let worker = RuntimeModules::spawn_reconciler(modules);
-    tokio::task::yield_now().await;
+    tokio::time::sleep(Duration::from_millis(10)).await;
     worker.abort();
     let error = worker.await.expect_err("aborted reconciler should stop");
     assert!(error.is_cancelled());
