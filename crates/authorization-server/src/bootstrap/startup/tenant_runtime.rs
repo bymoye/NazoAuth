@@ -36,7 +36,6 @@ pub(super) struct ProcessRuntime {
     pub(super) state_backend: super::super::ServerStateBackendBindings,
     pub(super) token_issuance_response_keys: nazo_persistence::TokenIssuanceResponseKeyRing,
     pub(super) control_discovery: web::Data<crate::control_discovery::ControlDiscoveryEndpoint>,
-    pub(super) runtime_modules: web::Data<RuntimeModules>,
     pub(super) database_pool_metrics: web::Data<dyn nazo_persistence::DatabasePoolMetricsPort>,
     pub(super) route_settings: Arc<Settings>,
 }
@@ -53,6 +52,7 @@ pub(in crate::bootstrap) struct TenantRuntime {
 
 #[derive(Default)]
 struct TenantRuntimeLifecycle {
+    runtime_module_reconciler: Option<JoinHandle<()>>,
     key_lifecycle: Option<JoinHandle<()>>,
     ciba_ping_worker: Option<JoinHandle<()>>,
     openid4vc_revocation_worker: Option<JoinHandle<()>>,
@@ -166,7 +166,10 @@ impl TenantRuntime {
                 )
             });
 
+        let runtime_module_reconciler =
+            RuntimeModules::spawn_reconciler(assembly.startup.runtime_modules.clone());
         let key_lifecycle = background::spawn_key_lifecycle(assembly.startup.keyset.clone());
+        lifecycle.runtime_module_reconciler = Some(runtime_module_reconciler);
         lifecycle.key_lifecycle = Some(key_lifecycle);
         lifecycle.ciba_ping_worker = ciba_ping_worker;
         lifecycle.openid4vc_revocation_worker = openid4vc_revocation_worker;
@@ -174,25 +177,37 @@ impl TenantRuntime {
     }
 
     async fn stop_lifecycle(&self) {
-        let Some(assembly) = self.assembly.as_ref() else {
-            return;
-        };
-
         // Remove this graph from the index before calling this method. The key
         // manager first receives its cooperative stop signal; its task is not
         // aborted while it may be writing key material.
-        assembly.startup.keyset.stop_lifecycle();
-        let (key_lifecycle, ciba_ping_worker, openid4vc_revocation_worker) = {
+        if let Some(assembly) = self.assembly.as_ref() {
+            assembly.startup.keyset.stop_lifecycle();
+        }
+        let (
+            runtime_module_reconciler,
+            key_lifecycle,
+            ciba_ping_worker,
+            openid4vc_revocation_worker,
+        ) = {
             let mut lifecycle = self
                 .lifecycle
                 .lock()
                 .expect("tenant runtime lifecycle mutex is not poisoned");
             (
+                lifecycle.runtime_module_reconciler.take(),
                 lifecycle.key_lifecycle.take(),
                 lifecycle.ciba_ping_worker.take(),
                 lifecycle.openid4vc_revocation_worker.take(),
             )
         };
+        if let Some(worker) = runtime_module_reconciler {
+            worker.abort();
+            if let Err(error) = worker.await
+                && !error.is_cancelled()
+            {
+                tracing::warn!(%error, "tenant runtime-module reconciler stopped unexpectedly");
+            }
+        }
         if let Some(worker) = openid4vc_revocation_worker {
             worker.abort();
             if let Err(error) = worker.await
@@ -373,6 +388,17 @@ async fn build_service_runtime(
     let mtls_certificate_source = web::Data::new(crate::http::mtls::MtlsCertificateSource::new(
         settings.endpoint.mtls_certificate_source,
     ));
+    let runtime_modules = web::Data::new(
+        RuntimeModules::initialize(
+            process
+                .persistence
+                .provider()
+                .runtime_modules(settings.tenant.context.tenant_id.as_uuid()),
+            &settings,
+            process.control_discovery.runtime_instance_id(),
+        )
+        .await?,
+    );
     let startup = StartupConfiguration {
         config: process.config.clone(),
         persistence: process.persistence.clone(),
@@ -383,7 +409,7 @@ async fn build_service_runtime(
         mtls_certificate_source,
         readiness_dependencies,
         remote_client_documents,
-        runtime_modules: process.runtime_modules.clone(),
+        runtime_modules,
         keyset,
     };
     let assembly = Arc::new(services::build(startup).await?);

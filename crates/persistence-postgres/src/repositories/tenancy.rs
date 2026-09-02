@@ -178,6 +178,7 @@ impl TenantDirectoryRepository {
             .map_err(|_| RepositoryError::Unavailable)?;
         let result = connection
             .transaction::<_, diesel::result::Error, _>(async move |connection| {
+                let tenant_id = binding.tenant.tenant_id.as_uuid();
                 let state = sql_query(
                     "SELECT revision
                      FROM tenant_runtime_directory_state
@@ -204,6 +205,9 @@ impl TenantDirectoryRepository {
                             && existing.external_host == binding.external_host
                             && existing.runtime_revision == binding.runtime_revision as i64
                     });
+                    if matches {
+                        ensure_runtime_module_defaults(connection, tenant_id).await?;
+                    }
                     return Ok(if matches {
                         TenantDirectoryInitialization::AlreadyInitialized
                     } else {
@@ -224,6 +228,7 @@ impl TenantDirectoryRepository {
                 .bind::<sql_types::BigInt, _>(binding.runtime_revision as i64)
                 .execute(connection)
                 .await?;
+                ensure_runtime_module_defaults(connection, tenant_id).await?;
                 Ok(TenantDirectoryInitialization::Inserted)
             })
             .await
@@ -564,6 +569,7 @@ pub(crate) async fn provision_tenant_binding_on_connection(
             "provisioning request boundary ids do not match the binding context".to_owned(),
         ));
     }
+    let tenant_id = request.binding.tenant.tenant_id.as_uuid();
     connection
         .transaction::<_, DirectoryMutationError, _>(async move |connection| {
             let current = lock_directory_revision(connection).await?;
@@ -631,10 +637,51 @@ pub(crate) async fn provision_tenant_binding_on_connection(
                     .into());
                 }
             }
+            ensure_runtime_module_defaults(connection, tenant_id)
+                .await
+                .map_err(map_query_error)?;
             read_directory_revision(connection).await
         })
         .await
         .map_err(RepositoryError::from)
+}
+
+async fn ensure_runtime_module_defaults(
+    connection: &mut AsyncPgConnection,
+    tenant_id: Uuid,
+) -> Result<(), diesel::result::Error> {
+    sql_query(
+        "WITH modules(module_id, desired_mode) AS (
+             VALUES
+                ('device_authorization', 'enabled'), ('token_exchange', 'enabled'),
+                ('jwt_bearer_grant', 'enabled'), ('ciba', 'enabled'),
+                ('dynamic_client_registration', 'enabled'), ('request_objects', 'enabled'),
+                ('jarm', 'enabled'), ('authorization_details', 'enabled'),
+                ('http_message_signatures', 'disabled'), ('scim', 'enabled'),
+                ('scim_security_events', 'enabled'), ('native_sso', 'enabled'),
+                ('frontchannel_logout', 'enabled'), ('session_management', 'enabled'),
+                ('openid4vci_issuer', 'enabled'), ('openid4vp_verifier', 'enabled')
+         ), inserted AS (
+             INSERT INTO runtime_module_desired_states
+                (tenant_id, module_id, desired_mode, revision, actor_id, reason, updated_at)
+             SELECT $1, module_id, desired_mode, 1, NULL,
+                    'tenant capability defaults', CURRENT_TIMESTAMP
+             FROM modules
+             ON CONFLICT (tenant_id, module_id) DO NOTHING
+             RETURNING tenant_id, module_id, desired_mode, revision, actor_id, reason, updated_at
+         )
+         INSERT INTO runtime_module_state_events (
+             event_id, tenant_id, module_id, event_type, revision, instance_id, actor_id,
+             reason, before_state, after_state, outcome_code, occurred_at
+         )
+         SELECT uuidv7(), tenant_id, module_id, 'desired_state_changed', revision, NULL, actor_id,
+                reason, NULL, desired_mode, NULL, updated_at
+         FROM inserted",
+    )
+    .bind::<sql_types::Uuid, _>(tenant_id)
+    .execute(connection)
+    .await?;
+    Ok(())
 }
 
 impl TenantDirectoryRepository {

@@ -863,3 +863,32 @@ async fn two_instances_converge_on_new_cache_revision_and_reject_stale_replay() 
     assert_eq!(shared_directory.revision_read_count(), 0);
     assert_eq!(shared_directory.snapshot_read_count(), 0);
 }
+
+#[tokio::test]
+async fn tenant_shutdown_owns_and_stops_every_background_worker() {
+    let runtime =
+        TenantRuntime::for_test(binding(1, "tenant-a.example", "https://tenant-a.example"));
+    let worker = || tokio::spawn(async { std::future::pending::<()>().await });
+    {
+        let mut lifecycle = runtime
+            .lifecycle
+            .lock()
+            .expect("tenant runtime lifecycle mutex is not poisoned");
+        lifecycle.runtime_module_reconciler = Some(worker());
+        lifecycle.key_lifecycle = Some(tokio::spawn(async {}));
+        lifecycle.ciba_ping_worker = Some(worker());
+        lifecycle.openid4vc_revocation_worker = Some(worker());
+    }
+
+    runtime.stop_lifecycle().await;
+    runtime.stop_lifecycle().await;
+
+    let lifecycle = runtime
+        .lifecycle
+        .lock()
+        .expect("tenant runtime lifecycle mutex is not poisoned");
+    assert!(lifecycle.runtime_module_reconciler.is_none());
+    assert!(lifecycle.key_lifecycle.is_none());
+    assert!(lifecycle.ciba_ping_worker.is_none());
+    assert!(lifecycle.openid4vc_revocation_worker.is_none());
+}

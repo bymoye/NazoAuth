@@ -181,13 +181,24 @@ pub async fn presentation_response(
     }
 }
 
-pub async fn presentation_complete() -> HttpResponse {
-    HttpResponse::Ok()
-        .insert_header((header::CONTENT_TYPE, "text/html; charset=utf-8"))
-        .insert_header((header::CACHE_CONTROL, "no-store"))
-        .insert_header((header::REFERRER_POLICY, "no-referrer"))
-        .insert_header(("Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'"))
-        .body("<!doctype html><meta charset=utf-8><title>Presentation complete</title><p>Presentation complete.</p>")
+pub async fn presentation_complete(
+    endpoint: web::Data<PresentationEndpoint>,
+    transaction_id: web::Path<Uuid>,
+) -> HttpResponse {
+    match endpoint.operations.result(*transaction_id).await {
+        Ok(_) => HttpResponse::Ok()
+            .insert_header((header::CONTENT_TYPE, "text/html; charset=utf-8"))
+            .insert_header((header::CACHE_CONTROL, "no-store"))
+            .insert_header((header::REFERRER_POLICY, "no-referrer"))
+            .insert_header((
+                "Content-Security-Policy",
+                "default-src 'none'; frame-ancestors 'none'",
+            ))
+            .body(
+                "<!doctype html><html><head><meta charset=utf-8><title>Presentation verified</title></head><body><main data-testid=\"vp-verification-result\" data-status=\"verified\"><h1>Presentation verified</h1><p>The credential presentation was verified successfully.</p></main></body></html>",
+            ),
+        Err(error) => presentation_error(error),
+    }
 }
 
 fn parse_presentation_response(

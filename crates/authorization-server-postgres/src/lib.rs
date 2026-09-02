@@ -57,8 +57,14 @@ impl ServerPersistenceProvider for PostgresProvider {
         Arc::new(PostgresPoolMetrics)
     }
 
-    fn runtime_modules(&self) -> Arc<dyn nazo_persistence::RuntimeModuleStore> {
-        Arc::new(RuntimeModuleRepository::new(self.pool.clone()))
+    fn runtime_modules(
+        &self,
+        tenant_id: uuid::Uuid,
+    ) -> Arc<dyn nazo_persistence::RuntimeModuleStore> {
+        Arc::new(RuntimeModuleRepository::for_tenant(
+            self.pool.clone(),
+            tenant_id,
+        ))
     }
 
     fn authorization_repository(
@@ -402,3 +408,7 @@ impl PersistenceLauncher for PostgresLauncher {
         })
     }
 }
+
+#[cfg(test)]
+#[path = "../tests/unit/lib.rs"]
+mod tests;

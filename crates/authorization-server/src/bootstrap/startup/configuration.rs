@@ -107,16 +107,6 @@ pub(super) async fn load(
     )?;
 
     let token_issuance_response_keys = token_issuance_response_key_ring(&config)?;
-    let runtime_modules = web::Data::new(
-        RuntimeModules::initialize(
-            persistence.provider().runtime_modules(),
-            &route_settings,
-            control_discovery.runtime_instance_id(),
-        )
-        .await?,
-    );
-    background::spawn_runtime_reconciler(runtime_modules.clone());
-
     let state_backend = transient_state_launcher
         .server_bindings(&config, control_discovery.deployment_id())
         .await
@@ -133,7 +123,6 @@ pub(super) async fn load(
         state_backend,
         token_issuance_response_keys,
         control_discovery,
-        runtime_modules,
         database_pool_metrics,
         route_settings,
     });

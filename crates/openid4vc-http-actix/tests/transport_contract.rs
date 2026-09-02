@@ -10,7 +10,7 @@ use nazo_openid4vc_http_actix::{
     PresentationEndpoint, PresentationFuture, PresentationHttpError, PresentationOperations,
     PresentationResponseBody, PresentationResponseInput, create_credential_offer,
     create_presentation, credential, credential_issuer_metadata, deferred_credential, notification,
-    presentation_response,
+    presentation_complete, presentation_response,
 };
 use nazo_openid4vci::{
     CredentialIssuerMetadata, CredentialOffer, CredentialRequest, CredentialResponse,
@@ -179,10 +179,68 @@ impl PresentationOperations for Verifier {
 
     fn result<'a>(
         &'a self,
-        _: Uuid,
+        transaction_id: Uuid,
     ) -> PresentationFuture<'a, Result<PresentationResult, PresentationHttpError>> {
-        Box::pin(async { unreachable!() })
+        Box::pin(async move {
+            if transaction_id.is_nil() {
+                return Err(PresentationHttpError {
+                    status: 404,
+                    error: "not_found",
+                    description: "Presentation transaction was not found.",
+                });
+            }
+            Ok(PresentationResult {
+                transaction_id,
+                credentials: Vec::new(),
+                completed_at: chrono::Utc::now(),
+            })
+        })
     }
+}
+
+#[test]
+async fn presentation_completion_page_reflects_a_verified_transaction() {
+    let endpoint = web::Data::new(PresentationEndpoint::new(Arc::new(Verifier), "secret"));
+    let app = test::init_service(App::new().app_data(endpoint).route(
+        "/openid4vp/complete/{transaction_id}",
+        web::get().to(presentation_complete),
+    ))
+    .await;
+    let response = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri(&format!("/openid4vp/complete/{}", Uuid::now_v7()))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = test::read_body(response).await;
+    let body = std::str::from_utf8(&body).expect("completion page is UTF-8");
+    assert!(body.contains("data-testid=\"vp-verification-result\""));
+    assert!(body.contains("data-status=\"verified\""));
+    assert!(body.contains("Presentation verified"));
+}
+
+#[test]
+async fn presentation_completion_page_does_not_claim_an_unknown_transaction_succeeded() {
+    let endpoint = web::Data::new(PresentationEndpoint::new(Arc::new(Verifier), "secret"));
+    let app = test::init_service(App::new().app_data(endpoint).route(
+        "/openid4vp/complete/{transaction_id}",
+        web::get().to(presentation_complete),
+    ))
+    .await;
+    let response = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri(&format!("/openid4vp/complete/{}", Uuid::nil()))
+            .to_request(),
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let body = test::read_body(response).await;
+    let body = std::str::from_utf8(&body).expect("error response is UTF-8");
+    assert!(!body.contains("data-status=\"verified\""));
 }
 struct CapturingVerifier {
     responses: Mutex<Vec<PresentationResponseInput>>,

@@ -441,7 +441,8 @@ diesel::table! {
 }
 
 diesel::table! {
-    runtime_module_desired_states (module_id) {
+    runtime_module_desired_states (tenant_id, module_id) {
+        tenant_id -> Uuid,
         module_id -> Varchar,
         desired_mode -> Varchar,
         revision -> Int8,
@@ -452,7 +453,8 @@ diesel::table! {
 }
 
 diesel::table! {
-    runtime_module_instance_states (instance_id, module_id) {
+    runtime_module_instance_states (tenant_id, instance_id, module_id) {
+        tenant_id -> Uuid,
         instance_id -> Varchar,
         module_id -> Varchar,
         actual_state -> Varchar,
@@ -467,6 +469,7 @@ diesel::table! {
 diesel::table! {
     runtime_module_state_events (event_id) {
         event_id -> Uuid,
+        tenant_id -> Uuid,
         module_id -> Varchar,
         event_type -> Varchar,
         revision -> Int8,

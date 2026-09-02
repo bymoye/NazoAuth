@@ -1,1 +1,1 @@
-20260831000500_tenant_runtime_revision
+20260901000100_tenant_scoped_runtime_modules

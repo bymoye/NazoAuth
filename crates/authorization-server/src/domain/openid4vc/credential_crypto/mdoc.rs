@@ -46,7 +46,12 @@ pub(super) async fn sign(
             .ok_or(CredentialTrustError::InvalidEncoding)?;
         let entries = object
             .iter()
-            .map(|(name, value)| Ok((name.as_str(), json_to_cbor(value)?)))
+            .map(|(name, value)| {
+                Ok((
+                    name.as_str(),
+                    mdoc_element_to_cbor(&input.payload.credential_type, namespace, name, value)?,
+                ))
+            })
             .collect::<Result<Vec<_>, CredentialTrustError>>()?;
         builder = builder.add_namespace(namespace, entries);
     }
@@ -85,6 +90,27 @@ pub(super) async fn sign(
     Ok(URL_SAFE_NO_PAD.encode(
         encode_cbor_canonical(&issuer_signed).map_err(|_| CredentialTrustError::InvalidEncoding)?,
     ))
+}
+
+pub(super) fn mdoc_element_to_cbor(
+    doc_type: &str,
+    namespace: &str,
+    element: &str,
+    value: &Value,
+) -> Result<ciborium::Value, CredentialTrustError> {
+    if doc_type == "org.iso.18013.5.1.mDL"
+        && namespace == "org.iso.18013.5.1"
+        && matches!(element, "portrait" | "signature_usual_mark")
+    {
+        let encoded = value
+            .as_str()
+            .ok_or(CredentialTrustError::InvalidEncoding)?;
+        let bytes = URL_SAFE_NO_PAD
+            .decode(encoded)
+            .map_err(|_| CredentialTrustError::InvalidEncoding)?;
+        return Ok(ciborium::Value::Bytes(bytes));
+    }
+    json_to_cbor(value)
 }
 
 pub(super) fn verify(

@@ -752,19 +752,20 @@ async fn pending_migrations_create_all_runtime_module_state_tables() {
                 .batch_execute(
                     r#"
                     INSERT INTO runtime_module_desired_states
-                        (module_id, desired_mode, revision)
-                    VALUES ('scim_security_events', 'disabled', 1)
-                    ON CONFLICT (module_id) DO NOTHING;
+                        (tenant_id, module_id, desired_mode, revision)
+                    VALUES ('00000000-0000-0000-0000-000000000001', 'scim_security_events', 'disabled', 1)
+                    ON CONFLICT (tenant_id, module_id) DO NOTHING;
                     INSERT INTO runtime_module_instance_states
-                        (instance_id, module_id, actual_state, transition_revision)
+                        (tenant_id, instance_id, module_id, actual_state, transition_revision)
                     VALUES (
+                        '00000000-0000-0000-0000-000000000001',
                         'migration-catalog-test-' || gen_random_uuid()::text,
                         'scim_security_events', 'disabled', 1
                     );
                     INSERT INTO runtime_module_state_events
-                        (event_id, module_id, event_type, revision)
+                        (event_id, tenant_id, module_id, event_type, revision)
                     VALUES (
-                        gen_random_uuid(), 'scim_security_events',
+                        gen_random_uuid(), '00000000-0000-0000-0000-000000000001', 'scim_security_events',
                         'transition_completed', 1
                     );
                     "#,

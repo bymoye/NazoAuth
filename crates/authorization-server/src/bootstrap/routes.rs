@@ -232,13 +232,12 @@ fn configure_with_cors(
             .wrap(from_fn(control_tenant_only))
             .route(web::post().to(control_discovery)),
     );
-    // Register exact deployment-level scopes before the broad `/admin`
-    // scope. Actix runs the last wrapper first, so the tenant gate also runs
-    // before CORS can answer a preflight without calling the inner service.
+    // Register exact administrative scopes before the broad `/admin` scope.
+    // Runtime-module state belongs to the host-selected tenant; the endpoint's
+    // existing session and MFA checks authorize that tenant's administrator.
     cfg.service(
         web::scope("/admin/runtime-modules")
             .wrap(cors_policy.admin())
-            .wrap(from_fn(control_tenant_only))
             .route("", web::get().to(admin_runtime_modules))
             .route("/events", web::get().to(admin_runtime_module_events))
             .route("/{module_id}", web::patch().to(admin_patch_runtime_module)),

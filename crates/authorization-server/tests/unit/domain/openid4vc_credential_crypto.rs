@@ -713,6 +713,40 @@ async fn mdoc_signing_covers_holder_and_namespace_encoding_errors() {
 }
 
 #[test]
+fn mdoc_mdl_binary_elements_require_base64url_and_encode_as_bstr() {
+    let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b"portrait-bytes");
+    assert_eq!(
+        super::mdoc::mdoc_element_to_cbor(
+            "org.iso.18013.5.1.mDL",
+            "org.iso.18013.5.1",
+            "portrait",
+            &json!(encoded),
+        )
+        .unwrap(),
+        ciborium::Value::Bytes(b"portrait-bytes".to_vec())
+    );
+    assert!(
+        super::mdoc::mdoc_element_to_cbor(
+            "org.iso.18013.5.1.mDL",
+            "org.iso.18013.5.1",
+            "portrait",
+            &json!("not-base64url-length-one-x"),
+        )
+        .is_err()
+    );
+    assert_eq!(
+        super::mdoc::mdoc_element_to_cbor(
+            "other-document",
+            "org.iso.18013.5.1",
+            "portrait",
+            &json!("plain-text"),
+        )
+        .unwrap(),
+        ciborium::Value::Text("plain-text".to_owned())
+    );
+}
+
+#[test]
 fn sd_jwt_chain_and_combined_anchor_validation_fail_closed() {
     let certs = certificate_fixture("issuer.example");
     let crypto = Openid4vcCredentialCrypto {
