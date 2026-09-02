@@ -3,7 +3,7 @@
 Project changes are recorded in Keep a Changelog style. Versioned releases use
 semantic versioning once public release tags are cut.
 
-## Unreleased
+## 0.2.8 - 2026-09-02
 
 ### Added
 
