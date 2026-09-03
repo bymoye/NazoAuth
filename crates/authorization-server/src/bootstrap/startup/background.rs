@@ -89,25 +89,16 @@ pub(super) fn spawn_key_lifecycle(
     tokio::spawn(keyset.run_lifecycle())
 }
 
-#[cfg(not(test))]
 pub(super) fn spawn_ciba_ping_worker(
     deliveries: Arc<dyn crate::bootstrap::CibaPingDeliveryPort>,
     settings: &Settings,
-    runtime_modules: &RuntimeModules,
+    _runtime_modules: &RuntimeModules,
 ) -> anyhow::Result<Option<tokio::task::JoinHandle<()>>> {
-    if nazo_auth::module_admissible(
-        runtime_modules.registry.snapshot().as_ref(),
-        nazo_runtime_modules::ModuleId::Ciba,
-        nazo_auth::CapabilityAdmission::NewRequest,
-    ) {
-        return Ok(Some(spawn_ciba_ping_delivery_worker(
-            CibaPingDeliveryWorker::new(
-                deliveries,
-                &settings.ciba.ciba_notification_private_origins,
-            )?,
-        )));
-    }
-    Ok(None)
+    // Tenant capabilities can change after this runtime starts; the delivery
+    // queue, rather than the startup snapshot, determines whether work exists.
+    Ok(Some(spawn_ciba_ping_delivery_worker(
+        CibaPingDeliveryWorker::new(deliveries, &settings.ciba.ciba_notification_private_origins)?,
+    )))
 }
 
 #[cfg(not(test))]
@@ -122,3 +113,7 @@ pub(super) fn spawn_backchannel_logout_worker(
         )?,
     ))
 }
+
+#[cfg(test)]
+#[path = "../../../tests/unit/bootstrap/startup/background.rs"]
+mod tests;
