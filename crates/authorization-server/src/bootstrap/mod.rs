@@ -50,14 +50,14 @@ use crate::adapters::security::{
 use crate::config::ConfigSource;
 #[cfg(not(test))]
 use crate::domain::{
-    BackchannelLogoutWorker, CibaPingDeliveryWorker, ServerTokenManagementOperations,
-    ServerTokenManagementRequestGuard, spawn_backchannel_logout_delivery_worker,
-    spawn_ciba_ping_delivery_worker,
+    BackchannelLogoutWorker, ServerTokenManagementOperations, ServerTokenManagementRequestGuard,
+    spawn_backchannel_logout_delivery_worker,
 };
 use crate::domain::{
-    CredentialDatasetAdminService, Openid4vcClientAttestationValidator, Openid4vcCredentialCrypto,
-    Openid4vcProofValidator, PresentationVerifierConfig, ServerCredentialIssuerOperations,
-    ServerPresentationOperations,
+    CibaPingDeliveryWorker, CredentialDatasetAdminService, Openid4vcClientAttestationValidator,
+    Openid4vcCredentialCrypto, Openid4vcProofValidator, PresentationVerifierConfig,
+    ServerCredentialIssuerOperations, ServerPresentationOperations,
+    spawn_ciba_ping_delivery_worker,
 };
 use crate::domain::{
     DynamicRegistrationConfig, ServerUserinfoOperations, dynamic_registration_endpoint,
