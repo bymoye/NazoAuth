@@ -129,15 +129,14 @@ impl TenantRuntime {
         // Construct the only fallible worker before starting the key worker.
         // If it rejects configuration, no candidate has started a lifecycle.
         #[cfg(not(test))]
-        let ciba_ping_worker = background::spawn_ciba_ping_worker(
+        let ciba_ping_worker = Some(background::spawn_ciba_ping_worker(
             assembly
                 .startup
                 .transient_state
                 .provider()
                 .ciba_ping_deliveries(),
             &assembly.startup.settings,
-            assembly.startup.runtime_modules.get_ref(),
-        )?;
+        )?);
         #[cfg(test)]
         let ciba_ping_worker = None;
 

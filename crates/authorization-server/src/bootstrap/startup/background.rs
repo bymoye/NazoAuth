@@ -93,21 +93,12 @@ pub(super) fn spawn_key_lifecycle(
 pub(super) fn spawn_ciba_ping_worker(
     deliveries: Arc<dyn crate::bootstrap::CibaPingDeliveryPort>,
     settings: &Settings,
-    runtime_modules: &RuntimeModules,
-) -> anyhow::Result<Option<tokio::task::JoinHandle<()>>> {
-    if nazo_auth::module_admissible(
-        runtime_modules.registry.snapshot().as_ref(),
-        nazo_runtime_modules::ModuleId::Ciba,
-        nazo_auth::CapabilityAdmission::NewRequest,
-    ) {
-        return Ok(Some(spawn_ciba_ping_delivery_worker(
-            CibaPingDeliveryWorker::new(
-                deliveries,
-                &settings.ciba.ciba_notification_private_origins,
-            )?,
-        )));
-    }
-    Ok(None)
+) -> anyhow::Result<tokio::task::JoinHandle<()>> {
+    // Tenant capabilities can change after this runtime starts; the delivery
+    // queue, rather than the startup snapshot, determines whether work exists.
+    Ok(spawn_ciba_ping_delivery_worker(
+        CibaPingDeliveryWorker::new(deliveries, &settings.ciba.ciba_notification_private_origins)?,
+    ))
 }
 
 #[cfg(not(test))]
