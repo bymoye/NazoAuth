@@ -1,11 +1,32 @@
 use std::time::Duration;
 
+use fred::interfaces::LuaInterface;
+use nazo_auth::{
+    CibaAuthenticationContext, CibaDecision, CibaPingNotification, CibaPingNotificationStatus,
+    CibaRequestState, CibaService, CibaStatus,
+};
 use nazo_identity::{TenantId, UserId, session::SessionRecord};
-use nazo_valkey::{SessionStore, ValkeyConnection};
+use nazo_valkey::{
+    CibaPingFinishOutcome, CibaPingFinishResult, CibaStore, SessionStore, ValkeyClient,
+    ValkeyConnection,
+};
 use uuid::Uuid;
 
 fn tenant(value: u128) -> TenantId {
     TenantId::new(Uuid::from_u128(value)).expect("test tenant must be non-nil")
+}
+
+async fn server_time(client: &fred::prelude::Client) -> i64 {
+    client
+        .eval::<String, _, _, _>(
+            "return tostring(redis.call('TIME')[1])",
+            Vec::<String>::new(),
+            Vec::<String>::new(),
+        )
+        .await
+        .expect("read Valkey server time")
+        .parse()
+        .expect("Valkey server time is an integer")
 }
 
 #[test]
@@ -94,6 +115,151 @@ async fn two_tenants_can_store_the_same_logical_key_without_conflict() {
         .delete(&session_id)
         .await
         .expect("remove second fixture");
+}
+
+#[tokio::test]
+async fn ciba_ping_queue_is_isolated_between_tenants_with_the_same_auth_req_id() {
+    let Ok(url) = std::env::var("VALKEY_URL") else {
+        return;
+    };
+    let client = nazo_valkey::test_support::connect(&url, Duration::from_secs(1))
+        .await
+        .expect("an explicitly configured Valkey must be available");
+    let now = server_time(&client).await;
+    let deployment_id = format!("ciba-isolation-{}", Uuid::now_v7());
+    let state_epoch = Uuid::now_v7();
+    let tenant_a = tenant(0x500);
+    let tenant_b = tenant(0x501);
+    let valkey = ValkeyClient::from_existing_client(client, &deployment_id, state_epoch)
+        .expect("valid shared deployment namespace");
+    let store_a = CibaStore::new(&valkey.for_tenant(tenant_a));
+    let store_b = CibaStore::new(&valkey.for_tenant(tenant_b));
+    let auth_req_id = format!("shared-ciba-{}", Uuid::now_v7());
+    let endpoint_a = "https://tenant-a.example/ciba";
+    let endpoint_b = "https://tenant-b.example/ciba";
+    let token_a = "tenant-a-notification-token";
+    let token_b = "tenant-b-notification-token";
+    let user_a = Uuid::from_u128(0x502);
+    let user_b = Uuid::from_u128(0x503);
+    let pending_state = |client_id: &str, user_id, endpoint: &str, token: &str| CibaRequestState {
+        client_id: client_id.to_owned(),
+        user_id,
+        scopes: vec!["openid".to_owned()],
+        audiences: vec!["resource".to_owned()],
+        acr: None,
+        authentication_context: None,
+        binding_message: None,
+        issued_at: now,
+        status: CibaStatus::Pending,
+        interval_seconds: 5,
+        expires_at: now + 60,
+        retention_expires_at: now + 180,
+        last_poll_at: None,
+        ping_notification: Some(CibaPingNotification {
+            auth_req_id: None,
+            endpoint: endpoint.to_owned(),
+            client_notification_token: Some(token.to_owned()),
+            status: CibaPingNotificationStatus::AwaitingDecision,
+            attempts: 0,
+            next_attempt_at: None,
+        }),
+    };
+
+    for (store, client_id, user_id, endpoint, token) in [
+        (&store_a, "client-a", user_a, endpoint_a, token_a),
+        (&store_b, "client-b", user_b, endpoint_b, token_b),
+    ] {
+        let generated_auth_req_id = auth_req_id.clone();
+        assert_eq!(
+            CibaService::new(store.clone())
+                .create_unique(&pending_state(client_id, user_id, endpoint, token), || {
+                    generated_auth_req_id.clone()
+                },)
+                .await
+                .expect("create tenant CIBA state"),
+            auth_req_id
+        );
+        CibaService::new(store.clone())
+            .decide(
+                &auth_req_id,
+                CibaDecision::Approve(CibaAuthenticationContext {
+                    auth_time: now,
+                    amr: vec!["pwd".to_owned()],
+                    oidc_sid: None,
+                }),
+                Some(user_id),
+                || now,
+            )
+            .await
+            .expect("schedule tenant ping delivery");
+    }
+
+    let delivery_a = store_a
+        .claim_due_ping(now, now + 15, 10)
+        .await
+        .expect("claim tenant A ping");
+    assert_eq!(delivery_a.len(), 1);
+    assert_eq!(delivery_a[0].auth_req_id, auth_req_id);
+    assert_eq!(delivery_a[0].endpoint, endpoint_a);
+    assert_eq!(delivery_a[0].client_notification_token, token_a);
+
+    assert_eq!(
+        store_a
+            .finish_ping(&delivery_a[0], CibaPingFinishOutcome::Delivered)
+            .await
+            .expect("finish tenant A ping"),
+        CibaPingFinishResult::Applied
+    );
+    let stored_b = store_b
+        .load(&auth_req_id)
+        .await
+        .expect("load tenant B CIBA state")
+        .expect("tenant B CIBA state remains");
+    let notification_b = stored_b
+        .state()
+        .ping_notification
+        .as_ref()
+        .expect("tenant B ping state remains");
+    assert_eq!(notification_b.status, CibaPingNotificationStatus::Pending);
+    assert_eq!(notification_b.endpoint, endpoint_b);
+    assert_eq!(
+        notification_b.client_notification_token.as_deref(),
+        Some(token_b)
+    );
+    let delivery_b = store_b
+        .claim_due_ping(now, now + 15, 10)
+        .await
+        .expect("claim tenant B ping after tenant A completes");
+    assert_eq!(delivery_b.len(), 1);
+    assert_eq!(delivery_b[0].auth_req_id, auth_req_id);
+    assert_eq!(delivery_b[0].endpoint, endpoint_b);
+    assert_eq!(delivery_b[0].client_notification_token, token_b);
+
+    assert_eq!(
+        store_b
+            .finish_ping(&delivery_b[0], CibaPingFinishOutcome::Delivered)
+            .await
+            .expect("finish tenant B ping"),
+        CibaPingFinishResult::Applied
+    );
+    let stored_a = store_a
+        .load(&auth_req_id)
+        .await
+        .expect("load tenant A cleanup state")
+        .expect("tenant A cleanup state exists");
+    let stored_b = store_b
+        .load(&auth_req_id)
+        .await
+        .expect("load tenant B cleanup state")
+        .expect("tenant B cleanup state exists");
+    store_a
+        .delete(&auth_req_id, stored_a.version())
+        .await
+        .expect("remove tenant A fixture");
+    store_b
+        .delete(&auth_req_id, stored_b.version())
+        .await
+        .expect("remove tenant B fixture");
 }
 
 #[tokio::test]
