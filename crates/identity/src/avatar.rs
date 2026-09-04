@@ -20,15 +20,22 @@ pub enum AvatarContentType {
 impl AvatarContentType {
     #[must_use]
     pub fn detect(bytes: &[u8]) -> Option<Self> {
-        if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
-            Some(Self::Png)
-        } else if bytes.starts_with(b"\xff\xd8\xff") {
-            Some(Self::Jpeg)
-        } else if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
-            Some(Self::Webp)
-        } else {
-            None
-        }
+        const MAX_DIMENSION: u32 = 4_096;
+        let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes));
+        reader = reader.with_guessed_format().ok()?;
+        let format = reader.format()?;
+        let content_type = match format {
+            image::ImageFormat::Png => Self::Png,
+            image::ImageFormat::Jpeg => Self::Jpeg,
+            image::ImageFormat::WebP => Self::Webp,
+            _ => return None,
+        };
+        let mut limits = image::Limits::default();
+        limits.max_image_width = Some(MAX_DIMENSION);
+        limits.max_image_height = Some(MAX_DIMENSION);
+        limits.max_alloc = Some(u64::from(MAX_DIMENSION) * u64::from(MAX_DIMENSION) * 4);
+        reader.limits(limits);
+        reader.decode().ok().map(|_| content_type)
     }
 
     #[must_use]
