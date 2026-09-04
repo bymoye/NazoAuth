@@ -1,7 +1,53 @@
-use std::fmt;
+use std::{fmt, future::Future, pin::Pin};
 
 use rand::Rng as _;
 use uuid::Uuid;
+
+pub type SigningKeyRepositoryFuture<'a, T> =
+    Pin<Box<dyn Future<Output = anyhow::Result<T>> + Send + 'a>>;
+
+/// One tenant-bound, authoritative keyset record. The public projection and
+/// encrypted private payload are one generation: callers must authenticate
+/// both with [`SigningKeyWrappingKeyRing::open_generation`] before use.
+#[derive(Clone, Debug)]
+pub struct PersistedSigningKeyset {
+    pub revision: i64,
+    pub public_metadata: serde_json::Value,
+    /// Twelve-byte nonce followed by AES-GCM ciphertext and tag.
+    pub encrypted_private_material: Vec<u8>,
+    pub wrapping_key_id: String,
+}
+
+#[derive(Clone, Debug)]
+pub enum SigningKeysetCreateResult {
+    Created(PersistedSigningKeyset),
+    Existing(PersistedSigningKeyset),
+}
+
+#[derive(Clone, Debug)]
+pub enum SigningKeysetCompareAndSwapResult {
+    Applied(PersistedSigningKeyset),
+    Conflict(PersistedSigningKeyset),
+}
+
+/// Persistence boundary for the one tenant selected by its adapter.
+///
+/// The adapter owns SQL and atomicity. Key-management owns key generation,
+/// metadata validation, encryption, and lifecycle transitions.
+pub trait SigningKeyRepository: Send + Sync {
+    fn load(&self) -> SigningKeyRepositoryFuture<'_, Option<PersistedSigningKeyset>>;
+
+    fn create_if_absent(
+        &self,
+        candidate: PersistedSigningKeyset,
+    ) -> SigningKeyRepositoryFuture<'_, SigningKeysetCreateResult>;
+
+    fn compare_and_swap(
+        &self,
+        expected_revision: i64,
+        candidate: PersistedSigningKeyset,
+    ) -> SigningKeyRepositoryFuture<'_, SigningKeysetCompareAndSwapResult>;
+}
 
 /// Deployment-provided wrapping material for persisted signing-key private
 /// material. The current key seals new generations; the previous key exists
@@ -23,6 +69,33 @@ pub struct SealedKeyMaterial {
     pub wrapping_key_id: String,
     pub nonce: [u8; 12],
     pub ciphertext: Vec<u8>,
+}
+
+impl SealedKeyMaterial {
+    #[must_use]
+    pub fn into_persisted_bytes(self) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(self.nonce.len() + self.ciphertext.len());
+        bytes.extend_from_slice(&self.nonce);
+        bytes.extend_from_slice(&self.ciphertext);
+        bytes
+    }
+
+    pub fn from_persisted_bytes(
+        wrapping_key_id: String,
+        bytes: &[u8],
+    ) -> anyhow::Result<Self> {
+        let nonce = bytes
+            .get(..12)
+            .ok_or_else(|| anyhow::anyhow!("signing-key encrypted material is malformed"))?
+            .try_into()
+            .expect("twelve-byte slice converts to nonce");
+        let ciphertext = bytes[12..].to_vec();
+        Ok(Self {
+            wrapping_key_id,
+            nonce,
+            ciphertext,
+        })
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
