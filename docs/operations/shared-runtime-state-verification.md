@@ -12,6 +12,13 @@ used. Cloudflare R2 verification uses the supplied account's existing bucket,
 application-generated test objects, and no changes to bucket CORS or lifecycle.
 Credentials are environment input, never repository fixtures.
 
+Hostinger's selected object storage is Cloudflare R2, bucket `nazoauth`, region
+`auto`, with path-style requests. Its `r2storage.nazoauth.com` public domain is
+deployment configuration, not a core default or a presigned-upload endpoint.
+The concrete adapter receives the account's R2 S3 API endpoint and credentials
+through deployment configuration. This selection does not switch the currently
+running instance to the newly built software.
+
 ## Verification commands and results
 
 Source verification and Hostinger Release builds are complete:
@@ -109,10 +116,12 @@ configuration and is not established by a successful server-side HTTP upload.
 
 The supplied R2 bucket's managed `r2.dev` access was disabled, but its custom
 domain still served a staging probe anonymously (HTTP 200). The harmless
-probe was removed (HTTP 204). Bucket public access is a separate deployment
-issue: this adapter requires a private bucket so unfinished uploads cannot
-be read publicly. Custom-domain changes await the user's authorization;
-successful authenticated S3 operations do not establish bucket privacy.
+probe was removed (HTTP 204). The user assigned this R2 service and public
+domain to Hostinger's deployment configuration; the domain remains unchanged.
+Preventing anonymous staging reads is a deployment access-policy requirement,
+not a requirement to remove the whole public domain or add Cloudflare-specific
+logic to NazoAuth. Successful authenticated S3 operations do not establish
+staging privacy; that deployment policy remains unverified after this choice.
 
 Database-backed signing keys do not migrate mdoc IACA private keys,
 certificates or CRLs, which have a separate deployment lifecycle. This work
