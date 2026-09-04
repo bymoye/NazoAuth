@@ -624,6 +624,74 @@ impl GrantSummaryRepositoryPort for UnavailableAvatarGrants {
     }
 }
 
+#[actix_web::test]
+async fn avatar_upload_capability_requires_login() {
+    let state = Data::new(test_state());
+    let response = super::avatar_upload_capability(
+        crate::test_support::profile_sessions(&state),
+        disabled_avatar_profiles(),
+        actix_web::test::TestRequest::get().to_http_request(),
+    )
+    .await;
+    let (status, body, _) = response_json(response).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(body["error"], "login_required");
+    assert!(body.get("upload_mode").is_none());
+}
+
+#[actix_web::test]
+async fn avatar_upload_capability_reports_the_selected_tenant_service_without_csrf() {
+    let Some(fixture) = LiveAvatarFixture::new().await else {
+        return;
+    };
+    let suffix = Uuid::now_v7().simple().to_string();
+    let user = fixture.create_user(&suffix, None).await;
+    let sid = format!("avatar-capability-{suffix}");
+    fixture.store_session(&user, &sid).await;
+    for (avatars, expected) in [
+        (disabled_avatar_profiles(), "disabled"),
+        (
+            crate::test_support::avatar_profiles(&fixture.state),
+            "multipart",
+        ),
+        (
+            direct_avatar_profiles_for_http(
+                &fixture.state,
+                HttpDirectStorage::default(),
+                HttpDirectState::default(),
+                1024,
+            ),
+            "direct",
+        ),
+    ] {
+        let app = actix_web::test::init_service(
+            actix_web::App::new()
+                .app_data(crate::test_support::profile_sessions(&fixture.state))
+                .app_data(avatars)
+                .route(
+                    "/auth/me/avatar/uploads",
+                    actix_web::web::get().to(super::avatar_upload_capability),
+                ),
+        )
+        .await;
+        let request = actix_web::test::TestRequest::get()
+            .uri("/auth/me/avatar/uploads")
+            .cookie(Cookie::new(
+                fixture.state.settings.session.session_cookie_name.clone(),
+                sid.clone(),
+            ))
+            .to_request();
+        let response = actix_web::test::call_service(&app, request).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(header::CACHE_CONTROL).unwrap(),
+            "no-store"
+        );
+        let body: Value = actix_web::test::read_body_json(response).await;
+        assert_eq!(body, serde_json::json!({"upload_mode": expected}));
+    }
+}
+
 #[tokio::test]
 async fn disabled_avatar_storage_returns_forbidden_after_auth_without_consuming_or_mutating() {
     let Some(fixture) = LiveAvatarFixture::new().await else {
@@ -1198,7 +1266,10 @@ async fn begin_direct_avatar_upload_maps_validation_storage_and_success() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(body["error"], "invalid_request");
-    assert_eq!(body["error_description"], "头像文件大小必须大于零.");
+    assert_eq!(
+        body["error_description"],
+        "Avatar file size must be greater than zero."
+    );
     assert!(!has_set_cookie);
 
     let (status, body, _) = response_json(
@@ -1231,7 +1302,10 @@ async fn begin_direct_avatar_upload_maps_validation_storage_and_success() {
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(body["error"], "invalid_request");
-    assert_eq!(body["error_description"], "当前头像存储不支持直接上传.");
+    assert_eq!(
+        body["error_description"],
+        "Direct avatar upload is not supported by the configured storage."
+    );
 
     let (status, body, has_set_cookie) = response_json(
         begin_direct_avatar_upload_with_profiles(
@@ -1386,7 +1460,7 @@ async fn complete_direct_avatar_upload_maps_validation_storage_and_success() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(body["error"], "invalid_request");
-    assert_eq!(body["error_description"], "头像上传标识无效.");
+    assert_eq!(body["error_description"], "Avatar upload ID is invalid.");
 
     let upload_id = Uuid::now_v7().to_string();
     let (status, body, _) = response_json(
@@ -1401,7 +1475,10 @@ async fn complete_direct_avatar_upload_maps_validation_storage_and_success() {
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(body["error"], "invalid_request");
-    assert_eq!(body["error_description"], "当前头像存储不支持直接上传.");
+    assert_eq!(
+        body["error_description"],
+        "Direct avatar upload is not supported by the configured storage."
+    );
 
     let (status, body, _) = response_json(
         complete_direct_avatar_upload_with_profiles(
@@ -1420,7 +1497,7 @@ async fn complete_direct_avatar_upload_maps_validation_storage_and_success() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(body["error"], "invalid_request");
-    assert_eq!(body["error_description"], "头像上传已失效.");
+    assert_eq!(body["error_description"], "Avatar upload has expired.");
 
     let (status, body, _) = response_json(
         complete_direct_avatar_upload_with_profiles(
@@ -1439,7 +1516,10 @@ async fn complete_direct_avatar_upload_maps_validation_storage_and_success() {
     .await;
     assert_eq!(status, StatusCode::CONFLICT);
     assert_eq!(body["error"], "invalid_request");
-    assert_eq!(body["error_description"], "头像上传正在确认中.");
+    assert_eq!(
+        body["error_description"],
+        "Avatar upload is being completed."
+    );
 
     let expired_claim =
         pending_direct_claim(&user, &upload_id, Utc::now() - chrono::Duration::seconds(1));
@@ -1460,7 +1540,7 @@ async fn complete_direct_avatar_upload_maps_validation_storage_and_success() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(body["error"], "invalid_request");
-    assert_eq!(body["error_description"], "头像上传已失效.");
+    assert_eq!(body["error_description"], "Avatar upload has expired.");
 
     let pending_claim =
         pending_direct_claim(&user, &upload_id, Utc::now() + chrono::Duration::minutes(5));
@@ -1490,7 +1570,7 @@ async fn complete_direct_avatar_upload_maps_validation_storage_and_success() {
     assert_eq!(body["error"], "invalid_request");
     assert_eq!(
         body["error_description"],
-        "头像仅支持 PNG、JPEG、WEBP 格式."
+        "Avatar must be PNG, JPEG, or WebP."
     );
 
     let unavailable_storage = HttpDirectStorage {
@@ -1516,7 +1596,7 @@ async fn complete_direct_avatar_upload_maps_validation_storage_and_success() {
     .await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(body["error"], "server_error");
-    assert_eq!(body["error_description"], "头像保存失败.");
+    assert_eq!(body["error_description"], "Failed to save avatar.");
 
     let mut concurrent_state = HttpDirectState::with_claim(pending_claim.clone());
     concurrent_state.record_candidate = Ok(false);
@@ -1537,7 +1617,10 @@ async fn complete_direct_avatar_upload_maps_validation_storage_and_success() {
     .await;
     assert_eq!(status, StatusCode::CONFLICT);
     assert_eq!(body["error"], "invalid_request");
-    assert_eq!(body["error_description"], "头像已被其他请求更新.");
+    assert_eq!(
+        body["error_description"],
+        "Avatar was updated by another request."
+    );
 
     let state_error = HttpDirectState {
         claim: Err(RepositoryError::Unavailable),
@@ -1624,7 +1707,7 @@ async fn upload_avatar_maps_multipart_parse_and_profile_overview_failures() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(body["error"], "invalid_request");
-    assert_eq!(body["error_description"], "头像文件读取失败.");
+    assert_eq!(body["error_description"], "Failed to read avatar file.");
     assert!(!has_set_cookie);
     assert!(fixture.fresh_user(parse_user.id).await.avatar_url.is_none());
 
@@ -1650,7 +1733,7 @@ async fn upload_avatar_maps_multipart_parse_and_profile_overview_failures() {
     .await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(body["error"], "server_error");
-    assert_eq!(body["error_description"], "头像保存失败.");
+    assert_eq!(body["error_description"], "Failed to save avatar.");
 
     let overview_user = fixture
         .create_user(&format!("{suffix}-overview"), None)
@@ -1679,7 +1762,10 @@ async fn upload_avatar_maps_multipart_parse_and_profile_overview_failures() {
     .await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(body["error"], "server_error");
-    assert_eq!(body["error_description"], "当前用户资料查询失败.");
+    assert_eq!(
+        body["error_description"],
+        "Failed to load current user profile."
+    );
     assert!(
         fixture
             .fresh_user(overview_user.id)

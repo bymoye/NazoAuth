@@ -2,6 +2,11 @@
 
 When the configured avatar object store exposes direct upload, a browser uploads image bytes to the object store and NazoAuth never receives an upload-body relay.
 
+An authenticated `GET /auth/me/avatar/uploads` reports the selected tenant's
+`upload_mode`: `disabled`, `multipart`, or `direct`. Clients use this capability
+to choose the upload flow and disable avatar controls when storage is unavailable.
+It exposes no provider or credentials. A failed request never switches upload modes.
+
 1. Send `POST /auth/me/avatar/uploads` with the normal authenticated session, CSRF token, and a JSON body containing the exact image byte count, for example `{"content_length": 18432}`. The value must be between one byte and the configured avatar limit.
 2. Receive `upload_id`, `expires_at`, and `upload`. Forward `upload.url`, `upload.method`, every `upload.headers` entry verbatim in the one browser request. The image bytes are sent according to that opaque target; the current direct target uses `PUT` with the image as the raw request body. Let the browser supply the body length from the `File` or `Blob` and do not set `Content-Length` from script.
 3. Before `expires_at`, send `POST /auth/me/avatar/uploads/{upload_id}/complete` with the same session and CSRF protection. The response is the normal `/auth/me` account projection.
