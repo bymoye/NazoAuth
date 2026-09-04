@@ -95,6 +95,13 @@ jobs:
       EMAIL_CODE_DEV_RESPONSE_ENABLED: "false"
       AVATAR_STORAGE_DIR: runtime/ci/avatars
       JWK_KEYS_DIR: runtime/ci/keys
+      SIGNING_KEY_ENCRYPTION_KEY_ID: ci-signing-root
+      SIGNING_KEY_ENCRYPTION_KEY: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+      NAZO_TEST_S3_ENDPOINT: http://127.0.0.1:9000
+      NAZO_TEST_S3_BUCKET: nazo-avatar-test
+      NAZO_TEST_S3_ACCESS_KEY: sharedstate-test
+      NAZO_TEST_S3_SECRET_KEY: sharedstate-test-only
+      NAZO_TEST_S3_REGION: us-east-1
       REQUIRE_PUSHED_AUTHORIZATION_REQUESTS: "false"
       FEDERATION_PROVIDER_CONFIGS: >-
         [{"provider_id":"ci-oidc","enabled":true,"display_name":"CI OIDC","adapter_type":"oidc","issuer":"https://issuer.example","authorization_endpoint":"https://issuer.example/authorize","token_endpoint":"https://issuer.example/token","jwks_url":"https://issuer.example/jwks","client_id":"ci-oidc-client","client_secret":"ci-oidc-secret","redirect_uri":"http://127.0.0.1:18000/auth/federation/ci-oidc/callback","scopes":"openid email profile"}]
@@ -124,6 +131,26 @@ jobs:
 
       - name: Prepare runtime directories
         run: mkdir -p runtime/ci/avatars runtime/ci/keys
+
+      - name: Prepare isolated avatar object storage
+        run: |
+          docker run --detach --name avatar-store --publish 127.0.0.1:9000:9000 \
+            --env MINIO_ROOT_USER="$NAZO_TEST_S3_ACCESS_KEY" \
+            --env MINIO_ROOT_PASSWORD="$NAZO_TEST_S3_SECRET_KEY" \
+            docker.io/minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e \
+            server /data
+          ready=false
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent "$NAZO_TEST_S3_ENDPOINT/minio/health/live"; then
+              ready=true
+              break
+            fi
+            sleep 1
+          done
+          test "$ready" = true
+          docker exec avatar-store mc alias set test http://127.0.0.1:9000 \
+            "$NAZO_TEST_S3_ACCESS_KEY" "$NAZO_TEST_S3_SECRET_KEY"
+          docker exec avatar-store mc mb "test/$NAZO_TEST_S3_BUCKET"
 
       - name: Create isolated audit ledger test database
         run: >-

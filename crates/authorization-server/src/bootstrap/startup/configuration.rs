@@ -11,6 +11,7 @@ pub(super) struct StartupConfiguration {
     pub(super) config: ConfigSource,
     pub(super) persistence: super::super::ServerPersistenceBindings,
     pub(super) transient_state: super::super::ServerTransientStateBindings,
+    pub(super) avatar_storage: super::super::ServerAvatarStorageCapability,
     pub(super) settings: Arc<Settings>,
     pub(super) token_issuance_response_keys: nazo_persistence::TokenIssuanceResponseKeyRing,
     pub(super) control_discovery: web::Data<crate::control_discovery::ControlDiscoveryEndpoint>,
@@ -35,6 +36,7 @@ pub(super) async fn load(
     config: ConfigSource,
     persistence: super::super::ServerPersistenceBindings,
     transient_state_launcher: &dyn crate::cli::TransientStateLauncher,
+    avatar_object_store_launcher: &dyn crate::cli::AvatarObjectStoreLauncher,
 ) -> anyhow::Result<StartupRuntime> {
     let perf_metrics_enabled = config.bool("PERF_METRICS_ENABLED", false)?;
     let password_hash_max_concurrency = config.parse::<usize>(
@@ -111,6 +113,12 @@ pub(super) async fn load(
         .server_bindings(&config, control_discovery.deployment_id())
         .await
         .map_err(|error| anyhow::anyhow!("transient-state deployment preflight failed: {error}"))?;
+    let avatar_object_store = avatar_object_store_launcher
+        .server_bindings(&config, control_discovery.deployment_id())
+        .await
+        .map_err(|error| {
+            anyhow::anyhow!("avatar object-store deployment preflight failed: {error}")
+        })?;
 
     let directory_cache = state_backend.tenant_directory_cache();
     let database_pool_metrics: web::Data<dyn nazo_persistence::DatabasePoolMetricsPort> =
@@ -121,6 +129,7 @@ pub(super) async fn load(
         control_tenant_id,
         persistence,
         state_backend,
+        avatar_object_store,
         token_issuance_response_keys,
         control_discovery,
         database_pool_metrics,

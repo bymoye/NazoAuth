@@ -1,6 +1,7 @@
 mod authorization_response;
 mod client_registration;
 mod crypto;
+mod database;
 mod external;
 mod jwks;
 mod lifecycle;
@@ -8,6 +9,7 @@ mod local;
 mod lock;
 mod model;
 mod mtls_trust;
+mod repository;
 mod request_object_encryption;
 mod serialization;
 mod store;
@@ -26,4 +28,9 @@ pub use model::{
     VerificationKey,
 };
 pub use mtls_trust::{MtlsTrustAnchorError, ValidatedMtlsTrustAnchor, validate_mtls_trust_anchor};
+pub use repository::{
+    PersistedSigningKeyset, SealedKeyMaterial, SigningKeyRepository, SigningKeyRepositoryFuture,
+    SigningKeyWrappingKeyError, SigningKeyWrappingKeyRing, SigningKeysetCompareAndSwapResult,
+    SigningKeysetCreateResult,
+};
 pub use store::{signing_algorithm_from_name, signing_algorithm_name};

@@ -78,6 +78,9 @@ class CoveragePhaseIsolationTests(unittest.TestCase):
     def test_coverage_exports_cargo_artifacts_and_uses_the_host_executable_suffix(self) -> None:
         self.assertIn('*-windows-*) EXECUTABLE_SUFFIX=".exe" ;;', self.source)
         self.assertIn('SERVER_BIN="$BIN_DIR/nazoauth$EXECUTABLE_SUFFIX"', self.source)
+        self.assertIn('E2E_SERVER_BIN="$COVERAGE_DIR/nazoauth-e2e$EXECUTABLE_SUFFIX"', self.source)
+        self.assertIn('cp "$SERVER_BIN" "$E2E_SERVER_BIN"', self.source)
+        self.assertIn('"$E2E_SERVER_BIN" > lcov-e2e.info', self.source)
         self.assertIn('TEST_OBJECT_MANIFEST="$COVERAGE_DIR/test-objects.jsonl"', self.source)
         self.assertIn('sys.stdout.buffer.write(payload.encode("utf-8") + b"\\n")', self.source)
         self.assertIn('"$object" > "$test_report"', self.source)

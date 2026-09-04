@@ -1,5 +1,5 @@
 use super::*;
-use std::{io, path::PathBuf, sync::Arc, time::Duration as StdDuration};
+use std::{collections::BTreeMap, io, path::PathBuf, sync::Arc, time::Duration as StdDuration};
 
 use crate::adapters::avatar_files::{
     AvatarPromotion, cleanup_avatar_temps, finish_avatar_promotion, promote_avatar_files,
@@ -18,9 +18,9 @@ use actix_web::error::PayloadError;
 use actix_web::{
     cookie::Cookie,
     http::{header, header::HeaderMap},
-    web::{Bytes, Data},
+    web::{Bytes, Data, Json, Path},
 };
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use diesel::prelude::*;
 use diesel::sql_query;
 use diesel::sql_types::{Bool, Nullable, Text, Uuid as SqlUuid};
@@ -34,8 +34,20 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use crate::config::ConfigSource;
+use base64::{Engine as _, engine::general_purpose::STANDARD};
+use nazo_identity::ports::{
+    AvatarDirectUploadPort, AvatarStagedObject, AvatarStorageError, AvatarStorageFuture,
+    AvatarUploadAuthorization, AvatarUploadClaim, AvatarUploadStatePort, AvatarUploadTarget,
+    GrantSummaryRepositoryPort, RepositoryError, RepositoryFuture,
+};
 use nazo_postgres::create_pool;
 use nazo_postgres::get_conn;
+
+fn valid_png() -> Vec<u8> {
+    STANDARD
+        .decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==")
+        .expect("static PNG fixture should decode")
+}
 
 fn avatar_url_version(avatar_url: &str) -> Option<&str> {
     avatar_url
@@ -81,6 +93,54 @@ async fn upload_avatar(
         crate::test_support::avatar_profiles(&state),
         req,
         multipart,
+    )
+    .await
+}
+
+fn disabled_avatar_profiles() -> Data<crate::bootstrap::AvatarProfileService> {
+    Data::new(crate::bootstrap::AvatarProfileService::Disabled)
+}
+
+async fn begin_direct_avatar_upload(
+    state: Data<TestInfrastructure>,
+    req: HttpRequest,
+    content_length: usize,
+) -> HttpResponse {
+    begin_direct_avatar_upload_with_profiles(
+        state.clone(),
+        crate::test_support::avatar_profiles(&state),
+        req,
+        content_length,
+    )
+    .await
+}
+
+async fn begin_direct_avatar_upload_with_profiles(
+    state: Data<TestInfrastructure>,
+    avatars: Data<crate::bootstrap::AvatarProfileService>,
+    req: HttpRequest,
+    content_length: usize,
+) -> HttpResponse {
+    super::begin_direct_avatar_upload(
+        crate::test_support::profile_sessions(&state),
+        avatars,
+        req,
+        Json(super::AvatarUploadBeginRequest { content_length }),
+    )
+    .await
+}
+
+async fn complete_direct_avatar_upload_with_profiles(
+    state: Data<TestInfrastructure>,
+    avatars: Data<crate::bootstrap::AvatarProfileService>,
+    req: HttpRequest,
+    upload_id: impl Into<String>,
+) -> HttpResponse {
+    super::complete_direct_avatar_upload(
+        crate::test_support::profile_sessions(&state),
+        avatars,
+        req,
+        Path::from(upload_id.into()),
     )
     .await
 }
@@ -155,7 +215,7 @@ fn request_with_session_and_csrf(state: &TestInfrastructure, sid: &str, csrf: &s
         .to_http_request()
 }
 
-fn multipart_payload(boundary: &str, field_name: &str, body: &'static [u8]) -> Multipart {
+fn multipart_payload(boundary: &str, field_name: &str, body: impl AsRef<[u8]>) -> Multipart {
     let mut headers = HeaderMap::new();
     headers.insert(
         header::CONTENT_TYPE,
@@ -172,7 +232,7 @@ fn multipart_payload(boundary: &str, field_name: &str, body: &'static [u8]) -> M
         .as_bytes(),
     );
     payload.extend_from_slice(b"Content-Type: application/octet-stream\r\n\r\n");
-    payload.extend_from_slice(body);
+    payload.extend_from_slice(body.as_ref());
     payload.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
     actix_multipart::Multipart::new(
         &headers,
@@ -343,6 +403,401 @@ async fn response_json(response: HttpResponse) -> (StatusCode, Value, bool) {
         .expect("response body should be readable");
     let json = serde_json::from_slice(&body).expect("response should be json");
     (status, json, has_set_cookie)
+}
+
+#[derive(Clone)]
+struct HttpDirectStorage {
+    authorize: Result<AvatarUploadTarget, AvatarStorageError>,
+    staged: Result<AvatarStagedObject, AvatarStorageError>,
+    publish: Result<(), AvatarStorageError>,
+    final_object: Result<nazo_identity::AvatarObject, AvatarStorageError>,
+    delete_staging: Result<(), AvatarStorageError>,
+    delete_final: Result<(), AvatarStorageError>,
+}
+
+impl Default for HttpDirectStorage {
+    fn default() -> Self {
+        Self {
+            authorize: Ok(AvatarUploadTarget {
+                url: "https://object-store.test/avatar".to_owned(),
+                method: "PUT".to_owned(),
+                headers: BTreeMap::new(),
+            }),
+            staged: Ok(AvatarStagedObject {
+                bytes: valid_png(),
+                version: "etag-http-test".to_owned(),
+            }),
+            publish: Ok(()),
+            final_object: Ok(nazo_identity::AvatarObject {
+                bytes: valid_png(),
+                content_type: nazo_identity::AvatarContentType::Png,
+                version: "final-http-test".to_owned(),
+            }),
+            delete_staging: Ok(()),
+            delete_final: Ok(()),
+        }
+    }
+}
+
+impl AvatarDirectUploadPort for HttpDirectStorage {
+    fn authorize_upload<'a>(
+        &'a self,
+        _staging_object_id: &'a str,
+        _content_length: usize,
+        _expires_at: DateTime<Utc>,
+    ) -> AvatarStorageFuture<'a, AvatarUploadTarget> {
+        let result = self.authorize.clone();
+        Box::pin(async move { result })
+    }
+
+    fn read_staged<'a>(
+        &'a self,
+        _staging_object_id: &'a str,
+        _max_bytes: usize,
+    ) -> AvatarStorageFuture<'a, AvatarStagedObject> {
+        let result = self.staged.clone();
+        Box::pin(async move { result })
+    }
+
+    fn publish_staged<'a>(
+        &'a self,
+        _staging_object_id: &'a str,
+        _expected_version: &'a str,
+        _final_object_id: &'a str,
+        _content_type: nazo_identity::AvatarContentType,
+    ) -> AvatarStorageFuture<'a, ()> {
+        let result = self.publish.clone();
+        Box::pin(async move { result })
+    }
+
+    fn read_final<'a>(
+        &'a self,
+        _final_object_id: &'a str,
+    ) -> AvatarStorageFuture<'a, nazo_identity::AvatarObject> {
+        let result = self.final_object.clone();
+        Box::pin(async move { result })
+    }
+
+    fn delete_staging<'a>(&'a self, _staging_object_id: &'a str) -> AvatarStorageFuture<'a, ()> {
+        let result = self.delete_staging.clone();
+        Box::pin(async move { result })
+    }
+
+    fn delete_final<'a>(&'a self, _final_object_id: &'a str) -> AvatarStorageFuture<'a, ()> {
+        let result = self.delete_final.clone();
+        Box::pin(async move { result })
+    }
+}
+
+#[derive(Clone)]
+struct HttpDirectState {
+    create: Result<(), RepositoryError>,
+    claim: Result<AvatarUploadClaim, RepositoryError>,
+    record_candidate: Result<bool, RepositoryError>,
+    complete: Result<bool, RepositoryError>,
+    release: Result<bool, RepositoryError>,
+}
+
+impl Default for HttpDirectState {
+    fn default() -> Self {
+        Self {
+            create: Ok(()),
+            claim: Ok(AvatarUploadClaim::Missing),
+            record_candidate: Ok(true),
+            complete: Ok(true),
+            release: Ok(true),
+        }
+    }
+}
+
+impl HttpDirectState {
+    fn with_claim(claim: AvatarUploadClaim) -> Self {
+        Self {
+            claim: Ok(claim),
+            ..Self::default()
+        }
+    }
+}
+
+impl AvatarUploadStatePort for HttpDirectState {
+    fn create<'a>(
+        &'a self,
+        _authorization: &'a AvatarUploadAuthorization,
+        _ttl_seconds: u64,
+    ) -> RepositoryFuture<'a, ()> {
+        let result = self.create.clone();
+        Box::pin(async move { result })
+    }
+
+    fn claim<'a>(
+        &'a self,
+        _user_id: nazo_identity::UserId,
+        _upload_id: &'a str,
+        _lease_until: DateTime<Utc>,
+    ) -> RepositoryFuture<'a, AvatarUploadClaim> {
+        let result = self.claim.clone();
+        Box::pin(async move { result })
+    }
+
+    fn record_candidate<'a>(
+        &'a self,
+        _user_id: nazo_identity::UserId,
+        _upload_id: &'a str,
+        _ownership_token: &'a str,
+        _staged_version: &'a str,
+        _final_object_id: &'a str,
+    ) -> RepositoryFuture<'a, bool> {
+        let result = self.record_candidate.clone();
+        Box::pin(async move { result })
+    }
+
+    fn complete<'a>(
+        &'a self,
+        _user_id: nazo_identity::UserId,
+        _upload_id: &'a str,
+        _ownership_token: &'a str,
+        _final_object_id: &'a str,
+    ) -> RepositoryFuture<'a, bool> {
+        let result = self.complete.clone();
+        Box::pin(async move { result })
+    }
+
+    fn release<'a>(
+        &'a self,
+        _user_id: nazo_identity::UserId,
+        _upload_id: &'a str,
+        _ownership_token: &'a str,
+    ) -> RepositoryFuture<'a, bool> {
+        let result = self.release.clone();
+        Box::pin(async move { result })
+    }
+}
+
+fn direct_avatar_profiles_for_http(
+    state: &TestInfrastructure,
+    storage: HttpDirectStorage,
+    upload_state: HttpDirectState,
+    max_bytes: usize,
+) -> Data<crate::bootstrap::AvatarProfileService> {
+    Data::new(crate::bootstrap::AvatarProfileService::Direct(
+        nazo_identity::AvatarDirectUploadService::from_ports(
+            Arc::new(nazo_postgres::UserRepository::new(state.diesel_db.clone())),
+            Arc::new(nazo_postgres::GrantRepository::new(state.diesel_db.clone())),
+            Arc::new(storage),
+            Arc::new(upload_state),
+            max_bytes,
+            300,
+            30,
+        ),
+    ))
+}
+
+fn pending_direct_claim(
+    user: &DatabaseUserFixture,
+    upload_id: &str,
+    expires_at: DateTime<Utc>,
+) -> AvatarUploadClaim {
+    AvatarUploadClaim::Pending {
+        authorization: AvatarUploadAuthorization {
+            upload_id: upload_id.to_owned(),
+            tenant_id: nazo_identity::TenantId::new(DEFAULT_TENANT_ID)
+                .expect("default tenant ID should be valid"),
+            user_id: nazo_identity::UserId::new(user.id).expect("fixture user ID should be valid"),
+            expected_avatar_url: None,
+            staging_object_id: upload_id.to_owned(),
+            expires_at,
+        },
+        ownership_token: "http-test-ownership".to_owned(),
+    }
+}
+
+#[derive(Clone, Copy)]
+struct UnavailableAvatarGrants;
+
+impl GrantSummaryRepositoryPort for UnavailableAvatarGrants {
+    fn authorized_client_count(
+        &self,
+        _tenant_id: nazo_identity::TenantId,
+        _user_id: Uuid,
+    ) -> RepositoryFuture<'_, i64> {
+        Box::pin(async { Err(RepositoryError::Unavailable) })
+    }
+}
+
+#[actix_web::test]
+async fn avatar_upload_capability_requires_login() {
+    let state = Data::new(test_state());
+    let response = super::avatar_upload_capability(
+        crate::test_support::profile_sessions(&state),
+        disabled_avatar_profiles(),
+        actix_web::test::TestRequest::get().to_http_request(),
+    )
+    .await;
+    let (status, body, _) = response_json(response).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(body["error"], "login_required");
+    assert!(body.get("upload_mode").is_none());
+}
+
+#[actix_web::test]
+async fn avatar_upload_capability_reports_the_selected_tenant_service_without_csrf() {
+    let Some(fixture) = LiveAvatarFixture::new().await else {
+        return;
+    };
+    let suffix = Uuid::now_v7().simple().to_string();
+    let user = fixture.create_user(&suffix, None).await;
+    let sid = format!("avatar-capability-{suffix}");
+    fixture.store_session(&user, &sid).await;
+    for (avatars, expected) in [
+        (disabled_avatar_profiles(), "disabled"),
+        (
+            crate::test_support::avatar_profiles(&fixture.state),
+            "multipart",
+        ),
+        (
+            direct_avatar_profiles_for_http(
+                &fixture.state,
+                HttpDirectStorage::default(),
+                HttpDirectState::default(),
+                1024,
+            ),
+            "direct",
+        ),
+    ] {
+        let app = actix_web::test::init_service(
+            actix_web::App::new()
+                .app_data(crate::test_support::profile_sessions(&fixture.state))
+                .app_data(avatars)
+                .route(
+                    "/auth/me/avatar/uploads",
+                    actix_web::web::get().to(super::avatar_upload_capability),
+                ),
+        )
+        .await;
+        let request = actix_web::test::TestRequest::get()
+            .uri("/auth/me/avatar/uploads")
+            .cookie(Cookie::new(
+                fixture.state.settings.session.session_cookie_name.clone(),
+                sid.clone(),
+            ))
+            .to_request();
+        let response = actix_web::test::call_service(&app, request).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(header::CACHE_CONTROL).unwrap(),
+            "no-store"
+        );
+        let body: Value = actix_web::test::read_body_json(response).await;
+        assert_eq!(body, serde_json::json!({"upload_mode": expected}));
+    }
+}
+
+#[tokio::test]
+async fn disabled_avatar_storage_returns_forbidden_after_auth_without_consuming_or_mutating() {
+    let Some(fixture) = LiveAvatarFixture::new().await else {
+        return;
+    };
+    let suffix = Uuid::now_v7().simple().to_string();
+    let user = fixture
+        .create_user(&suffix, Some("/auth/me/avatar?v=existing"))
+        .await;
+    let sid = format!("avatar-disabled-{suffix}");
+    let csrf = format!("csrf-{suffix}");
+    fixture.store_session(&user, &sid).await;
+    let avatars = disabled_avatar_profiles();
+
+    let upload_response = super::upload_avatar(
+        crate::test_support::profile_sessions(&fixture.state),
+        avatars.clone(),
+        fixture.request(&sid, &csrf),
+        multipart_payload_with_stream_error("disabled-avatar-boundary", "avatar"),
+    )
+    .await;
+    let (status, body, _) = response_json(upload_response).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(body["error"], "access_denied");
+    assert_eq!(body["error_description"], AVATAR_STORAGE_DISABLED_MESSAGE);
+    assert!(
+        !tokio::fs::try_exists(avatar_user_dir(&fixture.state, user.id))
+            .await
+            .unwrap()
+    );
+
+    let begin_response = super::begin_direct_avatar_upload(
+        crate::test_support::profile_sessions(&fixture.state),
+        avatars.clone(),
+        fixture.request(&sid, &csrf),
+        Json(super::AvatarUploadBeginRequest { content_length: 1 }),
+    )
+    .await;
+    let (status, body, _) = response_json(begin_response).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(body["error"], "access_denied");
+    assert_eq!(body["error_description"], AVATAR_STORAGE_DISABLED_MESSAGE);
+
+    let complete_response = super::complete_direct_avatar_upload(
+        crate::test_support::profile_sessions(&fixture.state),
+        avatars.clone(),
+        fixture.request(&sid, &csrf),
+        Path::from(Uuid::now_v7().to_string()),
+    )
+    .await;
+    let (status, body, _) = response_json(complete_response).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(body["error"], "access_denied");
+    assert_eq!(body["error_description"], AVATAR_STORAGE_DISABLED_MESSAGE);
+
+    let get_response = super::get_avatar(
+        crate::test_support::profile_sessions(&fixture.state),
+        avatars.clone(),
+        fixture.request(&sid, &csrf),
+    )
+    .await;
+    let (status, body, _) = response_json(get_response).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(body["error"], "access_denied");
+    assert_eq!(body["error_description"], AVATAR_STORAGE_DISABLED_MESSAGE);
+
+    let delete_response = super::delete_avatar(
+        crate::test_support::profile_sessions(&fixture.state),
+        avatars,
+        fixture.request(&sid, &csrf),
+    )
+    .await;
+    let (status, body, _) = response_json(delete_response).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(body["error"], "access_denied");
+    assert_eq!(body["error_description"], AVATAR_STORAGE_DISABLED_MESSAGE);
+    assert_eq!(
+        fixture.fresh_user(user.id).await.avatar_url.as_deref(),
+        Some("/auth/me/avatar?v=existing")
+    );
+}
+
+#[tokio::test]
+async fn disabled_avatar_storage_keeps_csrf_and_login_guards() {
+    let state = test_state();
+    let avatars = disabled_avatar_profiles();
+    let missing_csrf = super::upload_avatar(
+        crate::test_support::profile_sessions(&state),
+        avatars.clone(),
+        request_with_session_but_no_csrf(&state),
+        multipart_payload("disabled-csrf-boundary", "avatar", valid_png()),
+    )
+    .await;
+    let (status, body, _) = response_json(missing_csrf).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"], "invalid_request");
+
+    let unauthenticated = super::get_avatar(
+        crate::test_support::profile_sessions(&state),
+        avatars,
+        actix_web::test::TestRequest::default().to_http_request(),
+    )
+    .await;
+    let (status, body, _) = response_json(unauthenticated).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(body["error"], "login_required");
 }
 
 async fn assert_avatar_write_rejects_missing_csrf(response: HttpResponse) {
@@ -762,6 +1217,565 @@ async fn upload_avatar_rejects_session_request_without_csrf_before_file_or_profi
 }
 
 #[actix_web::test]
+async fn direct_avatar_authorization_rejects_session_request_without_csrf() {
+    let state = Data::new(test_state());
+    let req = request_with_session_but_no_csrf(&state);
+    assert_avatar_write_rejects_missing_csrf(begin_direct_avatar_upload(state, req, 1).await).await;
+}
+
+#[test]
+fn direct_avatar_begin_payload_requires_a_declared_length() {
+    assert!(
+        serde_json::from_value::<super::AvatarUploadBeginRequest>(serde_json::json!({})).is_err()
+    );
+    assert_eq!(
+        serde_json::from_value::<super::AvatarUploadBeginRequest>(serde_json::json!({
+            "content_length": 0
+        }))
+        .expect("zero is syntactically valid JSON")
+        .content_length,
+        0
+    );
+}
+
+#[actix_web::test]
+async fn begin_direct_avatar_upload_maps_validation_storage_and_success() {
+    let Some(fixture) = LiveAvatarFixture::new().await else {
+        return;
+    };
+    let suffix = Uuid::now_v7().simple().to_string();
+    let user = fixture.create_user(&suffix, None).await;
+    let sid = format!("avatar-direct-begin-{suffix}");
+    let csrf = format!("csrf-{suffix}");
+    fixture.store_session(&user, &sid).await;
+
+    let (status, body, has_set_cookie) = response_json(
+        begin_direct_avatar_upload_with_profiles(
+            fixture.state.clone(),
+            direct_avatar_profiles_for_http(
+                &fixture.state,
+                HttpDirectStorage::default(),
+                HttpDirectState::default(),
+                1024,
+            ),
+            fixture.request(&sid, &csrf),
+            0,
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"], "invalid_request");
+    assert_eq!(
+        body["error_description"],
+        "Avatar file size must be greater than zero."
+    );
+    assert!(!has_set_cookie);
+
+    let (status, body, _) = response_json(
+        begin_direct_avatar_upload_with_profiles(
+            fixture.state.clone(),
+            direct_avatar_profiles_for_http(
+                &fixture.state,
+                HttpDirectStorage::default(),
+                HttpDirectState::default(),
+                8,
+            ),
+            fixture.request(&sid, &csrf),
+            9,
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+    assert_eq!(body["error"], "invalid_request");
+
+    let (status, body, _) = response_json(
+        begin_direct_avatar_upload_with_profiles(
+            fixture.state.clone(),
+            crate::test_support::avatar_profiles(&fixture.state),
+            fixture.request(&sid, &csrf),
+            1,
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["error"], "invalid_request");
+    assert_eq!(
+        body["error_description"],
+        "Direct avatar upload is not supported by the configured storage."
+    );
+
+    let (status, body, has_set_cookie) = response_json(
+        begin_direct_avatar_upload_with_profiles(
+            fixture.state.clone(),
+            direct_avatar_profiles_for_http(
+                &fixture.state,
+                HttpDirectStorage::default(),
+                HttpDirectState::default(),
+                1024,
+            ),
+            fixture.request(&sid, &csrf),
+            12,
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(!has_set_cookie);
+    assert!(body["upload_id"].as_str().is_some());
+    assert!(body["expires_at"].as_str().is_some());
+    assert_eq!(body["upload"]["url"], "https://object-store.test/avatar");
+    assert_eq!(body["upload"]["method"], "PUT");
+    assert_eq!(body["upload"]["headers"], serde_json::json!({}));
+
+    fixture
+        .set_avatar_url(&user, Some("/auth/me/avatar?v=broken&unexpected=1"))
+        .await;
+    let (status, body, _) = response_json(
+        begin_direct_avatar_upload_with_profiles(
+            fixture.state.clone(),
+            direct_avatar_profiles_for_http(
+                &fixture.state,
+                HttpDirectStorage::default(),
+                HttpDirectState::default(),
+                1024,
+            ),
+            fixture.request(&sid, &csrf),
+            12,
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(body["error"], "server_error");
+    fixture.set_avatar_url(&user, None).await;
+
+    let storage = HttpDirectStorage {
+        authorize: Err(AvatarStorageError::Unavailable(
+            "object store unavailable".to_owned(),
+        )),
+        ..HttpDirectStorage::default()
+    };
+    let (status, body, _) = response_json(
+        begin_direct_avatar_upload_with_profiles(
+            fixture.state.clone(),
+            direct_avatar_profiles_for_http(
+                &fixture.state,
+                storage,
+                HttpDirectState::default(),
+                1024,
+            ),
+            fixture.request(&sid, &csrf),
+            12,
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(body["error"], "server_error");
+
+    let upload_state = HttpDirectState {
+        create: Err(RepositoryError::Unavailable),
+        ..HttpDirectState::default()
+    };
+    let (status, body, _) = response_json(
+        begin_direct_avatar_upload_with_profiles(
+            fixture.state.clone(),
+            direct_avatar_profiles_for_http(
+                &fixture.state,
+                HttpDirectStorage::default(),
+                upload_state,
+                1024,
+            ),
+            fixture.request(&sid, &csrf),
+            12,
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(body["error"], "server_error");
+}
+
+#[actix_web::test]
+async fn direct_avatar_upload_endpoints_require_login_after_csrf_validation() {
+    let Some(fixture) = LiveAvatarFixture::new().await else {
+        return;
+    };
+    let suffix = Uuid::now_v7().simple().to_string();
+    let sid = format!("avatar-direct-missing-session-{suffix}");
+    let csrf = format!("csrf-{suffix}");
+    let avatars = disabled_avatar_profiles();
+
+    let (status, body, _) = response_json(
+        begin_direct_avatar_upload_with_profiles(
+            fixture.state.clone(),
+            avatars.clone(),
+            fixture.request(&sid, &csrf),
+            1,
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(body["error"], "login_required");
+
+    let (status, body, _) = response_json(
+        complete_direct_avatar_upload_with_profiles(
+            fixture.state.clone(),
+            avatars,
+            fixture.request(&sid, &csrf),
+            Uuid::now_v7().to_string(),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(body["error"], "login_required");
+}
+
+#[actix_web::test]
+async fn complete_direct_avatar_upload_maps_validation_storage_and_success() {
+    let Some(fixture) = LiveAvatarFixture::new().await else {
+        return;
+    };
+    let suffix = Uuid::now_v7().simple().to_string();
+    let user = fixture.create_user(&suffix, None).await;
+    let sid = format!("avatar-direct-complete-{suffix}");
+    let csrf = format!("csrf-{suffix}");
+    fixture.store_session(&user, &sid).await;
+    let request = || fixture.request(&sid, &csrf);
+
+    let (status, body, _) = response_json(
+        complete_direct_avatar_upload_with_profiles(
+            fixture.state.clone(),
+            disabled_avatar_profiles(),
+            request(),
+            "not-a-uuid",
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"], "invalid_request");
+    assert_eq!(body["error_description"], "Avatar upload ID is invalid.");
+
+    let upload_id = Uuid::now_v7().to_string();
+    let (status, body, _) = response_json(
+        complete_direct_avatar_upload_with_profiles(
+            fixture.state.clone(),
+            crate::test_support::avatar_profiles(&fixture.state),
+            request(),
+            upload_id.clone(),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["error"], "invalid_request");
+    assert_eq!(
+        body["error_description"],
+        "Direct avatar upload is not supported by the configured storage."
+    );
+
+    let (status, body, _) = response_json(
+        complete_direct_avatar_upload_with_profiles(
+            fixture.state.clone(),
+            direct_avatar_profiles_for_http(
+                &fixture.state,
+                HttpDirectStorage::default(),
+                HttpDirectState::with_claim(AvatarUploadClaim::Missing),
+                1024,
+            ),
+            request(),
+            upload_id.clone(),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"], "invalid_request");
+    assert_eq!(body["error_description"], "Avatar upload has expired.");
+
+    let (status, body, _) = response_json(
+        complete_direct_avatar_upload_with_profiles(
+            fixture.state.clone(),
+            direct_avatar_profiles_for_http(
+                &fixture.state,
+                HttpDirectStorage::default(),
+                HttpDirectState::with_claim(AvatarUploadClaim::Busy),
+                1024,
+            ),
+            request(),
+            upload_id.clone(),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(body["error"], "invalid_request");
+    assert_eq!(
+        body["error_description"],
+        "Avatar upload is being completed."
+    );
+
+    let expired_claim =
+        pending_direct_claim(&user, &upload_id, Utc::now() - chrono::Duration::seconds(1));
+    let (status, body, _) = response_json(
+        complete_direct_avatar_upload_with_profiles(
+            fixture.state.clone(),
+            direct_avatar_profiles_for_http(
+                &fixture.state,
+                HttpDirectStorage::default(),
+                HttpDirectState::with_claim(expired_claim),
+                1024,
+            ),
+            request(),
+            upload_id.clone(),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"], "invalid_request");
+    assert_eq!(body["error_description"], "Avatar upload has expired.");
+
+    let pending_claim =
+        pending_direct_claim(&user, &upload_id, Utc::now() + chrono::Duration::minutes(5));
+    let invalid_storage = HttpDirectStorage {
+        staged: Ok(AvatarStagedObject {
+            bytes: b"not-an-image".to_vec(),
+            version: "etag-invalid".to_owned(),
+        }),
+        ..HttpDirectStorage::default()
+    };
+    let (status, body, _) = response_json(
+        complete_direct_avatar_upload_with_profiles(
+            fixture.state.clone(),
+            direct_avatar_profiles_for_http(
+                &fixture.state,
+                invalid_storage,
+                HttpDirectState::with_claim(pending_claim.clone()),
+                1024,
+            ),
+            request(),
+            upload_id.clone(),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"], "invalid_request");
+    assert_eq!(
+        body["error_description"],
+        "Avatar must be PNG, JPEG, or WebP."
+    );
+
+    let unavailable_storage = HttpDirectStorage {
+        staged: Err(AvatarStorageError::Unavailable(
+            "object store unavailable".to_owned(),
+        )),
+        ..HttpDirectStorage::default()
+    };
+    let (status, body, _) = response_json(
+        complete_direct_avatar_upload_with_profiles(
+            fixture.state.clone(),
+            direct_avatar_profiles_for_http(
+                &fixture.state,
+                unavailable_storage,
+                HttpDirectState::with_claim(pending_claim.clone()),
+                1024,
+            ),
+            request(),
+            upload_id.clone(),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(body["error"], "server_error");
+    assert_eq!(body["error_description"], "Failed to save avatar.");
+
+    let mut concurrent_state = HttpDirectState::with_claim(pending_claim.clone());
+    concurrent_state.record_candidate = Ok(false);
+    let (status, body, _) = response_json(
+        complete_direct_avatar_upload_with_profiles(
+            fixture.state.clone(),
+            direct_avatar_profiles_for_http(
+                &fixture.state,
+                HttpDirectStorage::default(),
+                concurrent_state,
+                1024,
+            ),
+            request(),
+            upload_id.clone(),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(body["error"], "invalid_request");
+    assert_eq!(
+        body["error_description"],
+        "Avatar was updated by another request."
+    );
+
+    let state_error = HttpDirectState {
+        claim: Err(RepositoryError::Unavailable),
+        ..HttpDirectState::default()
+    };
+    let (status, body, _) = response_json(
+        complete_direct_avatar_upload_with_profiles(
+            fixture.state.clone(),
+            direct_avatar_profiles_for_http(
+                &fixture.state,
+                HttpDirectStorage::default(),
+                state_error,
+                1024,
+            ),
+            request(),
+            upload_id.clone(),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(body["error"], "server_error");
+
+    let (status, body, has_set_cookie) = response_json(
+        complete_direct_avatar_upload_with_profiles(
+            fixture.state.clone(),
+            direct_avatar_profiles_for_http(
+                &fixture.state,
+                HttpDirectStorage::default(),
+                HttpDirectState::with_claim(pending_claim),
+                1024,
+            ),
+            request(),
+            upload_id,
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(!has_set_cookie);
+    let avatar_url = body["avatar_url"]
+        .as_str()
+        .expect("direct completion should return avatar_url");
+    assert!(avatar_url.starts_with("/auth/me/avatar?v="));
+    assert_eq!(
+        fixture.fresh_user(user.id).await.avatar_url.as_deref(),
+        Some(avatar_url)
+    );
+}
+
+fn malformed_multipart_payload(boundary: &str) -> Multipart {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::CONTENT_TYPE,
+        format!("multipart/form-data; boundary={boundary}")
+            .parse()
+            .expect("content type should parse"),
+    );
+    actix_multipart::Multipart::new(
+        &headers,
+        stream::once(async { Ok::<Bytes, PayloadError>(Bytes::from_static(b"malformed")) }),
+    )
+}
+
+#[actix_web::test]
+async fn upload_avatar_maps_multipart_parse_and_profile_overview_failures() {
+    let Some(fixture) = LiveAvatarFixture::new().await else {
+        return;
+    };
+    let suffix = Uuid::now_v7().simple().to_string();
+    let parse_user = fixture.create_user(&format!("{suffix}-parse"), None).await;
+    let parse_sid = format!("avatar-multipart-parse-{suffix}");
+    let parse_csrf = format!("csrf-parse-{suffix}");
+    fixture.store_session(&parse_user, &parse_sid).await;
+
+    let (status, body, has_set_cookie) = response_json(
+        upload_avatar(
+            fixture.state.clone(),
+            fixture.request(&parse_sid, &parse_csrf),
+            malformed_multipart_payload("malformed-avatar-boundary"),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"], "invalid_request");
+    assert_eq!(body["error_description"], "Failed to read avatar file.");
+    assert!(!has_set_cookie);
+    assert!(fixture.fresh_user(parse_user.id).await.avatar_url.is_none());
+
+    let invalid_reference_user = fixture
+        .create_user(
+            &format!("{suffix}-reference"),
+            Some("/auth/me/avatar?v=broken&unexpected=1"),
+        )
+        .await;
+    let invalid_reference_sid = format!("avatar-invalid-reference-{suffix}");
+    let invalid_reference_csrf = format!("csrf-reference-{suffix}");
+    fixture
+        .store_session(&invalid_reference_user, &invalid_reference_sid)
+        .await;
+    let (status, body, _) = response_json(
+        upload_avatar(
+            fixture.state.clone(),
+            fixture.request(&invalid_reference_sid, &invalid_reference_csrf),
+            multipart_payload("invalid-reference-boundary", "avatar", valid_png()),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(body["error"], "server_error");
+    assert_eq!(body["error_description"], "Failed to save avatar.");
+
+    let overview_user = fixture
+        .create_user(&format!("{suffix}-overview"), None)
+        .await;
+    let overview_sid = format!("avatar-overview-{suffix}");
+    let overview_csrf = format!("csrf-overview-{suffix}");
+    fixture.store_session(&overview_user, &overview_sid).await;
+    let service = nazo_identity::AvatarService::from_ports(
+        Arc::new(nazo_postgres::UserRepository::new(
+            fixture.state.diesel_db.clone(),
+        )),
+        Arc::new(UnavailableAvatarGrants),
+        crate::adapters::avatar_files::LocalAvatarStorage::new(fixture.avatar_dir.clone()),
+        fixture.state.settings.storage.avatar_max_bytes,
+    );
+    let avatars = Data::new(crate::bootstrap::AvatarProfileService::Local(service));
+    let (status, body, _) = response_json(
+        super::upload_avatar(
+            crate::test_support::profile_sessions(&fixture.state),
+            avatars,
+            fixture.request(&overview_sid, &overview_csrf),
+            multipart_payload("overview-boundary", "avatar", valid_png()),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(body["error"], "server_error");
+    assert_eq!(
+        body["error_description"],
+        "Failed to load current user profile."
+    );
+    assert!(
+        fixture
+            .fresh_user(overview_user.id)
+            .await
+            .avatar_url
+            .is_some()
+    );
+}
+
+#[actix_web::test]
 async fn delete_avatar_rejects_session_request_without_csrf_before_profile_write() {
     let state = Data::new(test_state());
     let req = request_with_session_but_no_csrf(&state);
@@ -1080,13 +2094,13 @@ async fn upload_avatar_persists_versioned_file_and_metadata() {
     let sid = format!("avatar-upload-success-{suffix}");
     let csrf = format!("csrf-{suffix}");
     fixture.store_session(&user, &sid).await;
-    let png = b"\x89PNG\r\n\x1a\navatar-bytes";
+    let png = valid_png();
 
     let (status, body, has_set_cookie) = response_json(
         upload_avatar(
             fixture.state.clone(),
             fixture.request(&sid, &csrf),
-            multipart_payload("success-avatar-boundary", "avatar", png),
+            multipart_payload("success-avatar-boundary", "avatar", &png),
         )
         .await,
     )
@@ -1176,11 +2190,7 @@ async fn upload_avatar_fails_closed_when_storage_root_cannot_be_created() {
         upload_avatar(
             blocked_state,
             fixture.request(&sid, &csrf),
-            multipart_payload(
-                "blocked-avatar-boundary",
-                "avatar",
-                b"\x89PNG\r\n\x1a\navatar",
-            ),
+            multipart_payload("blocked-avatar-boundary", "avatar", valid_png()),
         )
         .await,
     )
@@ -1269,7 +2279,7 @@ async fn get_avatar_uses_detected_content_type_and_sets_security_headers() {
     )
     .await
     .unwrap();
-    let png = b"\x89PNG\r\n\x1a\navatar-bytes".to_vec();
+    let png = valid_png();
     tokio::fs::write(avatar_path(&fixture.state, user.id), &png)
         .await
         .unwrap();
@@ -1337,12 +2347,9 @@ async fn get_avatar_rejects_metadata_that_declares_a_different_supported_image_t
     )
     .await
     .unwrap();
-    tokio::fs::write(
-        avatar_path(&fixture.state, user.id),
-        b"\x89PNG\r\n\x1a\navatar-bytes",
-    )
-    .await
-    .unwrap();
+    tokio::fs::write(avatar_path(&fixture.state, user.id), valid_png())
+        .await
+        .unwrap();
 
     let (status, body, _) =
         response_json(get_avatar(fixture.state.clone(), fixture.request(&sid, &csrf)).await).await;
@@ -1365,8 +2372,8 @@ async fn get_avatar_serves_the_committed_version_while_a_file_replacement_is_in_
     fixture.store_session(&user, &sid).await;
     let user_dir = avatar_user_dir(&fixture.state, user.id);
     tokio::fs::create_dir_all(&user_dir).await.unwrap();
-    let old_avatar = b"\x89PNG\r\n\x1a\nold-avatar";
-    tokio::fs::write(avatar_path(&fixture.state, user.id), old_avatar)
+    let old_avatar = valid_png();
+    tokio::fs::write(avatar_path(&fixture.state, user.id), &old_avatar)
         .await
         .unwrap();
     tokio::fs::write(
@@ -1512,12 +2519,9 @@ async fn delete_avatar_removes_avatar_successfully_and_surfaces_file_removal_fai
     fixture.store_session(&success_user, &success_sid).await;
     let success_dir = avatar_user_dir(&fixture.state, success_user.id);
     tokio::fs::create_dir_all(&success_dir).await.unwrap();
-    tokio::fs::write(
-        avatar_path(&fixture.state, success_user.id),
-        b"\x89PNG\r\n\x1a\n",
-    )
-    .await
-    .unwrap();
+    tokio::fs::write(avatar_path(&fixture.state, success_user.id), valid_png())
+        .await
+        .unwrap();
     tokio::fs::write(
         avatar_meta_path(&fixture.state, success_user.id),
         r#"{"content_type":"image/png","version":"v1"}"#,

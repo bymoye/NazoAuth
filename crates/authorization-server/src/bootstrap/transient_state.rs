@@ -11,8 +11,9 @@ use nazo_auth::{
     DeviceStateVersion, DpopStateStorePort, TokenStateStorePort,
 };
 use nazo_identity::ports::{
-    DeliveryStorePort, EmailVerificationStorePort, FederationStatePort, LoginSessionPort,
-    LoginThrottlePort, MfaAttemptThrottlePort, PasskeyCeremonyPort, SessionStorePort,
+    AvatarUploadStatePort, DeliveryStorePort, EmailVerificationStorePort, FederationStatePort,
+    LoginSessionPort, LoginThrottlePort, MfaAttemptThrottlePort, PasskeyCeremonyPort,
+    SessionStorePort,
 };
 use nazo_identity::{TenantDirectorySnapshot, TenantId};
 
@@ -108,6 +109,7 @@ pub trait ServerTransientStateProvider: Send + Sync {
     fn login_throttle(&self) -> Arc<dyn LoginThrottlePort>;
     fn mfa_attempt_throttle(&self) -> Arc<dyn MfaAttemptThrottlePort>;
     fn delivery(&self) -> Arc<dyn DeliveryStorePort>;
+    fn avatar_upload_state(&self) -> Arc<dyn AvatarUploadStatePort>;
 }
 
 /// Shared, backend-neutral cache for the authoritative tenant directory.

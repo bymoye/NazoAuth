@@ -341,6 +341,26 @@ pub(crate) fn token_issuance_response_key_ring(
         .map_err(anyhow::Error::from)
 }
 
+pub(crate) fn signing_key_wrapping_key_ring(
+    config: &ConfigSource,
+) -> anyhow::Result<nazo_key_management::SigningKeyWrappingKeyRing> {
+    let current_key = parse_required_32_byte_key(config, "SIGNING_KEY_ENCRYPTION_KEY")?;
+    let current_id = config.required_string("SIGNING_KEY_ENCRYPTION_KEY_ID")?;
+    let previous_key = parse_optional_32_byte_key(config, "SIGNING_KEY_PREVIOUS_ENCRYPTION_KEY")?;
+    let previous_id = config.optional_string("SIGNING_KEY_PREVIOUS_ENCRYPTION_KEY_ID");
+    if previous_key.is_some() != previous_id.is_some() {
+        bail!(
+            "SIGNING_KEY_PREVIOUS_ENCRYPTION_KEY and SIGNING_KEY_PREVIOUS_ENCRYPTION_KEY_ID must be configured together"
+        );
+    }
+    nazo_key_management::SigningKeyWrappingKeyRing::new(
+        current_id,
+        current_key,
+        previous_key.zip(previous_id).map(|(key, id)| (id, key)),
+    )
+    .map_err(anyhow::Error::from)
+}
+
 fn validate_optional_token_issuance_response_key_config(
     config: &ConfigSource,
 ) -> anyhow::Result<()> {

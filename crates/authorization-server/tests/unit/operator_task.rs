@@ -222,6 +222,47 @@ fn tenant_resource_executor_error_taxonomy_is_closed_and_explicit() {
     ));
 }
 
+#[test]
+fn directory_operation_and_read_error_taxonomies_preserve_retryability() {
+    use nazo_identity::ports::RepositoryError;
+    use nazo_persistence::directory_control::TenantDirectoryControlError;
+
+    for error in [
+        TenantDirectoryControlError::Conflict,
+        TenantDirectoryControlError::Rejected,
+    ] {
+        assert!(matches!(
+            execution::map_directory_control_error(error),
+            control_journal::SideEffectError::Terminal(_)
+        ));
+    }
+    assert!(matches!(
+        execution::map_directory_control_error(TenantDirectoryControlError::Unavailable),
+        control_journal::SideEffectError::Retryable(_)
+    ));
+
+    for error in [
+        RepositoryError::Conflict,
+        RepositoryError::Consistency("directory revision drift".to_owned()),
+        RepositoryError::NotFound,
+        RepositoryError::AlreadyProcessed,
+    ] {
+        assert!(matches!(
+            execution::map_tenant_directory_read_error(error),
+            control_journal::SideEffectError::Terminal(_)
+        ));
+    }
+    for error in [
+        RepositoryError::Unavailable,
+        RepositoryError::Unexpected("connection reset".to_owned()),
+    ] {
+        assert!(matches!(
+            execution::map_tenant_directory_read_error(error),
+            control_journal::SideEffectError::Retryable(_)
+        ));
+    }
+}
+
 #[tokio::test]
 async fn tenant_resource_unavailable_does_not_publish_a_terminal_failure() {
     use nazo_persistence::tenant_resources::TenantResourceExecutorError;

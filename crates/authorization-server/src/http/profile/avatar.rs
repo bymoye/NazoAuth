@@ -6,10 +6,190 @@ use actix_web::http::header::HeaderValue;
 use actix_web::{
     HttpRequest, HttpResponse,
     http::{StatusCode, header},
-    web::Data,
+    web::{Data, Json, Path},
 };
 use futures_util::StreamExt as _;
 use nazo_http_actix::{bytes_response, csrf_error, json_response, oauth_error};
+use serde::{Deserialize, Serialize};
+
+const AVATAR_STORAGE_DISABLED_MESSAGE: &str =
+    "Avatar storage is not configured for this tenant. Contact the system administrator.";
+
+fn avatar_storage_disabled_response() -> HttpResponse {
+    oauth_error(
+        StatusCode::FORBIDDEN,
+        "access_denied",
+        AVATAR_STORAGE_DISABLED_MESSAGE,
+    )
+}
+
+#[derive(Deserialize)]
+pub(crate) struct AvatarUploadBeginRequest {
+    content_length: usize,
+}
+
+#[derive(Serialize)]
+struct AvatarUploadStartResponse {
+    upload_id: String,
+    expires_at: String,
+    upload: AvatarUploadTargetResponse,
+}
+
+#[derive(Serialize)]
+struct AvatarUploadTargetResponse {
+    url: String,
+    method: String,
+    headers: std::collections::BTreeMap<String, String>,
+}
+
+pub(crate) async fn avatar_upload_capability(
+    sessions: Data<SessionProfileHandles>,
+    avatars: Data<crate::bootstrap::AvatarProfileService>,
+    req: HttpRequest,
+) -> HttpResponse {
+    if let Err(response) = sessions.current_user_or_login_required(&req).await {
+        return response;
+    }
+    let upload_mode = match avatars.get_ref() {
+        crate::bootstrap::AvatarProfileService::Disabled => "disabled",
+        crate::bootstrap::AvatarProfileService::Local(_) => "multipart",
+        crate::bootstrap::AvatarProfileService::Direct(_) => "direct",
+    };
+    let mut response = json_response(serde_json::json!({ "upload_mode": upload_mode }));
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response
+}
+
+pub(crate) async fn begin_direct_avatar_upload(
+    sessions: Data<SessionProfileHandles>,
+    avatars: Data<crate::bootstrap::AvatarProfileService>,
+    req: HttpRequest,
+    Json(payload): Json<AvatarUploadBeginRequest>,
+) -> HttpResponse {
+    if !sessions.has_valid_csrf_token(&req, None) {
+        return csrf_error();
+    }
+    let user = match sessions.current_user_or_login_required(&req).await {
+        Ok(user) => user,
+        Err(response) => return response,
+    };
+    if avatars.is_disabled() {
+        return avatar_storage_disabled_response();
+    }
+    match avatars
+        .begin_direct_upload(&user, payload.content_length)
+        .await
+    {
+        Ok(start) => json_response(AvatarUploadStartResponse {
+            upload_id: start.upload_id,
+            expires_at: start.expires_at.to_rfc3339(),
+            upload: AvatarUploadTargetResponse {
+                url: start.target.url,
+                method: start.target.method,
+                headers: start.target.headers,
+            },
+        }),
+        Err(nazo_identity::DirectAvatarUploadError::InvalidContentLength) => oauth_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "Avatar file size must be greater than zero.",
+        ),
+        Err(nazo_identity::DirectAvatarUploadError::TooLarge) => oauth_error(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "invalid_request",
+            "Avatar file is too large.",
+        ),
+        Err(nazo_identity::DirectAvatarUploadError::Storage(
+            nazo_identity::ports::AvatarStorageError::Unsupported,
+        )) => oauth_error(
+            StatusCode::NOT_FOUND,
+            "invalid_request",
+            "Direct avatar upload is not supported by the configured storage.",
+        ),
+        Err(error) => {
+            tracing::warn!(?error, "failed to authorize direct avatar upload");
+            oauth_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "server_error",
+                "Failed to authorize avatar upload.",
+            )
+        }
+    }
+}
+
+pub(crate) async fn complete_direct_avatar_upload(
+    sessions: Data<SessionProfileHandles>,
+    avatars: Data<crate::bootstrap::AvatarProfileService>,
+    req: HttpRequest,
+    upload_id: Path<String>,
+) -> HttpResponse {
+    if !sessions.has_valid_csrf_token(&req, None) {
+        return csrf_error();
+    }
+    if uuid::Uuid::parse_str(upload_id.as_str()).is_err() {
+        return oauth_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "Avatar upload ID is invalid.",
+        );
+    }
+    let user = match sessions.current_user_or_login_required(&req).await {
+        Ok(user) => user,
+        Err(response) => return response,
+    };
+    if avatars.is_disabled() {
+        return avatar_storage_disabled_response();
+    }
+    match avatars
+        .complete_direct_upload(&user, upload_id.as_str())
+        .await
+    {
+        Ok(overview) => json_response(auth_me_json_with_count(
+            &overview.account,
+            overview.authorized_application_count,
+        )),
+        Err(nazo_identity::DirectAvatarUploadError::UnsupportedContent) => oauth_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "Avatar must be PNG, JPEG, or WebP.",
+        ),
+        Err(
+            nazo_identity::DirectAvatarUploadError::Missing
+            | nazo_identity::DirectAvatarUploadError::Expired,
+        ) => oauth_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "Avatar upload has expired.",
+        ),
+        Err(nazo_identity::DirectAvatarUploadError::Busy) => oauth_error(
+            StatusCode::CONFLICT,
+            "invalid_request",
+            "Avatar upload is being completed.",
+        ),
+        Err(nazo_identity::DirectAvatarUploadError::ConcurrentChange) => oauth_error(
+            StatusCode::CONFLICT,
+            "invalid_request",
+            "Avatar was updated by another request.",
+        ),
+        Err(nazo_identity::DirectAvatarUploadError::Storage(
+            nazo_identity::ports::AvatarStorageError::Unsupported,
+        )) => oauth_error(
+            StatusCode::NOT_FOUND,
+            "invalid_request",
+            "Direct avatar upload is not supported by the configured storage.",
+        ),
+        Err(error) => {
+            tracing::warn!(?error, "failed to finalize direct avatar upload");
+            oauth_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "server_error",
+                "Failed to save avatar.",
+            )
+        }
+    }
+}
 
 pub(crate) async fn upload_avatar(
     sessions: Data<SessionProfileHandles>,
@@ -24,6 +204,9 @@ pub(crate) async fn upload_avatar(
         Ok(user) => user,
         Err(response) => return response,
     };
+    if avatars.is_disabled() {
+        return avatar_storage_disabled_response();
+    }
     while let Some(field) = multipart.next().await {
         let mut field = match field {
             Ok(field) => field,
@@ -42,7 +225,7 @@ pub(crate) async fn upload_avatar(
                 return oauth_error(
                     StatusCode::PAYLOAD_TOO_LARGE,
                     "invalid_request",
-                    "头像文件过大.",
+                    "Avatar file is too large.",
                 );
             }
             bytes.extend_from_slice(&chunk);
@@ -55,12 +238,12 @@ pub(crate) async fn upload_avatar(
             Err(nazo_identity::UploadAvatarError::TooLarge) => oauth_error(
                 StatusCode::PAYLOAD_TOO_LARGE,
                 "invalid_request",
-                "头像文件过大.",
+                "Avatar file is too large.",
             ),
             Err(nazo_identity::UploadAvatarError::UnsupportedContent) => oauth_error(
                 StatusCode::BAD_REQUEST,
                 "invalid_request",
-                "头像仅支持 PNG、JPEG、WEBP 格式.",
+                "Avatar must be PNG, JPEG, or WebP.",
             ),
             Err(nazo_identity::UploadAvatarError::Storage(
                 nazo_identity::ports::AvatarStorageError::PreparationFailed(error),
@@ -69,7 +252,7 @@ pub(crate) async fn upload_avatar(
                 oauth_error(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "server_error",
-                    "头像保存失败.",
+                    "Failed to save avatar.",
                 )
             }
             Err(nazo_identity::UploadAvatarError::Overview(error)) => {
@@ -77,7 +260,7 @@ pub(crate) async fn upload_avatar(
                 oauth_error(
                     StatusCode::SERVICE_UNAVAILABLE,
                     "server_error",
-                    "当前用户资料查询失败.",
+                    "Failed to load current user profile.",
                 )
             }
             Err(error) => {
@@ -85,7 +268,7 @@ pub(crate) async fn upload_avatar(
                 oauth_error(
                     StatusCode::SERVICE_UNAVAILABLE,
                     "server_error",
-                    "头像保存失败.",
+                    "Failed to save avatar.",
                 )
             }
         };
@@ -93,7 +276,7 @@ pub(crate) async fn upload_avatar(
     oauth_error(
         StatusCode::BAD_REQUEST,
         "invalid_request",
-        "缺少 avatar 文件.",
+        "Missing avatar file.",
     )
 }
 
@@ -101,7 +284,7 @@ fn invalid_avatar_read_response() -> HttpResponse {
     oauth_error(
         StatusCode::BAD_REQUEST,
         "invalid_request",
-        "头像文件读取失败.",
+        "Failed to read avatar file.",
     )
 }
 
@@ -118,8 +301,11 @@ pub(crate) async fn get_avatar(
         return oauth_error(
             StatusCode::FORBIDDEN,
             "access_denied",
-            "跨站请求头像资源被拒绝.",
+            "Cross-origin avatar requests are not allowed.",
         );
+    }
+    if avatars.is_disabled() {
+        return avatar_storage_disabled_response();
     }
     let avatar = avatars.read(&user).await;
     let avatar = match avatar {
@@ -166,14 +352,14 @@ pub(crate) async fn get_avatar(
         Err(nazo_identity::ReadAvatarError::NotUploaded) => oauth_error(
             StatusCode::NOT_FOUND,
             "invalid_request",
-            "当前用户尚未上传头像.",
+            "No avatar is set for the current user.",
         ),
         Err(error) => {
             tracing::warn!(?error, "failed to read avatar");
             oauth_error(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "server_error",
-                "头像读取失败.",
+                "Failed to read avatar.",
             )
         }
     }
@@ -191,6 +377,9 @@ pub(crate) async fn delete_avatar(
         Ok(user) => user,
         Err(response) => return response,
     };
+    if avatars.is_disabled() {
+        return avatar_storage_disabled_response();
+    }
     match avatars.delete(&user).await {
         Ok(overview) => json_response(auth_me_json_with_count(
             &overview.account,
@@ -201,7 +390,7 @@ pub(crate) async fn delete_avatar(
             oauth_error(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "server_error",
-                "当前用户资料查询失败.",
+                "Failed to load current user profile.",
             )
         }
         Err(error) => {
@@ -209,7 +398,7 @@ pub(crate) async fn delete_avatar(
             oauth_error(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "server_error",
-                "头像删除失败.",
+                "Failed to delete avatar.",
             )
         }
     }

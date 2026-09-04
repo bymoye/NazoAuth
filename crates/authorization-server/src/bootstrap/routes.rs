@@ -71,7 +71,10 @@ use crate::http::authorization::{
 use crate::http::perf_metrics::perf_metrics;
 use crate::http::profile::{
     access_requests::{create_access_request, my_access_requests},
-    avatar::{delete_avatar, get_avatar, upload_avatar},
+    avatar::{
+        avatar_upload_capability, begin_direct_avatar_upload, complete_direct_avatar_upload,
+        delete_avatar, get_avatar, upload_avatar,
+    },
     delivery::access_delivery,
     federation_links::{my_federation_links, unlink_my_federation_link},
     mtls_trust::{create_mtls_trust_request, my_mtls_trust_requests},
@@ -405,6 +408,15 @@ fn configure_with_cors(
                         .route("/avatar", web::post().to(upload_avatar))
                         .route("/avatar", web::get().to(get_avatar))
                         .route("/avatar", web::delete().to(delete_avatar))
+                        .route("/avatar/uploads", web::get().to(avatar_upload_capability))
+                        .route(
+                            "/avatar/uploads",
+                            web::post().to(begin_direct_avatar_upload),
+                        )
+                        .route(
+                            "/avatar/uploads/{upload_id}/complete",
+                            web::post().to(complete_direct_avatar_upload),
+                        )
                         .route("/applications", web::get().to(profile_applications))
                         .route("/federation/links", web::get().to(my_federation_links))
                         .route(

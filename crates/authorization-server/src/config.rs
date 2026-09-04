@@ -46,6 +46,27 @@ pub struct ServerConfigExtension {
 }
 
 impl ServerConfigExtension {
+    pub fn merge(self, other: Self) -> anyhow::Result<Self> {
+        if self.state_epoch_key.is_some() && other.state_epoch_key.is_some() {
+            anyhow::bail!("only one server configuration extension may define a state epoch");
+        }
+        let mut config_keys = self.config_keys;
+        for key in other.config_keys {
+            if config_keys.contains(&key) {
+                anyhow::bail!("server configuration extension duplicates {key}");
+            }
+            config_keys.push(key);
+        }
+        Ok(Self {
+            initial_config_fragment: format!(
+                "{}{}",
+                self.initial_config_fragment, other.initial_config_fragment
+            ),
+            config_keys,
+            state_epoch_key: self.state_epoch_key.or(other.state_epoch_key),
+        })
+    }
+
     #[must_use]
     pub fn new(
         initial_config_fragment: String,
@@ -64,6 +85,20 @@ impl ServerConfigExtension {
         Self {
             initial_config_fragment: String::new(),
             config_keys: Vec::new(),
+            state_epoch_key: None,
+        }
+    }
+
+    /// Adds concrete-adapter configuration without participating in the
+    /// transient-state epoch mechanism.
+    #[must_use]
+    pub fn configuration_only(
+        initial_config_fragment: String,
+        config_keys: Vec<&'static str>,
+    ) -> Self {
+        Self {
+            initial_config_fragment,
+            config_keys,
             state_epoch_key: None,
         }
     }
@@ -158,6 +193,14 @@ const SECRET_FILE_INPUTS: &[(&str, &str)] = &[
     (
         "TOKEN_ISSUANCE_RESPONSE_PREVIOUS_ENCRYPTION_KEY",
         "TOKEN_ISSUANCE_RESPONSE_PREVIOUS_ENCRYPTION_KEY_FILE",
+    ),
+    (
+        "SIGNING_KEY_ENCRYPTION_KEY",
+        "SIGNING_KEY_ENCRYPTION_KEY_FILE",
+    ),
+    (
+        "SIGNING_KEY_PREVIOUS_ENCRYPTION_KEY",
+        "SIGNING_KEY_PREVIOUS_ENCRYPTION_KEY_FILE",
     ),
     (
         "OPENID4VCI_ISSUER_MANAGEMENT_TOKEN",
@@ -277,6 +320,12 @@ const ENV_CONFIG_KEYS: &[&str] = &[
     "OPENID4VP_WALLET_AUTHORIZATION_ORIGINS",
     "SIGNING_EXTERNAL_COMMAND",
     "SIGNING_EXTERNAL_TIMEOUT_MS",
+    "SIGNING_KEY_ENCRYPTION_KEY",
+    "SIGNING_KEY_ENCRYPTION_KEY_FILE",
+    "SIGNING_KEY_ENCRYPTION_KEY_ID",
+    "SIGNING_KEY_PREVIOUS_ENCRYPTION_KEY",
+    "SIGNING_KEY_PREVIOUS_ENCRYPTION_KEY_FILE",
+    "SIGNING_KEY_PREVIOUS_ENCRYPTION_KEY_ID",
     "OTEL_ENABLED",
     "OTEL_EXPORTER_OTLP_ENDPOINT",
     "OTEL_EXPORTER_OTLP_PROTOCOL",

@@ -142,12 +142,19 @@ pub(crate) struct ControlPlaneTenantResources {
 pub(crate) async fn control_plane_resources(
     clients: Arc<dyn nazo_auth::AdminClientRepositoryPort>,
     binding: &nazo_identity::TenantDirectoryBinding,
+    signing_keys: Arc<dyn nazo_key_management::SigningKeyRepository>,
 ) -> anyhow::Result<ControlPlaneTenantResources> {
     let config = crate::config::ConfigSource::load()
         .context("tenant-resource operations require the application configuration")?;
     let settings = Settings::from_directory_binding(&config, binding)
         .context("tenant-resource operations require valid application settings")?;
-    let keyset = nazo_key_management::KeyManager::load_or_create(settings.key_settings()).await?;
+    let keyset = nazo_key_management::KeyManager::load_or_create_database(
+        settings.key_settings(),
+        binding.tenant.tenant_id.as_uuid(),
+        signing_keys,
+        crate::settings::signing_key_wrapping_key_ring(&config)?,
+    )
+    .await?;
     let service = ServerAdminClientService::new(
         clients,
         ServerSectorIdentifierResolver,

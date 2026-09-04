@@ -46,15 +46,22 @@ impl ConfigSource {
 use super::*;
 
 fn install_test_server_config_extension() {
-    install_server_config_extension(ServerConfigExtension::new(
-        "VALKEY_URL: \"redis://127.0.0.1:6379/0\"\n".to_owned(),
-        vec![
-            "VALKEY_COMMAND_TIMEOUT_MS",
+    install_server_config_extension(
+        ServerConfigExtension::new(
+            "VALKEY_URL: \"redis://127.0.0.1:6379/0\"\n".to_owned(),
+            vec![
+                "VALKEY_COMMAND_TIMEOUT_MS",
+                "VALKEY_STATE_EPOCH",
+                "VALKEY_URL",
+            ],
             "VALKEY_STATE_EPOCH",
-            "VALKEY_URL",
-        ],
-        "VALKEY_STATE_EPOCH",
-    ))
+        )
+        .merge(ServerConfigExtension::configuration_only(
+            "AVATAR_OBJECT_STORE: \"local\"\n".to_owned(),
+            vec!["AVATAR_OBJECT_STORE"],
+        ))
+        .expect("test configuration extensions must compose"),
+    )
     .unwrap();
 }
 
@@ -621,6 +628,40 @@ fn environment_secret_file_supplies_an_absent_scalar() {
 }
 
 #[test]
+fn mounted_signing_wrapping_root_is_loaded_and_partial_configuration_fails_closed() {
+    let path = temp_config_dir("signing_wrapping_root");
+    let key_file = path.join("signing-wrapping-key");
+    std::fs::write(&key_file, "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\n").unwrap();
+    std::fs::write(
+        path.join(CONFIG_FILE),
+        "DATA_DIR: state\nSIGNING_KEY_ENCRYPTION_KEY_ID: current\nSIGNING_KEY_ENCRYPTION_KEY_FILE: signing-wrapping-key\n",
+    )
+    .unwrap();
+    let source = ConfigSource::load_from_dir(&path).unwrap();
+    assert_eq!(
+        source.get("SIGNING_KEY_ENCRYPTION_KEY").as_deref(),
+        Some("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
+    );
+    crate::settings::signing_key_wrapping_key_ring(&source).unwrap();
+
+    std::fs::write(
+        path.join(CONFIG_FILE),
+        "DATA_DIR: state\nSIGNING_KEY_ENCRYPTION_KEY_ID: current\nSIGNING_KEY_ENCRYPTION_KEY: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\nSIGNING_KEY_PREVIOUS_ENCRYPTION_KEY_ID: old\n",
+    )
+    .unwrap();
+    let partial = ConfigSource::load_from_dir(&path).unwrap();
+    let error = crate::settings::signing_key_wrapping_key_ring(&partial)
+        .err()
+        .expect("partial wrapping root must fail");
+    assert!(
+        error
+            .to_string()
+            .contains("SIGNING_KEY_PREVIOUS_ENCRYPTION_KEY")
+    );
+    let _ = std::fs::remove_dir_all(path);
+}
+
+#[test]
 fn yaml_secret_file_path_is_resolved_and_trimmed() {
     let path = temp_config_dir("yaml_secret_file");
     std::fs::write(
@@ -1027,6 +1068,12 @@ fn canonical_config_keys_are_locked_to_the_reviewed_baseline() {
             "OPENID4VP_WALLET_AUTHORIZATION_ORIGINS",
             "SIGNING_EXTERNAL_COMMAND",
             "SIGNING_EXTERNAL_TIMEOUT_MS",
+            "SIGNING_KEY_ENCRYPTION_KEY",
+            "SIGNING_KEY_ENCRYPTION_KEY_FILE",
+            "SIGNING_KEY_ENCRYPTION_KEY_ID",
+            "SIGNING_KEY_PREVIOUS_ENCRYPTION_KEY",
+            "SIGNING_KEY_PREVIOUS_ENCRYPTION_KEY_FILE",
+            "SIGNING_KEY_PREVIOUS_ENCRYPTION_KEY_ID",
             "OTEL_ENABLED",
             "OTEL_EXPORTER_OTLP_ENDPOINT",
             "OTEL_EXPORTER_OTLP_PROTOCOL",
@@ -1078,6 +1125,7 @@ fn canonical_config_keys_are_locked_to_the_reviewed_baseline() {
             "VALKEY_COMMAND_TIMEOUT_MS",
             "VALKEY_STATE_EPOCH",
             "VALKEY_URL",
+            "AVATAR_OBJECT_STORE",
         ]
     );
 }

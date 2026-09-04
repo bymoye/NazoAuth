@@ -12,6 +12,7 @@ fn jwks_never_publishes_private_members() {
                 "kid": "public-only", "alg": "EdDSA", "use": "sig"
             }),
             signing_purposes: Default::default(),
+            retire_at: None,
         }],
         &json!({
             "kty": "RSA", "use": "enc", "alg": "RSA-OAEP-256",

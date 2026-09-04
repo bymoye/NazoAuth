@@ -16,10 +16,7 @@ use sha2::Sha256;
 use url::{Host, Url};
 use yasna::{Tag, models::ObjectIdentifier};
 
-use crate::{
-    config::ConfigSource,
-    settings::{Settings, key_settings_from_config},
-};
+use crate::{config::ConfigSource, settings::Settings};
 
 #[derive(Debug)]
 struct Openid4vcCertificatePaths {
@@ -175,59 +172,6 @@ fn is_mdoc_document_signing_certificate(
     })
 }
 
-fn load_key_settings() -> anyhow::Result<nazo_key_management::KeySettings> {
-    key_settings_from_config(&ConfigSource::load_without_secret_values()?)
-}
-
-fn key_task_config_from(
-    config: &ConfigSource,
-) -> anyhow::Result<(
-    nazo_key_management::KeySettings,
-    Option<Openid4vcCertificatePaths>,
-)> {
-    let chain = config
-        .optional_string("OPENID4VC_SIGNING_CERTIFICATE_CHAIN_FILE")
-        .map(PathBuf::from);
-    let anchors = config
-        .optional_string("OPENID4VC_TRUST_ANCHORS_FILE")
-        .map(PathBuf::from);
-    let certificate_paths = match (chain, anchors) {
-        (None, None) => None,
-        (Some(chain), Some(anchors)) => {
-            let issuer = certificate_issuer(config)?;
-            if issuer.scheme() != "https" {
-                bail!("OpenID4VC certificate issuer must use HTTPS");
-            }
-            let Host::Domain(hostname) = issuer
-                .host()
-                .context("OpenID4VC certificate issuer must include a DNS hostname")?
-            else {
-                bail!("OpenID4VC certificate issuer must include a DNS hostname");
-            };
-            Some(Openid4vcCertificatePaths {
-                chain,
-                anchors,
-                revocation_snapshot: config
-                    .optional_string("OPENID4VC_REVOCATION_SNAPSHOT_FILE")
-                    .map(PathBuf::from),
-                hostname: hostname.to_owned(),
-                mdoc_profile: None,
-            })
-        }
-        _ => bail!(
-            "OpenID4VC certificate generation requires both OPENID4VC_SIGNING_CERTIFICATE_CHAIN_FILE and OPENID4VC_TRUST_ANCHORS_FILE"
-        ),
-    };
-    Ok((key_settings_from_config(config)?, certificate_paths))
-}
-
-fn certificate_issuer(config: &ConfigSource) -> anyhow::Result<Url> {
-    let issuer = config
-        .optional_string("ISSUER")
-        .unwrap_or_else(|| config.string("PUBLIC_BASE_URL", "http://127.0.0.1:8000"));
-    Url::parse(&issuer).context("OpenID4VC certificate issuer must be absolute")
-}
-
 fn mdoc_certificate_profile(
     config: &ConfigSource,
     issuer: &Url,
@@ -252,161 +196,6 @@ struct GenerateLocalKeyOptions {
     purposes: BTreeSet<SigningPurpose>,
 }
 
-pub(crate) async fn operator_list() -> anyhow::Result<String> {
-    let settings = load_key_settings()?;
-    let _ = nazo_key_management::KeyManager::list_keys(&settings).await?;
-    keyset_revision_from(&settings).await
-}
-
-pub(crate) async fn operator_validate() -> anyhow::Result<String> {
-    let settings = load_key_settings()?;
-    nazo_key_management::KeyManager::validate(&settings).await?;
-    keyset_revision_from(&settings).await
-}
-
-pub(crate) async fn operator_generate_local(
-    algorithm: &str,
-    purposes: &[String],
-) -> anyhow::Result<(String, String)> {
-    let options = parse_generate_local(algorithm, purposes)?;
-    let config = ConfigSource::load_without_secret_values()?;
-    let (settings, mut certificate_paths) = key_task_config_from(&config)?;
-    if options.purposes.contains(&SigningPurpose::Credential)
-        && let Some(paths) = certificate_paths.as_mut()
-    {
-        paths.mdoc_profile = mdoc_certificate_profile(&config, &certificate_issuer(&config)?)?;
-    }
-    generate_local_with_key_settings(&settings, certificate_paths.as_ref(), options).await
-}
-
-pub(crate) async fn operator_generate_local_for_tenant(
-    binding: &nazo_identity::TenantDirectoryBinding,
-    algorithm: &str,
-    purposes: &[String],
-) -> anyhow::Result<(String, String, String)> {
-    let options = parse_generate_local(algorithm, purposes)?;
-    let config = ConfigSource::load()?;
-    let settings = Settings::from_directory_binding(&config, binding)?;
-    let chain = settings
-        .openid4vc
-        .signing_certificate_chain_file
-        .clone()
-        .context("tenant-local certificate generation requires OpenID4VC to be enabled")?;
-    let anchors = settings
-        .openid4vc
-        .trust_anchors_file
-        .clone()
-        .context("tenant-local certificate generation requires OpenID4VC trust storage")?;
-    let issuer = Url::parse(&binding.issuer)?;
-    let Host::Domain(hostname) = issuer
-        .host()
-        .context("tenant issuer must include a DNS hostname")?
-    else {
-        bail!("tenant issuer must include a DNS hostname");
-    };
-    let certificate_paths = Openid4vcCertificatePaths {
-        chain: chain.clone(),
-        anchors,
-        revocation_snapshot: settings.openid4vc.revocation_snapshot_file.clone(),
-        hostname: hostname.to_owned(),
-        mdoc_profile: options
-            .purposes
-            .contains(&SigningPurpose::Credential)
-            .then(|| mdoc_certificate_profile(&config, &issuer))
-            .transpose()?
-            .flatten(),
-    };
-    let key_settings = settings.key_settings();
-    nazo_key_management::KeyManager::load_or_create(key_settings.clone()).await?;
-    for record in nazo_key_management::KeyManager::list_keys(&key_settings).await? {
-        if record.status != nazo_key_management::KeyRecordStatus::PurposeScoped
-            || record.algorithm != "ES256"
-            || record.backend != "local-pem"
-            || record.locator.is_empty()
-        {
-            continue;
-        }
-        let private_key_pem =
-            tokio::fs::read_to_string(key_settings.keys_dir.join(&record.locator)).await?;
-        let private_key = KeyPair::from_pem(&private_key_pem)?;
-        if existing_openid4vc_bundle_matches(&certificate_paths, &private_key).await? {
-            if certificate_paths.mdoc_profile.is_none() {
-                ensure_openid4vc_revocation_snapshot(&certificate_paths).await?;
-            }
-            let certificate_chain = tokio::fs::read_to_string(&chain).await?;
-            return Ok((
-                record.kid,
-                keyset_revision_from(&key_settings).await?,
-                certificate_chain,
-            ));
-        }
-    }
-    let (kid, revision) =
-        generate_local_with_key_settings(&key_settings, Some(&certificate_paths), options).await?;
-    let certificate_chain = tokio::fs::read_to_string(&chain).await.with_context(|| {
-        format!(
-            "failed to read generated certificate chain {}",
-            chain.display()
-        )
-    })?;
-    Ok((kid, revision, certificate_chain))
-}
-
-async fn generate_local_with_key_settings(
-    key_settings: &nazo_key_management::KeySettings,
-    certificate_paths: Option<&Openid4vcCertificatePaths>,
-    options: GenerateLocalKeyOptions,
-) -> anyhow::Result<(String, String)> {
-    let openid4vc_purposes = [
-        SigningPurpose::Credential,
-        SigningPurpose::PresentationRequest,
-    ]
-    .into_iter()
-    .collect();
-    if certificate_paths.is_some() && options.purposes != openid4vc_purposes {
-        bail!(
-            "OpenID4VC certificate generation requires one ES256 key scoped to both credential and presentation_request"
-        );
-    }
-    nazo_key_management::KeyManager::load_or_create(key_settings.clone()).await?;
-    let kid = nazo_key_management::KeyManager::register_local(
-        key_settings,
-        nazo_key_management::LocalKeyRegistration {
-            algorithm: options.alg,
-            purposes: options.purposes,
-        },
-    )
-    .await?;
-    if let Some(certificate_paths) = certificate_paths {
-        ensure_openid4vc_certificates(key_settings, &kid, certificate_paths).await?;
-    }
-    Ok((kid, keyset_revision_from(key_settings).await?))
-}
-
-pub(crate) async fn operator_register_external(
-    kid: &str,
-    algorithm: &str,
-    key_ref: &str,
-    public_jwk_bytes: &[u8],
-) -> anyhow::Result<String> {
-    let alg = signing_algorithm_from_name(algorithm)
-        .ok_or_else(|| anyhow::anyhow!("unsupported signing alg {algorithm}"))?;
-    let public_jwk = serde_json::from_slice(public_jwk_bytes)
-        .context("failed to parse mounted external public JWK")?;
-    let settings = load_key_settings()?;
-    nazo_key_management::KeyManager::register_external(
-        &settings,
-        nazo_key_management::ExternalKeyRegistration {
-            kid: kid.to_owned(),
-            algorithm: alg,
-            key_ref: key_ref.to_owned(),
-            public_jwk,
-        },
-    )
-    .await?;
-    keyset_revision_from(&settings).await
-}
-
 pub(crate) async fn remove_tenant_material(
     tenant_id: nazo_identity::TenantId,
 ) -> anyhow::Result<()> {
@@ -424,50 +213,6 @@ pub(crate) async fn remove_tenant_material(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(error)
             .with_context(|| format!("failed to inspect tenant material {}", tenant_dir.display())),
-    }
-}
-
-async fn ensure_openid4vc_certificates(
-    settings: &nazo_key_management::KeySettings,
-    kid: &str,
-    paths: &Openid4vcCertificatePaths,
-) -> anyhow::Result<()> {
-    let record = nazo_key_management::KeyManager::list_keys(settings)
-        .await?
-        .into_iter()
-        .find(|record| record.kid == kid)
-        .context("generated credential signing key is missing from the keyset")?;
-    if record.backend != "local-pem" || record.locator.is_empty() {
-        bail!("credential signing certificate requires a local private key");
-    }
-    let key_path = settings.keys_dir.join(record.locator);
-    let private_key_pem = tokio::fs::read_to_string(&key_path)
-        .await
-        .with_context(|| {
-            format!(
-                "failed to load credential signing key {}",
-                key_path.display()
-            )
-        })?;
-    let private_key = KeyPair::from_pem(&private_key_pem)
-        .context("failed to parse credential signing key as PKCS#8 PEM")?;
-    if existing_openid4vc_bundle_matches(paths, &private_key).await? {
-        if paths.mdoc_profile.is_none() {
-            ensure_openid4vc_revocation_snapshot(paths).await?;
-        }
-        return Ok(());
-    }
-
-    let bundle = build_openid4vc_certificate_bundle(
-        &private_key,
-        &paths.hostname,
-        paths.mdoc_profile.as_ref(),
-    )?;
-    activate_openid4vc_certificate_bundle(paths, &bundle).await?;
-    if let Some(material) = bundle.mdoc_material.as_ref() {
-        initialize_mdoc_revocation_snapshot(paths, material).await
-    } else {
-        ensure_openid4vc_revocation_snapshot(paths).await
     }
 }
 
@@ -1071,17 +816,229 @@ fn parse_generate_local(
     })
 }
 
-async fn keyset_revision_from(
-    settings: &nazo_key_management::KeySettings,
-) -> anyhow::Result<String> {
-    use sha2::{Digest as _, Sha256};
+async fn database_key_manager_for_tenant(
+    config: &ConfigSource,
+    settings: nazo_key_management::KeySettings,
+    tenant_id: nazo_identity::TenantId,
+    persistence: &dyn crate::operator_task::OperatorPersistence,
+) -> anyhow::Result<nazo_key_management::KeyManager> {
+    nazo_key_management::KeyManager::load_or_create_database(
+        settings,
+        tenant_id.as_uuid(),
+        persistence.signing_key_repository(tenant_id.as_uuid()),
+        crate::settings::signing_key_wrapping_key_ring(config)?,
+    )
+    .await
+}
 
-    let path = settings.keys_dir.join("keyset.json");
-    let bytes = tokio::fs::read(&path).await?;
-    Ok(Sha256::digest(bytes)
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect())
+pub(crate) async fn operator_import_legacy_file_keyset(
+    config: &ConfigSource,
+    binding: &nazo_identity::TenantDirectoryBinding,
+    persistence: &dyn crate::operator_task::OperatorPersistence,
+    source_directory: PathBuf,
+) -> anyhow::Result<String> {
+    let mut source_settings = Settings::from_directory_binding(config, binding)?.key_settings();
+    source_settings.keys_dir = source_directory;
+    let manager = nazo_key_management::KeyManager::import_legacy_file_keyset(
+        source_settings,
+        binding.tenant.tenant_id.as_uuid(),
+        persistence.signing_key_repository(binding.tenant.tenant_id.as_uuid()),
+        crate::settings::signing_key_wrapping_key_ring(config)?,
+    )
+    .await?;
+    manager.database_validate().await?;
+    manager.database_revision().await
+}
+
+pub(crate) async fn operator_list_database_for_tenant(
+    config: &ConfigSource,
+    binding: &nazo_identity::TenantDirectoryBinding,
+    persistence: &dyn crate::operator_task::OperatorPersistence,
+) -> anyhow::Result<String> {
+    let settings = Settings::from_directory_binding(config, binding)?;
+    let manager = database_key_manager_for_tenant(
+        config,
+        settings.key_settings(),
+        binding.tenant.tenant_id,
+        persistence,
+    )
+    .await?;
+    let _ = manager.database_list_keys().await?;
+    manager.database_revision().await
+}
+
+pub(crate) async fn operator_validate_database_for_tenant(
+    config: &ConfigSource,
+    binding: &nazo_identity::TenantDirectoryBinding,
+    persistence: &dyn crate::operator_task::OperatorPersistence,
+) -> anyhow::Result<String> {
+    let settings = Settings::from_directory_binding(config, binding)?;
+    let manager = database_key_manager_for_tenant(
+        config,
+        settings.key_settings(),
+        binding.tenant.tenant_id,
+        persistence,
+    )
+    .await?;
+    manager.database_validate().await?;
+    manager.database_revision().await
+}
+
+pub(crate) async fn operator_register_external_database_for_tenant(
+    config: &ConfigSource,
+    binding: &nazo_identity::TenantDirectoryBinding,
+    persistence: &dyn crate::operator_task::OperatorPersistence,
+    kid: &str,
+    algorithm: &str,
+    key_ref: &str,
+    public_jwk_bytes: &[u8],
+) -> anyhow::Result<String> {
+    let algorithm = signing_algorithm_from_name(algorithm)
+        .ok_or_else(|| anyhow::anyhow!("unsupported signing alg {algorithm}"))?;
+    let public_jwk = serde_json::from_slice(public_jwk_bytes)
+        .context("failed to parse mounted external public JWK")?;
+    let settings = Settings::from_directory_binding(config, binding)?;
+    let manager = database_key_manager_for_tenant(
+        config,
+        settings.key_settings(),
+        binding.tenant.tenant_id,
+        persistence,
+    )
+    .await?;
+    manager
+        .database_register_external(nazo_key_management::ExternalKeyRegistration {
+            kid: kid.to_owned(),
+            algorithm,
+            key_ref: key_ref.to_owned(),
+            public_jwk,
+        })
+        .await?;
+    manager.database_revision().await
+}
+
+pub(crate) async fn operator_generate_local_database_for_tenant(
+    config: &ConfigSource,
+    binding: &nazo_identity::TenantDirectoryBinding,
+    persistence: &dyn crate::operator_task::OperatorPersistence,
+    algorithm: &str,
+    purposes: &[String],
+) -> anyhow::Result<(String, String, Option<String>)> {
+    let options = parse_generate_local(algorithm, purposes)?;
+    let settings = Settings::from_directory_binding(config, binding)?;
+    let key_settings = settings.key_settings();
+    let manager = database_key_manager_for_tenant(
+        config,
+        key_settings,
+        binding.tenant.tenant_id,
+        persistence,
+    )
+    .await?;
+    let certificate_paths = database_certificate_paths(&settings, binding, config, &options)?;
+    let kid =
+        generate_local_with_database_manager(&manager, certificate_paths.as_ref(), options).await?;
+    let certificate_chain =
+        match certificate_paths {
+            Some(paths) => Some(tokio::fs::read_to_string(&paths.chain).await.with_context(
+                || {
+                    format!(
+                        "failed to read generated certificate chain {}",
+                        paths.chain.display()
+                    )
+                },
+            )?),
+            None => None,
+        };
+    Ok((kid, manager.database_revision().await?, certificate_chain))
+}
+
+fn database_certificate_paths(
+    settings: &Settings,
+    binding: &nazo_identity::TenantDirectoryBinding,
+    config: &ConfigSource,
+    options: &GenerateLocalKeyOptions,
+) -> anyhow::Result<Option<Openid4vcCertificatePaths>> {
+    let Some(chain) = settings.openid4vc.signing_certificate_chain_file.clone() else {
+        return Ok(None);
+    };
+    let anchors = settings
+        .openid4vc
+        .trust_anchors_file
+        .clone()
+        .context("tenant-local certificate generation requires OpenID4VC trust storage")?;
+    let issuer = Url::parse(&binding.issuer)?;
+    let Host::Domain(hostname) = issuer
+        .host()
+        .context("tenant issuer must include a DNS hostname")?
+    else {
+        bail!("tenant issuer must include a DNS hostname");
+    };
+    Ok(Some(Openid4vcCertificatePaths {
+        chain,
+        anchors,
+        revocation_snapshot: settings.openid4vc.revocation_snapshot_file.clone(),
+        hostname: hostname.to_owned(),
+        mdoc_profile: options
+            .purposes
+            .contains(&SigningPurpose::Credential)
+            .then(|| mdoc_certificate_profile(config, &issuer))
+            .transpose()?
+            .flatten(),
+    }))
+}
+
+async fn generate_local_with_database_manager(
+    manager: &nazo_key_management::KeyManager,
+    certificate_paths: Option<&Openid4vcCertificatePaths>,
+    options: GenerateLocalKeyOptions,
+) -> anyhow::Result<String> {
+    let openid4vc_purposes = [
+        SigningPurpose::Credential,
+        SigningPurpose::PresentationRequest,
+    ]
+    .into_iter()
+    .collect();
+    if certificate_paths.is_some() && options.purposes != openid4vc_purposes {
+        bail!(
+            "OpenID4VC certificate generation requires one ES256 key scoped to both credential and presentation_request"
+        );
+    }
+    let kid = manager
+        .database_register_local(nazo_key_management::LocalKeyRegistration {
+            algorithm: options.alg,
+            purposes: options.purposes,
+        })
+        .await?;
+    if let Some(certificate_paths) = certificate_paths {
+        ensure_openid4vc_certificates_from_database(manager, &kid, certificate_paths).await?;
+    }
+    Ok(kid)
+}
+
+async fn ensure_openid4vc_certificates_from_database(
+    manager: &nazo_key_management::KeyManager,
+    kid: &str,
+    paths: &Openid4vcCertificatePaths,
+) -> anyhow::Result<()> {
+    let private_key_pem = manager.database_local_private_key_pem(kid)?;
+    let private_key = KeyPair::from_pem(&private_key_pem)
+        .context("failed to parse credential signing key as PKCS#8 PEM")?;
+    if existing_openid4vc_bundle_matches(paths, &private_key).await? {
+        if paths.mdoc_profile.is_none() {
+            ensure_openid4vc_revocation_snapshot(paths).await?;
+        }
+        return Ok(());
+    }
+    let bundle = build_openid4vc_certificate_bundle(
+        &private_key,
+        &paths.hostname,
+        paths.mdoc_profile.as_ref(),
+    )?;
+    activate_openid4vc_certificate_bundle(paths, &bundle).await?;
+    if let Some(material) = bundle.mdoc_material.as_ref() {
+        initialize_mdoc_revocation_snapshot(paths, material).await
+    } else {
+        ensure_openid4vc_revocation_snapshot(paths).await
+    }
 }
 
 #[cfg(test)]

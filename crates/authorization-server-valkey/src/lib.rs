@@ -279,6 +279,10 @@ impl ServerTransientStateProvider for ValkeyProvider {
     fn delivery(&self) -> Arc<dyn nazo_identity::ports::DeliveryStorePort> {
         Arc::new(nazo_valkey::DeliveryStore::new(&self.connection))
     }
+
+    fn avatar_upload_state(&self) -> Arc<dyn nazo_identity::ports::AvatarUploadStatePort> {
+        Arc::new(nazo_valkey::AvatarUploadStateStore::new(&self.connection))
+    }
 }
 
 fn map_transient_state_error(error: nazo_valkey::Error) -> TransientStateError {

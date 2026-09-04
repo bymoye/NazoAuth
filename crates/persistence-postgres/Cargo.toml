@@ -19,6 +19,7 @@ diesel-async = { workspace = true, features = ["postgres", "deadpool", "migratio
 diesel_migrations.workspace = true
 futures-util.workspace = true
 nazo-identity.workspace = true
+nazo-key-management.workspace = true
 nazo-auth.workspace = true
 nazo-runtime-modules.workspace = true
 nazo-resource-server.workspace = true

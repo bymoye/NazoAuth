@@ -1,6 +1,6 @@
 //! Unified NazoAuth command-line entry point.
 
-use std::{future::Future, pin::Pin, sync::Arc};
+use std::{future::Future, path::PathBuf, pin::Pin, sync::Arc};
 
 use anyhow::bail;
 use serde::{Deserialize, Serialize};
@@ -21,7 +21,7 @@ use crate::{
 };
 use zeroize::Zeroizing;
 
-const USAGE: &str = "usage: nazoauth <server|operator-task|audit-anchor-worker|release-identity|migrate|tenant-bootstrap|admin-provision>";
+const USAGE: &str = "usage: nazoauth <server|operator-task|audit-anchor-worker|release-identity|migrate|tenant-bootstrap|keys-import|admin-provision>";
 const ADMIN_PROVISION_CREDENTIAL_FILE_ENV: &str = "NAZOAUTH_ADMIN_PROVISION_FILE";
 const ADMIN_PROVISION_OPERATION_ID_ENV: &str = "NAZOAUTH_ADMIN_PROVISION_OPERATION_ID";
 const ADMIN_PROVISION_DEPLOYMENT_ID_ENV: &str = "NAZOAUTH_ADMIN_PROVISION_DEPLOYMENT_ID";
@@ -72,12 +72,29 @@ pub trait TransientStateLauncher: Send + Sync {
     ) -> LauncherFuture<'a, crate::bootstrap::ServerStateBackendBindings>;
 }
 
+/// Concrete object-store lifecycle. The generic server sees only the
+/// tenant-bound avatar capability and a generic configuration extension.
+pub trait AvatarObjectStoreLauncher: Send + Sync {
+    fn server_config_extension(&self) -> crate::config::ServerConfigExtension;
+
+    fn server_bindings<'a>(
+        &'a self,
+        config: &'a ConfigSource,
+        deployment_id: &'a str,
+    ) -> LauncherFuture<'a, crate::bootstrap::ServerAvatarObjectStoreBindings>;
+}
+
 pub async fn run(
     args: impl IntoIterator<Item = String>,
     persistence: Arc<dyn PersistenceLauncher>,
     transient_state: Arc<dyn TransientStateLauncher>,
+    avatar_object_store: Arc<dyn AvatarObjectStoreLauncher>,
 ) -> anyhow::Result<()> {
-    crate::config::install_server_config_extension(transient_state.server_config_extension())?;
+    crate::config::install_server_config_extension(
+        transient_state
+            .server_config_extension()
+            .merge(avatar_object_store.server_config_extension())?,
+    )?;
     let args = args.into_iter().collect::<Vec<_>>();
     let usage = usage_for_args(&args);
     match Command::parse(args)? {
@@ -85,7 +102,14 @@ pub async fn run(
             println!("{usage}");
             Ok(())
         }
-        Command::Server => run_server(persistence.as_ref(), transient_state.as_ref()).await,
+        Command::Server => {
+            run_server(
+                persistence.as_ref(),
+                transient_state.as_ref(),
+                avatar_object_store.as_ref(),
+            )
+            .await
+        }
         Command::OperatorTask => {
             let config = ConfigSource::load_for_migrations()?;
             let operator_persistence = persistence.operator_persistence(&config).await?;
@@ -121,6 +145,28 @@ pub async fn run(
             ensure_system_tenant_material(&runtime_config, operator_persistence.as_ref()).await?;
             Ok(())
         }
+        Command::KeysImport { tenant_id, source } => {
+            let migration_config = ConfigSource::load_for_migrations()?;
+            let operator_persistence = persistence.operator_persistence(&migration_config).await?;
+            let config = ConfigSource::load()?;
+            let directory = operator_persistence
+                .tenant_directory()
+                .load_active()
+                .await?;
+            let binding = directory
+                .tenants
+                .iter()
+                .find(|binding| binding.tenant.tenant_id.as_uuid() == tenant_id)
+                .ok_or_else(|| anyhow::anyhow!("keys-import requires an active tenant binding"))?;
+            crate::keyctl::operator_import_legacy_file_keyset(
+                &config,
+                binding,
+                operator_persistence.as_ref(),
+                source,
+            )
+            .await?;
+            Ok(())
+        }
         Command::AdminProvision => run_admin_provision(persistence.as_ref()).await,
     }
 }
@@ -138,8 +184,10 @@ async fn ensure_system_tenant_material(
         .ok_or_else(|| anyhow::anyhow!("tenant directory has no active system tenant"))?;
     let settings = Settings::from_directory_binding(config, binding)?;
     if settings.openid4vc.signing_certificate_chain_file.is_some() {
-        crate::keyctl::operator_generate_local_for_tenant(
+        crate::keyctl::operator_generate_local_database_for_tenant(
+            config,
             binding,
+            persistence,
             "ES256",
             &["credential".to_owned(), "presentation_request".to_owned()],
         )
@@ -338,6 +386,7 @@ async fn run_audit_anchor_worker(launcher: &dyn PersistenceLauncher) -> anyhow::
 async fn run_server(
     persistence: &dyn PersistenceLauncher,
     transient_state: &dyn TransientStateLauncher,
+    avatar_object_store: &dyn AvatarObjectStoreLauncher,
 ) -> anyhow::Result<()> {
     match crate::config::prepare_server_config(persistence.default_database_url())? {
         ServerConfigPreparation::Ready => {}
@@ -350,7 +399,7 @@ async fn run_server(
     }
     let config = ConfigSource::load()?;
     let bindings = persistence.server_bindings(&config).await?;
-    crate::bootstrap::run(config, bindings, transient_state).await
+    crate::bootstrap::run(config, bindings, transient_state, avatar_object_store).await
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -362,6 +411,10 @@ enum Command {
     ReleaseIdentity,
     Migrate,
     TenantBootstrap,
+    KeysImport {
+        tenant_id: uuid::Uuid,
+        source: PathBuf,
+    },
     AdminProvision,
 }
 
@@ -403,6 +456,43 @@ impl Command {
                 ensure_no_extra_args(args, "tenant-bootstrap")?;
                 Ok(Self::TenantBootstrap)
             }
+            "keys-import" => {
+                let mut tenant_id = None;
+                let mut source = None;
+                while let Some(argument) = args.next() {
+                    match argument.as_str() {
+                        "--tenant" => {
+                            let value = args.next().ok_or_else(|| {
+                                anyhow::anyhow!("keys-import requires --tenant <uuid>")
+                            })?;
+                            if tenant_id
+                                .replace(value.parse().map_err(|_| {
+                                    anyhow::anyhow!("keys-import --tenant must be a UUID")
+                                })?)
+                                .is_some()
+                            {
+                                bail!("keys-import accepts --tenant once");
+                            }
+                        }
+                        "--from" => {
+                            let value = args.next().ok_or_else(|| {
+                                anyhow::anyhow!("keys-import requires --from <directory>")
+                            })?;
+                            if source.replace(PathBuf::from(value)).is_some() {
+                                bail!("keys-import accepts --from once");
+                            }
+                        }
+                        _ => bail!("keys-import does not accept argument {argument}"),
+                    }
+                }
+                Ok(Self::KeysImport {
+                    tenant_id: tenant_id
+                        .ok_or_else(|| anyhow::anyhow!("keys-import requires --tenant <uuid>"))?,
+                    source: source.ok_or_else(|| {
+                        anyhow::anyhow!("keys-import requires --from <directory>")
+                    })?,
+                })
+            }
             "admin-provision" => {
                 ensure_no_extra_args(args, "admin-provision")?;
                 Ok(Self::AdminProvision)
@@ -423,7 +513,7 @@ fn usage_for_args(args: &[String]) -> String {
         return USAGE.to_owned();
     }
     format!(
-        "usage: {program} <server|operator-task|audit-anchor-worker|release-identity|migrate|admin-provision>"
+        "usage: {program} <server|operator-task|audit-anchor-worker|release-identity|migrate|tenant-bootstrap|keys-import|admin-provision>"
     )
 }
 

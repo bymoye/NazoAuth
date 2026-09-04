@@ -3,6 +3,33 @@
 Project changes are recorded in Keep a Changelog style. Versioned releases use
 semantic versioning once public release tags are cut.
 
+## 0.2.11 - 2026-09-04
+
+### Added
+
+- Persist encrypted tenant signing keysets through the database repository,
+  with shared initialization, rotation and explicit import of existing keys.
+- Support browser-direct signed PUT avatar uploads through an S3-compatible
+  adapter, shared upload coordination and conditional final publication.
+- Allow administrator-defined global avatar storage or complete per-tenant
+  configurations, with tenant-isolated paths and optional storage access.
+
+### Changed
+
+- Require NazoAuthCtl 0.2.24 or newer to provision and recover deployment
+  signing-key wrapping roots. Existing key material must be explicitly imported
+  with the same root before updating an existing deployment; ordinary startup
+  does not fall back to local signing-key files.
+- Leave avatar storage disabled when neither global nor tenant configuration
+  exists. Local storage must be explicitly selected and includes the tenant UUID
+  in its path. Existing local avatars require manual migration before cutover.
+- Report configured storage failures without silently switching backends.
+
+See `docs/operations/avatar-direct-upload.md` and
+`docs/operations/shared-runtime-state-verification.md` for migration steps and
+verification boundaries. This release does not complete Issue #108's remaining
+mdoc material and whole-system multi-instance acceptance work.
+
 ## 0.2.8 - 2026-09-02
 
 ### Added

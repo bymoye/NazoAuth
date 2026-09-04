@@ -177,8 +177,7 @@ jobs:
           file: .github/e2e-runner.Containerfile
       - name: Prepare isolated runtime config
         run: |
-          mkdir -p runtime/e2e/keys runtime/e2e/avatars runtime/e2e/secrets runtime/e2e/bootstrap runtime/e2e/ui-releases runtime/e2e/instance runtime/e2e/runtime-primary runtime/e2e/runtime-signed
-          python scripts/ensure_runtime_keyset.py --key-dir runtime/e2e/keys --active-alg RS256 --required-alg RS256 --required-alg PS256
+          mkdir -p runtime/e2e/avatars runtime/e2e/secrets runtime/e2e/bootstrap runtime/e2e/ui-releases runtime/e2e/instance runtime/e2e/runtime-primary runtime/e2e/runtime-signed
           cat > runtime/e2e/.env.yaml <<'YAML'
           BIND: "0.0.0.0:8000"
           DATA_DIR: "/var/lib/nazo_oauth"
@@ -203,6 +202,7 @@ jobs:
           ID_TOKEN_TTL_SECONDS: 600
           REFRESH_TOKEN_TTL_SECONDS: 2592000
           AVATAR_MAX_BYTES: 2097152
+          AVATAR_OBJECT_STORE: "local"
           CLIENT_DELIVERY_TTL_SECONDS: 86400
           RATE_LIMIT_WINDOW_SECONDS: 60
           TRUSTED_PROXY_CIDRS: ""
@@ -232,9 +232,12 @@ jobs:
           RUST_LOG: "info"
           YAML
           mfa_totp_key="$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=')"
+          signing_key="$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=')"
           {
             echo 'MFA_TOTP_ENCRYPTION_KEY_ID: "e2e-ephemeral-v1"'
             printf 'MFA_TOTP_ENCRYPTION_KEY: "%s"\n' "$mfa_totp_key"
+            echo 'SIGNING_KEY_ENCRYPTION_KEY_ID: "e2e-signing-root"'
+            printf 'SIGNING_KEY_ENCRYPTION_KEY: "%s"\n' "$signing_key"
           } >> runtime/e2e/.env.yaml
           cp runtime/e2e/.env.yaml runtime/e2e/.env-signed.yaml
           sed -i 's/RUNTIME_INSTANCE_ID: "e2e-primary"/RUNTIME_INSTANCE_ID: "e2e-signed"/' runtime/e2e/.env-signed.yaml
@@ -314,7 +317,6 @@ jobs:
             -v "$PWD/runtime/e2e/.env.yaml:/app/.env.yaml:ro" \
             -v "$PWD/runtime/e2e/secrets:/var/lib/nazo_oauth/secrets" \
             -v "$PWD/runtime/e2e/bootstrap:/var/lib/nazo_oauth/bootstrap" \
-            -v "$PWD/runtime/e2e/keys:/var/lib/nazo_oauth/tenants/00000000-0000-0000-0000-000000000001/keys" \
             -v "$PWD/runtime/e2e/avatars:/var/lib/nazo_oauth/tenants/00000000-0000-0000-0000-000000000001/avatars" \
             -v "$PWD/runtime/e2e/ui-releases:/var/lib/nazo_oauth/ui-releases" \
             -v "$PWD/runtime/e2e/instance:/var/lib/nazo_oauth/instance" \
@@ -326,7 +328,6 @@ jobs:
             -v "$PWD/runtime/e2e/.env-signed.yaml:/app/.env.yaml:ro" \
             -v "$PWD/runtime/e2e/secrets:/var/lib/nazo_oauth/secrets" \
             -v "$PWD/runtime/e2e/bootstrap:/var/lib/nazo_oauth/bootstrap" \
-            -v "$PWD/runtime/e2e/keys:/var/lib/nazo_oauth/tenants/00000000-0000-0000-0000-000000000001/keys" \
             -v "$PWD/runtime/e2e/avatars:/var/lib/nazo_oauth/tenants/00000000-0000-0000-0000-000000000001/avatars" \
             -v "$PWD/runtime/e2e/ui-releases:/var/lib/nazo_oauth/ui-releases" \
             -v "$PWD/runtime/e2e/instance:/var/lib/nazo_oauth/instance" \

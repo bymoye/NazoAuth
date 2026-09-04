@@ -17,9 +17,11 @@ pub async fn run(
     config: ConfigSource,
     persistence: super::ServerPersistenceBindings,
     transient_state: &dyn crate::cli::TransientStateLauncher,
+    avatar_object_store: &dyn crate::cli::AvatarObjectStoreLauncher,
 ) -> anyhow::Result<()> {
     let _observability = observability::init(&config)?;
-    let startup = configuration::load(config, persistence, transient_state).await?;
+    let startup =
+        configuration::load(config, persistence, transient_state, avatar_object_store).await?;
     services::run(
         startup.process,
         startup.registry,

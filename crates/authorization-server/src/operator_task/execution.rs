@@ -104,15 +104,42 @@ pub(super) async fn execute_inner(
                 .map(|_| None)?)
         }
         ControlOperationPayload::KeysList => {
-            Ok(crate::keyctl::operator_list().await.map(|_| None)?)
+            let persistence = require_persistence(persistence)?;
+            let config = crate::config::ConfigSource::load()?;
+            let binding = system_tenant_binding(persistence).await?;
+            Ok(
+                crate::keyctl::operator_list_database_for_tenant(&config, &binding, persistence)
+                    .await
+                    .map(|_| None)?,
+            )
         }
         ControlOperationPayload::KeysValidate => {
-            Ok(crate::keyctl::operator_validate().await.map(|_| None)?)
+            let persistence = require_persistence(persistence)?;
+            let config = crate::config::ConfigSource::load()?;
+            let binding = system_tenant_binding(persistence).await?;
+            Ok(
+                crate::keyctl::operator_validate_database_for_tenant(
+                    &config,
+                    &binding,
+                    persistence,
+                )
+                .await
+                .map(|_| None)?,
+            )
         }
         ControlOperationPayload::KeysGenerateLocal { alg, purposes } => {
-            Ok(crate::keyctl::operator_generate_local(alg, purposes)
-                .await
-                .map(|_| None)?)
+            let persistence = require_persistence(persistence)?;
+            let config = crate::config::ConfigSource::load()?;
+            let binding = system_tenant_binding(persistence).await?;
+            Ok(crate::keyctl::operator_generate_local_database_for_tenant(
+                &config,
+                &binding,
+                persistence,
+                alg,
+                purposes,
+            )
+            .await
+            .map(|_| None)?)
         }
         ControlOperationPayload::TenantKeysGenerateLocal {
             tenant_id,
@@ -121,13 +148,25 @@ pub(super) async fn execute_inner(
         } => {
             let persistence = require_persistence(persistence)?;
             let binding = active_tenant_binding(persistence, tenant_id).await?;
+            let config = crate::config::ConfigSource::load()?;
             let (kid, keyset_revision, certificate_chain_pem) =
-                crate::keyctl::operator_generate_local_for_tenant(&binding, alg, purposes).await?;
+                crate::keyctl::operator_generate_local_database_for_tenant(
+                    &config,
+                    &binding,
+                    persistence,
+                    alg,
+                    purposes,
+                )
+                .await?;
             Ok(Some(ControlResultData::TenantKeyGenerated {
                 tenant_id: tenant_id.clone(),
                 kid,
                 keyset_revision,
-                certificate_chain_pem,
+                certificate_chain_pem: certificate_chain_pem.ok_or_else(|| {
+                    SideEffectError::Terminal(anyhow::anyhow!(
+                        "tenant-local certificate generation requires OpenID4VC to be enabled"
+                    ))
+                })?,
             }))
         }
         ControlOperationPayload::KeysRegisterExternal {
@@ -140,10 +179,21 @@ pub(super) async fn execute_inner(
             // its bytes must hash exactly to the signed `public_jwk_sha256`
             // claim before registration proceeds.
             let public_jwk = verify_public_jwk(public_jwk_sha256)?;
+            let persistence = require_persistence(persistence)?;
+            let config = crate::config::ConfigSource::load()?;
+            let binding = system_tenant_binding(persistence).await?;
             Ok(
-                crate::keyctl::operator_register_external(kid, alg, key_ref, &public_jwk)
-                    .await
-                    .map(|_| None)?,
+                crate::keyctl::operator_register_external_database_for_tenant(
+                    &config,
+                    &binding,
+                    persistence,
+                    kid,
+                    alg,
+                    key_ref,
+                    &public_jwk,
+                )
+                .await
+                .map(|_| None)?,
             )
         }
         ControlOperationPayload::TenantResourceEnumerate {
@@ -434,7 +484,7 @@ async fn run_directory_control_operation(
     })
 }
 
-fn map_directory_control_error(error: TenantDirectoryControlError) -> SideEffectError {
+pub(super) fn map_directory_control_error(error: TenantDirectoryControlError) -> SideEffectError {
     match error {
         TenantDirectoryControlError::Conflict => SideEffectError::Terminal(anyhow::anyhow!(
             "tenant directory operation lost its consistency fence"
@@ -542,6 +592,7 @@ async fn run_tenant_resource_operation(
     let composed = crate::tenant_resource_preparation::control_plane_resources(
         persistence.admin_clients(),
         &binding,
+        persistence.signing_key_repository(binding.tenant.tenant_id.as_uuid()),
     )
     .await
     .map_err(|error| {
@@ -595,7 +646,17 @@ async fn active_tenant_binding(
         })
 }
 
-fn map_tenant_directory_read_error(
+async fn system_tenant_binding(
+    persistence: &dyn OperatorPersistence,
+) -> Result<nazo_identity::TenantDirectoryBinding, SideEffectError> {
+    let tenant_id = nazo_identity::TenantContext::default_system()
+        .tenant_id
+        .as_uuid()
+        .to_string();
+    active_tenant_binding(persistence, &tenant_id).await
+}
+
+pub(super) fn map_tenant_directory_read_error(
     error: nazo_identity::ports::RepositoryError,
 ) -> SideEffectError {
     match error {

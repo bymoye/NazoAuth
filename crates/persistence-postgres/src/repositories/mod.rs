@@ -17,6 +17,7 @@ mod recovery_root;
 mod runtime_modules;
 mod scim;
 mod scim_events;
+mod signing_keys;
 mod tenancy;
 mod tenant_resources;
 mod token_issuance;
@@ -71,6 +72,7 @@ pub use recovery_root::{
 pub use runtime_modules::{RuntimeModuleEventPage, RuntimeModuleRepository};
 pub use scim::ScimRepository;
 pub use scim_events::ScimEventRepository;
+pub use signing_keys::SigningKeysetRepository;
 pub use tenancy::{ActiveTenantBoundaryRepository, TenantDirectoryRepository};
 pub use tenant_resources::{
     NewStoredOpenid4vcTrustPolicy, NewTenantResourceBinding, Openid4vcTrustPolicyClientBind,

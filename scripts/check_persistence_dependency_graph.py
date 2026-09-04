@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fail when a statically selected persistence backend leaks into another product graph."""
+"""Fail when concrete database, KV or object-storage adapters leak into business graphs."""
 
 from __future__ import annotations
 
@@ -17,6 +17,31 @@ GRAPHS = {
         "tokio-postgres",
         "fred",
         "nazo-valkey",
+        "nazo-oauth-server-object-store",
+        "rust-s3",
+        "aws-sdk-s3",
+    ),
+    "nazo-key-management": (
+        "nazo-postgres",
+        "diesel",
+        "diesel-async",
+        "pq-sys",
+        "tokio-postgres",
+        "fred",
+        "nazo-valkey",
+        "rust-s3",
+        "aws-sdk-s3",
+    ),
+    "nazo-identity": (
+        "nazo-postgres",
+        "diesel",
+        "diesel-async",
+        "pq-sys",
+        "tokio-postgres",
+        "fred",
+        "nazo-valkey",
+        "rust-s3",
+        "aws-sdk-s3",
     ),
     "nazo-oauth-server-valkey": (
         "nazo-postgres",
@@ -73,7 +98,7 @@ def main() -> int:
         for violation in violations:
             print(f"  {violation}", file=sys.stderr)
         return 1
-    print("persistence and transient-state dependency isolation passed")
+    print("database, transient-state and object-storage dependency isolation passed")
     return 0
 
 

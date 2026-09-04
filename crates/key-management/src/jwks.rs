@@ -8,6 +8,7 @@ pub(crate) fn public_jwks(
 ) -> Value {
     let mut keys = keys
         .iter()
+        .filter(|key| key.can_verify())
         .map(|key| {
             let mut public = key.public_jwk.clone();
             if let Some(object) = public.as_object_mut() {

@@ -31,6 +31,11 @@ case "$RUST_HOST" in
   *) EXECUTABLE_SUFFIX="" ;;
 esac
 SERVER_BIN="$BIN_DIR/nazoauth$EXECUTABLE_SUFFIX"
+# `cargo test --no-run` below is allowed to rebuild the server binary while
+# compiling integration-test harnesses.  Keep the exact instrumented image
+# that wrote the long-lived server profiles so llvm-cov never tries to map
+# those counters onto a later binary with a different coverage map.
+E2E_SERVER_BIN="$COVERAGE_DIR/nazoauth-e2e$EXECUTABLE_SUFFIX"
 PYTHON_BIN="${PYTHON:-}"
 if [[ -z "$PYTHON_BIN" ]]; then
   if command -v python3 >/dev/null 2>&1; then
@@ -44,14 +49,20 @@ SIGNED_SERVER_PID=""
 CODECOV_OWNER_LABEL="nazoauth-codecov-lcov"
 DEFAULT_POSTGRES_CONTAINER="nazo-oauth-codecov-postgres"
 DEFAULT_VALKEY_CONTAINER="nazo-oauth-codecov-valkey"
+DEFAULT_MINIO_CONTAINER="nazo-oauth-codecov-minio"
 POSTGRES_CONTAINER="${CODECOV_POSTGRES_CONTAINER:-$DEFAULT_POSTGRES_CONTAINER}"
 VALKEY_CONTAINER="${CODECOV_VALKEY_CONTAINER:-$DEFAULT_VALKEY_CONTAINER}"
+MINIO_CONTAINER="${CODECOV_MINIO_CONTAINER:-$DEFAULT_MINIO_CONTAINER}"
 if [[ "$POSTGRES_CONTAINER" != "$DEFAULT_POSTGRES_CONTAINER" ]]; then
   echo "refusing CODECOV_POSTGRES_CONTAINER override; only $DEFAULT_POSTGRES_CONTAINER is script-owned" >&2
   exit 2
 fi
 if [[ "$VALKEY_CONTAINER" != "$DEFAULT_VALKEY_CONTAINER" ]]; then
   echo "refusing CODECOV_VALKEY_CONTAINER override; only $DEFAULT_VALKEY_CONTAINER is script-owned" >&2
+  exit 2
+fi
+if [[ "$MINIO_CONTAINER" != "$DEFAULT_MINIO_CONTAINER" ]]; then
+  echo "refusing CODECOV_MINIO_CONTAINER override; only $DEFAULT_MINIO_CONTAINER is script-owned" >&2
   exit 2
 fi
 
@@ -152,6 +163,7 @@ cleanup() {
   fi
   remove_owned_container "$POSTGRES_CONTAINER" || true
   remove_owned_container "$VALKEY_CONTAINER" || true
+  remove_owned_container "$MINIO_CONTAINER" || true
 }
 trap cleanup EXIT
 
@@ -174,6 +186,7 @@ fi
 
 remove_owned_container "$POSTGRES_CONTAINER"
 remove_owned_container "$VALKEY_CONTAINER"
+remove_owned_container "$MINIO_CONTAINER"
 postgres_port_args=(-p "${POSTGRES_PORT}:5432")
 valkey_port_args=(-p "${VALKEY_PORT}:6379")
 docker run -d --name "$POSTGRES_CONTAINER" \
@@ -186,12 +199,20 @@ docker run -d --name "$VALKEY_CONTAINER" \
   --label "io.nazoauth.owner=$CODECOV_OWNER_LABEL" \
   "${valkey_port_args[@]}" \
   valkey/valkey:8-alpine
+docker run -d --name "$MINIO_CONTAINER" \
+  --label "io.nazoauth.owner=$CODECOV_OWNER_LABEL" \
+  --publish 127.0.0.1:9000:9000 \
+  --env MINIO_ROOT_USER=sharedstate-test \
+  --env MINIO_ROOT_PASSWORD=sharedstate-test-only \
+  docker.io/minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e \
+  server /data
 
 services_ready=false
 for attempt in $(seq 1 60); do
   if docker exec "$POSTGRES_CONTAINER" sh -lc \
       'pg_isready -U postgres -d oauth >/dev/null && psql -U postgres -d oauth -c "select 1" >/dev/null' \
-    && docker exec "$VALKEY_CONTAINER" valkey-cli ping >/dev/null 2>&1
+      && docker exec "$VALKEY_CONTAINER" valkey-cli ping >/dev/null 2>&1 \
+      && curl --fail --silent http://127.0.0.1:9000/minio/health/live >/dev/null
   then
     services_ready=true
     break
@@ -206,6 +227,9 @@ if [[ "$services_ready" != "true" ]]; then
 fi
 docker exec "$POSTGRES_CONTAINER" pg_isready -U postgres -d oauth
 docker exec "$VALKEY_CONTAINER" valkey-cli ping
+docker exec "$MINIO_CONTAINER" mc alias set test http://127.0.0.1:9000 \
+  sharedstate-test sharedstate-test-only
+docker exec "$MINIO_CONTAINER" mc mb test/nazo-avatar-test
 docker exec "$POSTGRES_CONTAINER" \
   psql -U postgres -d postgres -v ON_ERROR_STOP=1 \
   -c 'CREATE DATABASE nazo_audit_test'
@@ -216,6 +240,12 @@ docker exec "$POSTGRES_CONTAINER" \
 export DATABASE_URL="postgresql://postgres:postgres@${POSTGRES_HOST}:${POSTGRES_PORT}/oauth"
 export NAZO_AUDIT_TEST_DATABASE_URL="postgresql://postgres:postgres@${POSTGRES_HOST}:${POSTGRES_PORT}/nazo_audit_test"
 export VALKEY_URL="redis://${VALKEY_HOST}:${VALKEY_PORT}/0"
+export NAZO_TEST_VALKEY_URL="$VALKEY_URL"
+export NAZO_TEST_S3_ENDPOINT='http://127.0.0.1:9000'
+export NAZO_TEST_S3_BUCKET='nazo-avatar-test'
+export NAZO_TEST_S3_ACCESS_KEY='sharedstate-test'
+export NAZO_TEST_S3_SECRET_KEY='sharedstate-test-only'
+export NAZO_TEST_S3_REGION='us-east-1'
 WORKSPACE_DATABASE_URL="postgresql://postgres:postgres@${POSTGRES_HOST}:${POSTGRES_PORT}/nazo_workspace_test"
 WORKSPACE_VALKEY_URL="redis://${VALKEY_HOST}:${VALKEY_PORT}/1"
 export VALKEY_COMMAND_TIMEOUT_MS='1000'
@@ -238,7 +268,13 @@ export EMAIL_CODE_SEND_COOLDOWN_SECONDS='1'
 export EMAIL_CODE_PEER_COOLDOWN_SECONDS='1'
 export EMAIL_CODE_DEV_RESPONSE_ENABLED='false'
 export DATA_DIR='runtime/codecov'
-TENANT_KEY_DIR="$DATA_DIR/tenants/00000000-0000-0000-0000-000000000001/keys"
+# Directory-managed tenants derive their key storage from the database; an
+# inherited legacy JWK_KEYS_DIR would make Settings reject this fixture.
+unset JWK_KEYS_DIR
+export AVATAR_OBJECT_STORE='local'
+export AVATAR_STORAGE_DIR="$DATA_DIR/avatars"
+export SIGNING_KEY_ENCRYPTION_KEY_ID='codecov-signing-root-v1'
+export SIGNING_KEY_ENCRYPTION_KEY="$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=')"
 export REQUIRE_PUSHED_AUTHORIZATION_REQUESTS='false'
 # Coverage owns and migrates an ephemeral database with its bootstrap
 # superuser.  Keep production's strict least-privilege default intact while
@@ -265,17 +301,14 @@ export FEDERATION_SAML_GATEWAY_AUDIENCE='nazo-oauth-codecov'
 export FEDERATION_SAML_GATEWAY_SECRET='codecov-saml-gateway-secret-000000'
 export RUST_LOG="${RUST_LOG:-warn}"
 
-mkdir -p "$TENANT_KEY_DIR" \
+mkdir -p "$DATA_DIR" \
   "$PRIMARY_INSTANCE_IDENTITY_DIR" "$SIGNED_INSTANCE_IDENTITY_DIR" "$COVERAGE_DIR"
-"$PYTHON_BIN" scripts/ensure_runtime_keyset.py \
-  --key-dir "$TENANT_KEY_DIR" \
-  --active-alg RS256 \
-  --required-alg RS256 \
-  --required-alg PS256
 export LLVM_PROFILE_FILE="$(profile_path 'cargo-%p-%m.profraw')"
 cargo test --locked -p nazo-postgres --test migrations \
   pending_migrations_create_all_runtime_module_state_tables
 cargo build --locked --workspace --all-features --package nazoauth --bin nazoauth
+cp "$SERVER_BIN" "$E2E_SERVER_BIN"
+chmod +x "$E2E_SERVER_BIN"
 "$SERVER_BIN" tenant-bootstrap
 
 INSTANCE_IDENTITY_DIR="$PRIMARY_INSTANCE_IDENTITY_DIR" \
@@ -313,6 +346,7 @@ SERVER_PID=""
 export DATABASE_URL="$WORKSPACE_DATABASE_URL"
 export NAZO_TEST_DATABASE_URL="$WORKSPACE_DATABASE_URL"
 export VALKEY_URL="$WORKSPACE_VALKEY_URL"
+export NAZO_TEST_VALKEY_URL="$WORKSPACE_VALKEY_URL"
 cargo test --locked -p nazo-postgres --test migrations \
   pending_migrations_create_all_runtime_module_state_tables
 
@@ -388,8 +422,8 @@ if payload:
 PY
 )
 
-if [[ ! -x "$SERVER_BIN" ]]; then
-  echo "Instrumented server binary was not found at $SERVER_BIN." >&2
+if [[ ! -x "$E2E_SERVER_BIN" ]]; then
+  echo "Preserved instrumented E2E server binary was not found at $E2E_SERVER_BIN." >&2
   exit 1
 fi
 if [[ "${#test_objects[@]}" -eq 0 ]]; then
@@ -400,7 +434,7 @@ fi
 "$LLVM_TOOLS_DIR/llvm-cov" export --format=lcov \
   --instr-profile "$COVERAGE_DIR/server.profdata" \
   --ignore-filename-regex "$IGNORE_REGEX" \
-  "$SERVER_BIN" > lcov-e2e.info
+  "$E2E_SERVER_BIN" > lcov-e2e.info
 
 # Some integration tests deliberately execute the production binary as a child
 # process. Those profiles belong to the test run, not the long-lived E2E server
