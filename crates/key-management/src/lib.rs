@@ -9,6 +9,7 @@ mod lock;
 mod model;
 mod mtls_trust;
 mod request_object_encryption;
+mod repository;
 mod serialization;
 mod store;
 mod token;
@@ -26,4 +27,5 @@ pub use model::{
     VerificationKey,
 };
 pub use mtls_trust::{MtlsTrustAnchorError, ValidatedMtlsTrustAnchor, validate_mtls_trust_anchor};
+pub use repository::{SealedKeyMaterial, SigningKeyWrappingKeyError, SigningKeyWrappingKeyRing};
 pub use store::{signing_algorithm_from_name, signing_algorithm_name};

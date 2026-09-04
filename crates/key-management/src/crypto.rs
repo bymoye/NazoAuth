@@ -102,6 +102,23 @@ pub(crate) fn aes_256_gcm_decrypt(
     Ok(plaintext.to_vec())
 }
 
+pub(crate) fn aes_256_gcm_encrypt(
+    key: &[u8],
+    nonce: &[u8],
+    aad: &[u8],
+    plaintext: &[u8],
+) -> anyhow::Result<Vec<u8>> {
+    let key = LessSafeKey::new(
+        UnboundKey::new(&AES_256_GCM, key).map_err(|_| anyhow!("invalid AES-256-GCM key"))?,
+    );
+    let nonce = Nonce::try_assume_unique_for_key(nonce)
+        .map_err(|_| anyhow!("invalid AES-256-GCM nonce"))?;
+    let mut protected = plaintext.to_vec();
+    key.seal_in_place_append_tag(nonce, Aad::from(aad), &mut protected)
+        .map_err(|_| anyhow!("AES-256-GCM encryption failed"))?;
+    Ok(protected)
+}
+
 #[cfg(test)]
 #[path = "../tests/support/crypto.rs"]
 pub(crate) mod test_support;
