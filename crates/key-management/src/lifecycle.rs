@@ -28,7 +28,15 @@ use crate::{
 
 impl KeyManager {
     pub async fn run_lifecycle(self) {
-        let normal_interval = refresh_interval(self.inner.settings.prepublish_window);
+        let mut normal_interval = managed_refresh_interval(
+            self.inner.settings.prepublish_window,
+            self.inner
+                .generation
+                .load()
+                .loaded
+                .openid4vc_material
+                .is_some(),
+        );
         let mut retry_interval = normal_interval;
         let mut failure_backoff = MIN_FAILURE_BACKOFF;
         let mut shutdown = self.inner.lifecycle_shutdown.subscribe();
@@ -42,6 +50,15 @@ impl KeyManager {
             }
             match self.refresh().await {
                 Ok(()) => {
+                    normal_interval = managed_refresh_interval(
+                        self.inner.settings.prepublish_window,
+                        self.inner
+                            .generation
+                            .load()
+                            .loaded
+                            .openid4vc_material
+                            .is_some(),
+                    );
                     retry_interval = normal_interval;
                     failure_backoff = MIN_FAILURE_BACKOFF;
                 }
@@ -65,6 +82,10 @@ const MAX_FAILURE_BACKOFF: Duration = Duration::from_secs(60);
 pub(crate) const MAX_DATABASE_SNAPSHOT_STALENESS_SECONDS: i64 = 2 * 60 * 60;
 pub(crate) const MAX_DATABASE_SNAPSHOT_STALENESS: chrono::Duration =
     chrono::Duration::seconds(MAX_DATABASE_SNAPSHOT_STALENESS_SECONDS);
+/// Managed local revocation facts are refreshed on the same cadence as the
+/// previous file-backed source. This observation deadline is intentionally
+/// shorter than the two-hour signing-generation stale bound.
+pub(crate) const OPENID4VC_REVOCATION_MAX_STALE_SECONDS: i64 = 60;
 
 fn next_failure_backoff(current: Duration) -> Duration {
     current
@@ -76,6 +97,18 @@ fn next_failure_backoff(current: Duration) -> Duration {
 fn refresh_interval(prepublish_window: chrono::Duration) -> Duration {
     let seconds = (prepublish_window.num_seconds() / 2).clamp(1, 3_600);
     Duration::from_secs(seconds as u64)
+}
+
+fn managed_refresh_interval(
+    prepublish_window: chrono::Duration,
+    has_openid4vc_material: bool,
+) -> Duration {
+    let interval = refresh_interval(prepublish_window);
+    if has_openid4vc_material {
+        interval.min(Duration::from_secs(30))
+    } else {
+        interval
+    }
 }
 
 pub(crate) async fn load_or_create_keyset(settings: &KeySettings) -> anyhow::Result<LoadedKeyset> {
@@ -463,6 +496,7 @@ pub(crate) async fn try_load_keyset(
         verification_keys,
         request_object_decryption_key,
         request_object_encryption_jwk,
+        openid4vc_material: None,
     }))
 }
 

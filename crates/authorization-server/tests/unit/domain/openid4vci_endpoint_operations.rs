@@ -11,8 +11,10 @@ use diesel_async::RunQueryDsl;
 use ed25519_dalek::{Signer as _, SigningKey};
 use fred::interfaces::ClientLike;
 use nazo_auth::SigningPurpose;
-use nazo_digital_credentials::{CertificateRevocationPolicy, VcIssuerTrustPolicy, encrypt_ecdh_es};
-use nazo_key_management::{KeyManager, KeySettings, LocalKeyRegistration};
+use nazo_digital_credentials::{VcIssuerTrustPolicy, encrypt_ecdh_es};
+use nazo_key_management::{
+    KeyManager, KeySettings, LocalKeyRegistration, Openid4vcMaterial, Openid4vcPublicMaterial,
+};
 use nazo_openid4vci::{CredentialResponse, ProofTypeMetadata};
 use rcgen::{
     BasicConstraints, CertificateParams, CertifiedIssuer, IsCa, KeyPair, KeyUsagePurpose,
@@ -99,13 +101,19 @@ async fn fixture_crypto() -> Openid4vcCredentialCrypto {
     let keyset = KeyManager::load_or_create(settings)
         .await
         .expect("endpoint key manager");
-    let chain = format!("{}{}", leaf.pem(), ca.pem());
+    keyset.set_openid4vc_material_for_test(Openid4vcMaterial {
+        public: Openid4vcPublicMaterial {
+            signing_kid,
+            certificate_chain_pem: format!("{}{}", leaf.pem(), ca.pem()),
+            trust_anchors_pem: ca.pem(),
+            revocation_snapshot: None,
+        },
+        iaca_private_materials: Default::default(),
+    });
     let crypto = Openid4vcCredentialCrypto::new_with_policies(
         keyset,
-        chain.as_bytes(),
-        ca.pem().as_bytes(),
         VcIssuerTrustPolicy::san_bound(),
-        CertificateRevocationPolicy::disabled(),
+        crate::settings::Openid4vcRevocationPolicy::Disabled,
     )
     .expect("endpoint credential crypto");
     std::fs::remove_dir_all(root).expect("endpoint key fixture cleanup");

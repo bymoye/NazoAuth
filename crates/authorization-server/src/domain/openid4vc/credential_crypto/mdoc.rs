@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::Utc;
 use coset::CborSerializable;
@@ -13,7 +11,6 @@ use nazo_digital_credentials::{
     CredentialFormat, CredentialSignInput, CredentialTrustError, HolderBinding,
     PresentedCredential, VerifiedCredential,
 };
-use nazo_key_management::KeyManager;
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
@@ -35,7 +32,17 @@ pub(super) async fn sign(
         .subject_claims
         .as_object()
         .ok_or(CredentialTrustError::InvalidEncoding)?;
-    validate_mdl_issuing_country(crypto, &input.payload.credential_type, namespaces)?;
+    let lease = crypto
+        .prepare_signing()
+        .map_err(|_| CredentialTrustError::Unavailable)?;
+    let signing_material = crypto
+        .signing_material(&lease)
+        .map_err(|_| CredentialTrustError::Unavailable)?;
+    validate_mdl_issuing_country(
+        &signing_material.leaf_der,
+        &input.payload.credential_type,
+        namespaces,
+    )?;
     let mut builder = DocumentBuilder::new(&input.payload.credential_type)
         .device_key(jwk_to_cose_key(jwk)?)
         .validity(ValidityInfo {
@@ -60,8 +67,8 @@ pub(super) async fn sign(
         builder = builder.add_namespace(namespace, entries);
     }
     let signer = AsyncCoseSigner {
-        keyset: crypto.keyset.clone(),
-        certificate_der: crypto.leaf_der.clone(),
+        lease,
+        certificate_der: signing_material.leaf_der,
         runtime: tokio::runtime::Handle::current(),
     };
     let document = tokio::task::spawn_blocking(move || builder.sign(&signer))
@@ -97,7 +104,7 @@ pub(super) async fn sign(
 }
 
 fn validate_mdl_issuing_country(
-    crypto: &Openid4vcCredentialCrypto,
+    leaf_der: &[u8],
     credential_type: &str,
     namespaces: &Map<String, Value>,
 ) -> Result<(), CredentialTrustError> {
@@ -105,7 +112,7 @@ fn validate_mdl_issuing_country(
         return Ok(());
     }
 
-    let (remainder, certificate) = x509_parser::parse_x509_certificate(crypto.leaf_der.as_slice())
+    let (remainder, certificate) = x509_parser::parse_x509_certificate(leaf_der)
         .map_err(|_| CredentialTrustError::InvalidEncoding)?;
     if !remainder.is_empty() {
         return Err(CredentialTrustError::InvalidEncoding);
@@ -185,7 +192,7 @@ pub(super) fn verify(
         &verified,
         &trust_anchors,
         &presentation.additional_trust_anchors,
-        &crypto.revocation_policy,
+        &crypto.current_revocation_policy(),
     )?;
     if !mdoc_assessments_accepted(
         &verified,
@@ -495,15 +502,15 @@ pub(crate) fn mdoc_holder_key(
 }
 
 pub(super) struct AsyncCoseSigner {
-    pub(super) keyset: KeyManager,
-    pub(super) certificate_der: Arc<Vec<u8>>,
+    pub(super) lease: nazo_key_management::Openid4vcSigningLease,
+    pub(super) certificate_der: Vec<u8>,
     pub(super) runtime: tokio::runtime::Handle,
 }
 
 impl CoseSigner for AsyncCoseSigner {
     fn sign(&self, tbs: &[u8]) -> Result<Vec<u8>, mdoc_rs::MdocError> {
         self.runtime
-            .block_on(self.keyset.sign(SignRequest {
+            .block_on(self.lease.sign(SignRequest {
                 purpose: SigningPurpose::Credential,
                 algorithm: "ES256",
                 signing_input: tbs,

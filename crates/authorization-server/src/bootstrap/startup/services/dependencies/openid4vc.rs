@@ -7,7 +7,6 @@ pub(super) struct Openid4vcServices {
     pub(super) credential_dataset_admin: Option<web::Data<CredentialDatasetAdminService>>,
     pub(super) presentation_endpoint: Option<web::Data<PresentationEndpoint>>,
     pub(super) client_attestation_validator: Option<Arc<Openid4vcClientAttestationValidator>>,
-    pub(super) revocation_policy: Option<CertificateRevocationPolicy>,
 }
 
 pub(super) async fn build(
@@ -28,62 +27,14 @@ pub(super) async fn build(
             .expect("enabled OpenID4VC modules require a data encryption key")
     });
     let trust_policy_store = data_key.map(|key| persistence.openid4vc_trust_policies(key));
-    let revocation_policy = if openid4vc_enabled {
-        Some(super::super::super::background::load_revocation_policy(&settings.openid4vc).await?)
-    } else {
-        None
-    };
-    let openid4vc_crypto = if let Some(revocation_policy) = revocation_policy.as_ref() {
-        let certificate_chain = tokio::fs::read(
-            settings
-                .openid4vc
-                .signing_certificate_chain_file
-                .as_ref()
-                .expect("enabled OpenID4VC modules require a certificate chain"),
-        )
-        .await
-        .with_context(|| {
-            format!(
-                "failed to read OpenID4VC signing certificate chain from {}",
-                settings
-                    .openid4vc
-                    .signing_certificate_chain_file
-                    .as_ref()
-                    .expect("enabled OpenID4VC modules require a certificate chain")
-                    .display()
-            )
-        })?;
-        let trust_anchors_path = settings
-            .openid4vc
-            .trust_anchors_file
-            .as_ref()
-            .expect("enabled OpenID4VC modules require trust anchors");
-        let trust_anchors = tokio::fs::read(trust_anchors_path).await.with_context(|| {
-            format!(
-                "failed to read OpenID4VC trust anchors from {}",
-                trust_anchors_path.display()
-            )
-        })?;
+    let openid4vc_crypto = if openid4vc_enabled {
         Some(
             Openid4vcCredentialCrypto::new_with_policies(
                 keyset.clone(),
-                &certificate_chain,
-                &trust_anchors,
                 nazo_digital_credentials::VcIssuerTrustPolicy::san_bound(),
-                revocation_policy.clone(),
+                settings.openid4vc.revocation_policy,
             )
-            .with_context(|| {
-                format!(
-                    "failed to initialize OpenID4VC credential crypto from certificate chain {} and trust anchors {}",
-                    settings
-                        .openid4vc
-                        .signing_certificate_chain_file
-                        .as_ref()
-                        .expect("enabled OpenID4VC modules require a certificate chain")
-                        .display(),
-                    trust_anchors_path.display()
-                )
-            })?,
+            .context("failed to initialize OpenID4VC credential crypto from managed material")?,
         )
     } else {
         None
@@ -218,6 +169,5 @@ pub(super) async fn build(
         credential_dataset_admin,
         presentation_endpoint,
         client_attestation_validator,
-        revocation_policy,
     })
 }

@@ -21,7 +21,7 @@ use crate::{
 };
 use zeroize::Zeroizing;
 
-const USAGE: &str = "usage: nazoauth <server|operator-task|audit-anchor-worker|release-identity|migrate|tenant-bootstrap|keys-import|admin-provision>";
+const USAGE: &str = "usage: nazoauth <server|operator-task|audit-anchor-worker|release-identity|migrate|tenant-bootstrap|keys-import|mdoc-import|mdoc-rotate|mdoc-revoke|admin-provision>";
 const ADMIN_PROVISION_CREDENTIAL_FILE_ENV: &str = "NAZOAUTH_ADMIN_PROVISION_FILE";
 const ADMIN_PROVISION_OPERATION_ID_ENV: &str = "NAZOAUTH_ADMIN_PROVISION_OPERATION_ID";
 const ADMIN_PROVISION_DEPLOYMENT_ID_ENV: &str = "NAZOAUTH_ADMIN_PROVISION_DEPLOYMENT_ID";
@@ -167,6 +167,31 @@ pub async fn run(
             .await?;
             Ok(())
         }
+        Command::MdocManage { tenant_id, action } => {
+            let migration_config = ConfigSource::load_for_migrations()?;
+            let operator_persistence = persistence.operator_persistence(&migration_config).await?;
+            let config = ConfigSource::load()?;
+            let directory = operator_persistence
+                .tenant_directory()
+                .load_active()
+                .await?;
+            let binding = directory
+                .tenants
+                .iter()
+                .find(|binding| binding.tenant.tenant_id.as_uuid() == tenant_id)
+                .ok_or_else(|| {
+                    anyhow::anyhow!("mdoc management requires an active tenant binding")
+                })?;
+            let revision = crate::keyctl::operator_manage_mdoc(
+                &config,
+                binding,
+                operator_persistence.as_ref(),
+                action,
+            )
+            .await?;
+            println!("signing keyset revision: {revision}");
+            Ok(())
+        }
         Command::AdminProvision => run_admin_provision(persistence.as_ref()).await,
     }
 }
@@ -183,7 +208,7 @@ async fn ensure_system_tenant_material(
         .find(|binding| binding.tenant.tenant_id == system_tenant)
         .ok_or_else(|| anyhow::anyhow!("tenant directory has no active system tenant"))?;
     let settings = Settings::from_directory_binding(config, binding)?;
-    if settings.openid4vc.signing_certificate_chain_file.is_some() {
+    if settings.modules.enable_openid4vci_issuer || settings.modules.enable_openid4vp_verifier {
         crate::keyctl::operator_generate_local_database_for_tenant(
             config,
             binding,
@@ -415,6 +440,10 @@ enum Command {
         tenant_id: uuid::Uuid,
         source: PathBuf,
     },
+    MdocManage {
+        tenant_id: uuid::Uuid,
+        action: crate::keyctl::MdocManagementAction,
+    },
     AdminProvision,
 }
 
@@ -493,6 +522,50 @@ impl Command {
                     })?,
                 })
             }
+            "mdoc-import" | "mdoc-rotate" | "mdoc-revoke" => {
+                let mut tenant_id = None;
+                let mut source = None;
+                let mut issuer_id = None;
+                while let Some(argument) = args.next() {
+                    let value = args.next().ok_or_else(|| {
+                        anyhow::anyhow!("{command} requires a value for {argument}")
+                    })?;
+                    match argument.as_str() {
+                        "--tenant" if tenant_id.is_none() => {
+                            tenant_id = Some(
+                                value
+                                    .parse()
+                                    .map_err(|_| anyhow::anyhow!("--tenant must be a UUID"))?,
+                            )
+                        }
+                        "--from" if command == "mdoc-import" && source.is_none() => {
+                            source = Some(PathBuf::from(value))
+                        }
+                        "--issuer-id" if command == "mdoc-revoke" && issuer_id.is_none() => {
+                            issuer_id = Some(value)
+                        }
+                        _ => bail!(
+                            "{command} does not accept duplicate or unknown argument {argument}"
+                        ),
+                    }
+                }
+                let tenant_id = tenant_id
+                    .ok_or_else(|| anyhow::anyhow!("{command} requires --tenant <uuid>"))?;
+                let action = match command.as_str() {
+                    "mdoc-import" => {
+                        crate::keyctl::MdocManagementAction::Import(source.ok_or_else(|| {
+                            anyhow::anyhow!("mdoc-import requires --from <directory>")
+                        })?)
+                    }
+                    "mdoc-rotate" => crate::keyctl::MdocManagementAction::Rotate,
+                    _ => crate::keyctl::MdocManagementAction::Revoke {
+                        issuer_id: issuer_id.ok_or_else(|| {
+                            anyhow::anyhow!("mdoc-revoke requires --issuer-id <IACA-fingerprint>")
+                        })?,
+                    },
+                };
+                Ok(Self::MdocManage { tenant_id, action })
+            }
             "admin-provision" => {
                 ensure_no_extra_args(args, "admin-provision")?;
                 Ok(Self::AdminProvision)
@@ -513,7 +586,7 @@ fn usage_for_args(args: &[String]) -> String {
         return USAGE.to_owned();
     }
     format!(
-        "usage: {program} <server|operator-task|audit-anchor-worker|release-identity|migrate|tenant-bootstrap|keys-import|admin-provision>"
+        "usage: {program} <server|operator-task|audit-anchor-worker|release-identity|migrate|tenant-bootstrap|keys-import|mdoc-import|mdoc-rotate|mdoc-revoke|admin-provision>"
     )
 }
 

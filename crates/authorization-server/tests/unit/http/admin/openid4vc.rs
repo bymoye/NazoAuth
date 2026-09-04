@@ -20,11 +20,11 @@ use fred::interfaces::ClientLike;
 use fred::prelude::{
     Builder as ValkeyBuilder, Config as ValkeyConfig, ConnectionConfig, PerformanceConfig,
 };
-use nazo_digital_credentials::{
-    CertificateRevocationPolicy, CredentialFormat, VcIssuerTrustPolicy,
-};
+use nazo_digital_credentials::{CredentialFormat, VcIssuerTrustPolicy};
 use nazo_http_actix::OAuthJsonErrorFields;
-use nazo_key_management::{KeyManager, KeySettings, LocalKeyRegistration};
+use nazo_key_management::{
+    KeyManager, KeySettings, LocalKeyRegistration, Openid4vcMaterial, Openid4vcPublicMaterial,
+};
 use nazo_openid4vci::CredentialConfiguration;
 use rcgen::{
     BasicConstraints, CertificateParams, CertifiedIssuer, IsCa, KeyPair, PKCS_ECDSA_P256_SHA256,
@@ -148,12 +148,27 @@ impl LiveOpenid4vcAdminFixture {
             std::env::temp_dir().join(format!("nazo-openid4vc-admin-{}", Uuid::now_v7().simple()));
         std::fs::create_dir_all(&key_dir).expect("credential key directory should be created");
         let (key_manager, chain_pem, anchors_pem) = credential_key_material(&key_dir).await;
+        key_manager.set_openid4vc_material_for_test(Openid4vcMaterial {
+            public: Openid4vcPublicMaterial {
+                signing_kid: key_manager
+                    .snapshot()
+                    .signing_verification_key(
+                        nazo_auth::SigningPurpose::Credential,
+                        jsonwebtoken::Algorithm::ES256,
+                    )
+                    .expect("fixture credential key")
+                    .kid
+                    .clone(),
+                certificate_chain_pem: chain_pem,
+                trust_anchors_pem: anchors_pem,
+                revocation_snapshot: None,
+            },
+            iaca_private_materials: Default::default(),
+        });
         let crypto = Openid4vcCredentialCrypto::new_with_policies(
             key_manager.clone(),
-            chain_pem.as_bytes(),
-            anchors_pem.as_bytes(),
             VcIssuerTrustPolicy::san_bound(),
-            CertificateRevocationPolicy::disabled(),
+            crate::settings::Openid4vcRevocationPolicy::Disabled,
         )
         .expect("credential crypto should validate the generated chain");
 

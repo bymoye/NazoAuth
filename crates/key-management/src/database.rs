@@ -8,9 +8,9 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::{
-    ExternalKeyRegistration, KeyRecord, KeyRecordStatus, LocalKeyRegistration,
-    PersistedSigningKeyset, SealedKeyMaterial, SigningKeyRepository, SigningKeyWrappingKeyRing,
-    SigningKeysetCompareAndSwapResult, SigningKeysetCreateResult,
+    ExternalKeyRegistration, KeyRecord, KeyRecordStatus, LocalKeyRegistration, Openid4vcMaterial,
+    Openid4vcState, PersistedSigningKeyset, SealedKeyMaterial, SigningKeyRepository,
+    SigningKeyWrappingKeyRing, SigningKeysetCompareAndSwapResult, SigningKeysetCreateResult,
     model::{
         ActiveSigningKey, ExternalSigningKey, KeyHandle, KeySettings, KeyState, LoadedKeyset,
         ManagedKey, StoredVerificationKey,
@@ -278,6 +278,143 @@ pub(crate) async fn register_external(
         keys.push(json!({"kid":registration.kid,"alg":algorithm,"backend":"external-command","key_ref":registration.key_ref,"public_jwk":registration.public_jwk,"created_at":timestamp(Utc::now()),"retire_at":null}));
         Ok(true)
     }).await
+}
+
+pub(crate) async fn openid4vc_state(
+    binding: &DatabaseKeysetBinding,
+    settings: &KeySettings,
+) -> anyhow::Result<Openid4vcState> {
+    let record = require_record(binding).await?;
+    let payload = decrypt_payload(binding.tenant_id, &binding.wrapping_keys, &record)?;
+    load_payload(settings, &payload)?;
+    Ok(Openid4vcState {
+        revision: record.revision,
+        material: payload
+            .get("openid4vc")
+            .cloned()
+            .map(serde_json::from_value)
+            .transpose()?,
+    })
+}
+
+pub(crate) async fn commit_openid4vc(
+    settings: &KeySettings,
+    binding: &DatabaseKeysetBinding,
+    expected_revision: i64,
+    material: Openid4vcMaterial,
+    new_private_key_pem: Option<String>,
+) -> anyhow::Result<LoadedKeyset> {
+    let record = require_record(binding).await?;
+    if record.revision != expected_revision {
+        anyhow::bail!("OpenID4VC keyset revision conflict");
+    }
+    let mut payload = decrypt_payload(binding.tenant_id, &binding.wrapping_keys, &record)?;
+    if let Some(private_pem) = new_private_key_pem {
+        let kid = &material.public.signing_kid;
+        if kid.trim().is_empty() {
+            anyhow::bail!("OpenID4VC signing kid must not be empty");
+        }
+        let private = crate::serialization::pem_to_der(&private_pem)
+            .ok_or_else(|| anyhow!("OpenID4VC signing key must be a PKCS#8 PEM"))?;
+        let public = public_jwk_from_private_der(kid, jsonwebtoken::Algorithm::ES256, &private)?;
+        let keys = payload["keys"]
+            .as_array_mut()
+            .ok_or_else(|| anyhow!("keyset missing keys"))?;
+        if keys
+            .iter()
+            .any(|key| key.get("kid").and_then(Value::as_str) == Some(kid.as_str()))
+        {
+            anyhow::bail!("OpenID4VC signing kid already exists");
+        }
+        for key in keys.iter_mut() {
+            let Some(mut purposes) = key_entry_purposes(key)? else {
+                continue;
+            };
+            let removed = purposes.remove(&SigningPurpose::Credential)
+                | purposes.remove(&SigningPurpose::PresentationRequest);
+            if !removed {
+                continue;
+            }
+            if purposes.is_empty() {
+                key.as_object_mut()
+                    .expect("validated key object")
+                    .remove("purposes");
+                key["retire_at"] = json!(timestamp(Utc::now() + settings.verification_grace));
+            } else {
+                key["purposes"] = json!(
+                    purposes
+                        .iter()
+                        .map(|purpose| purpose.as_str())
+                        .collect::<Vec<_>>()
+                );
+            }
+        }
+        keys.push(json!({
+            "kid":kid, "alg":"ES256", "backend":"local-db", "public_jwk":public,
+            "private_pkcs8_der":URL_SAFE_NO_PAD.encode(private),
+            "created_at":timestamp(Utc::now()), "retire_at":null,
+            "purposes":["credential", "presentation_request"],
+        }));
+    }
+    payload["openid4vc"] = serde_json::to_value(material)?;
+    // Validate the entire candidate before the sole externally visible write.
+    let loaded = load_payload(settings, &payload)?;
+    let revision = record
+        .revision
+        .checked_add(1)
+        .ok_or_else(|| anyhow!("signing keyset revision overflow"))?;
+    let candidate = persist_payload(binding.tenant_id, revision, payload, &binding.wrapping_keys)?;
+    match binding
+        .repository
+        .compare_and_swap(expected_revision, candidate)
+        .await?
+    {
+        SigningKeysetCompareAndSwapResult::Applied(_) => Ok(loaded),
+        SigningKeysetCompareAndSwapResult::Conflict(_) => {
+            anyhow::bail!("OpenID4VC keyset revision conflict")
+        }
+    }
+}
+
+pub(crate) fn validate_openid4vc_material(loaded: &LoadedKeyset) -> anyhow::Result<()> {
+    let Some(material) = loaded.openid4vc_material.as_ref() else {
+        return Ok(());
+    };
+    let credential = loaded
+        .selected_key(SigningPurpose::Credential, jsonwebtoken::Algorithm::ES256)
+        .ok_or_else(|| anyhow!("OpenID4VC credential signing key unavailable"))?;
+    let presentation = loaded
+        .selected_key(
+            SigningPurpose::PresentationRequest,
+            jsonwebtoken::Algorithm::ES256,
+        )
+        .ok_or_else(|| anyhow!("OpenID4VC presentation-request signing key unavailable"))?;
+    if credential.kid != presentation.kid || credential.kid != material.public.signing_kid {
+        anyhow::bail!(
+            "OpenID4VC material must select one credential and presentation-request ES256 key"
+        );
+    }
+    let certificates = crate::model::parse_openid4vc_certificate_chain(
+        &material.public.certificate_chain_pem,
+        "signing chain",
+    )?;
+    let leaf_key =
+        crate::model::p256_public_key_from_certificate(&certificates[0], "signing leaf")?;
+    if leaf_key
+        != crate::model::p256_public_key_from_jwk(credential.public_jwk, "OpenID4VC signing key")?
+    {
+        anyhow::bail!("OpenID4VC signing certificate does not match its managed key");
+    }
+    crate::model::parse_openid4vc_certificate_chain(
+        &material.public.trust_anchors_pem,
+        "trust anchors",
+    )?;
+    if let Some(snapshot) = &material.public.revocation_snapshot {
+        snapshot
+            .validate_structure()
+            .map_err(|error| anyhow!("invalid managed revocation state: {error}"))?;
+    }
+    Ok(())
 }
 
 pub(crate) fn local_private_key_pem(loaded: &LoadedKeyset, kid: &str) -> anyhow::Result<String> {
@@ -593,6 +730,12 @@ fn public_projection(payload: &Value) -> anyhow::Result<Value> {
         .as_object_mut()
         .ok_or_else(|| anyhow!("keyset payload must be object"))?
         .remove("request_object_private_pem");
+    if let Some(material) = metadata.get_mut("openid4vc") {
+        material
+            .as_object_mut()
+            .ok_or_else(|| anyhow!("OpenID4VC material must be object"))?
+            .remove("iaca_private_materials");
+    }
     for entry in metadata["keys"]
         .as_array_mut()
         .ok_or_else(|| anyhow!("keyset payload missing keys"))?
@@ -761,14 +904,32 @@ fn load_payload(settings: &KeySettings, payload: &Value) -> anyhow::Result<Loade
             },
         });
     }
-    Ok(LoadedKeyset {
+    let mut loaded = LoadedKeyset {
         active_kid,
         active_alg: active_alg.ok_or_else(|| anyhow!("active key is unavailable"))?,
         active_signing_key: active.ok_or_else(|| anyhow!("active signer unavailable"))?,
         verification_keys,
         request_object_decryption_key,
         request_object_encryption_jwk,
-    })
+        openid4vc_material: payload
+            .get("openid4vc")
+            .cloned()
+            .map(serde_json::from_value)
+            .transpose()?,
+    };
+    validate_openid4vc_material(&loaded)?;
+    if let Some(snapshot) = loaded
+        .openid4vc_material
+        .as_mut()
+        .and_then(|material| material.public.revocation_snapshot.as_mut())
+    {
+        // Only the observation window is local. Revocation facts remain unchanged.
+        let now = Utc::now();
+        snapshot.this_update = now;
+        snapshot.next_update = now
+            + chrono::Duration::seconds(crate::lifecycle::OPENID4VC_REVOCATION_MAX_STALE_SECONDS);
+    }
+    Ok(loaded)
 }
 
 fn records(payload: &Value) -> anyhow::Result<Vec<KeyRecord>> {

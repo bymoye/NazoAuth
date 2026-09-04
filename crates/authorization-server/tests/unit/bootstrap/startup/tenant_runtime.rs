@@ -877,7 +877,6 @@ async fn tenant_shutdown_owns_and_stops_every_background_worker() {
         lifecycle.runtime_module_reconciler = Some(worker());
         lifecycle.key_lifecycle = Some(tokio::spawn(async {}));
         lifecycle.ciba_ping_worker = Some(worker());
-        lifecycle.openid4vc_revocation_worker = Some(worker());
     }
 
     runtime.stop_lifecycle().await;
@@ -890,5 +889,4 @@ async fn tenant_shutdown_owns_and_stops_every_background_worker() {
     assert!(lifecycle.runtime_module_reconciler.is_none());
     assert!(lifecycle.key_lifecycle.is_none());
     assert!(lifecycle.ciba_ping_worker.is_none());
-    assert!(lifecycle.openid4vc_revocation_worker.is_none());
 }

@@ -1,14 +1,19 @@
-//! Signing-key lifecycle plus the local mdoc certificate and CRL material it owns.
+//! Tenant signing keys and their atomically persisted OpenID4VC authority material.
 
-use std::{collections::BTreeSet, path::PathBuf};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::{Path, PathBuf},
+};
 
 use anyhow::{Context, bail};
 use nazo_auth::SigningPurpose;
-use nazo_key_management::signing_algorithm_from_name;
+use nazo_key_management::{
+    KeyManager, Openid4vcMaterial, Openid4vcPublicMaterial, signing_algorithm_from_name,
+};
 use rcgen::{
     BasicConstraints, CertificateParams, CertificateRevocationListParams, CertifiedIssuer,
     CustomExtension, DistinguishedName, DnType, IsCa, Issuer, KeyIdMethod, KeyPair,
-    KeyUsagePurpose, PKCS_ECDSA_P256_SHA256, PublicKeyData, RevokedCertParams, SerialNumber,
+    KeyUsagePurpose, PKCS_ECDSA_P256_SHA256, RevokedCertParams, SerialNumber,
 };
 use rustls::pki_types::{CertificateDer, pem::PemObject};
 use sha1::{Digest as _, Sha1};
@@ -19,10 +24,7 @@ use yasna::{Tag, models::ObjectIdentifier};
 use crate::{config::ConfigSource, settings::Settings};
 
 #[derive(Debug)]
-struct Openid4vcCertificatePaths {
-    chain: PathBuf,
-    anchors: PathBuf,
-    revocation_snapshot: Option<PathBuf>,
+struct Openid4vcCertificateProfile {
     hostname: String,
     mdoc_profile: Option<MdocCertificateProfile>,
 }
@@ -47,26 +49,22 @@ struct MdocCertificateMaterial {
 
 #[derive(Clone)]
 pub(crate) struct MdocCrlSource {
-    certificate_bundle: PathBuf,
-    revocation_snapshot: PathBuf,
+    keyset: KeyManager,
     issuer_contact_uri: String,
 }
 
 impl MdocCrlSource {
-    pub(crate) fn from_settings(settings: &crate::settings::Settings) -> Option<Self> {
-        let certificate_bundle = settings.openid4vc.signing_certificate_chain_file.clone()?;
-        let revocation_snapshot = settings.openid4vc.revocation_snapshot_file.clone()?;
-        let issuer_contact_uri = settings
-            .endpoint
-            .issuer
-            .as_str()
-            .trim_end_matches('/')
-            .to_owned();
-        Some(Self {
-            certificate_bundle,
-            revocation_snapshot,
-            issuer_contact_uri,
-        })
+    pub(crate) fn from_settings(settings: &Settings, keyset: KeyManager) -> Option<Self> {
+        (settings.modules.enable_openid4vci_issuer || settings.modules.enable_openid4vp_verifier)
+            .then(|| Self {
+                keyset,
+                issuer_contact_uri: settings
+                    .endpoint
+                    .issuer
+                    .as_str()
+                    .trim_end_matches('/')
+                    .to_owned(),
+            })
     }
 }
 
@@ -81,25 +79,18 @@ pub(crate) async fn signed_mdoc_crl(
     {
         return Ok(None);
     }
-    let key_path = source
-        .certificate_bundle
-        .parent()
-        .context("OpenID4VC certificate bundle path has no parent")?
-        .join("iaca-keys")
-        .join(format!("{issuer_id}.pem"));
-    let issuer_material = match tokio::fs::read_to_string(&key_path).await {
-        Ok(material) => material,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(error).context("failed to read mdoc issuer material"),
+    // Revocation facts are read from the authority, not an instance-local cache.
+    let state = source.keyset.database_openid4vc_state().await?;
+    let Some(material) = state.material else {
+        return Ok(None);
     };
-    let snapshot = crate::bootstrap::read_revocation_snapshot(&source.revocation_snapshot)
-        .await
-        .with_context(|| {
-            format!(
-                "failed to load mdoc revocation snapshot {}",
-                source.revocation_snapshot.display()
-            )
-        })?;
+    let Some(issuer_material) = material.iaca_private_materials.get(issuer_id) else {
+        return Ok(None);
+    };
+    let snapshot = material
+        .public
+        .revocation_snapshot
+        .context("mdoc authority has no revocation state")?;
     let certificates = CertificateDer::pem_slice_iter(issuer_material.as_bytes())
         .collect::<Result<Vec<_>, _>>()
         .context("failed to parse OpenID4VC certificate bundle")?;
@@ -117,28 +108,31 @@ pub(crate) async fn signed_mdoc_crl(
         return Ok(None);
     }
     let identity = nazo_digital_credentials::certificate_identity(certificates[0].as_ref());
-    let status = snapshot
+    let entry = snapshot
         .entries
         .iter()
         .find(|entry| entry.issuer == source.issuer_contact_uri && entry.certificate == identity)
-        .map(|entry| entry.status)
         .context("mdoc revocation snapshot has no status for the current DS certificate")?;
-    let private_key = KeyPair::from_pem(&issuer_material)
+    let private_key = KeyPair::from_pem(issuer_material)
         .context("failed to parse IACA private key as PKCS#8 PEM")?;
     if private_key.public_key_raw() != ca.public_key().subject_public_key.data.as_ref() {
         bail!("IACA private key does not match current certificate bundle");
     }
     let issuer = Issuer::from_ca_cert_der(&certificates[1], private_key)
         .context("failed to build CRL issuer from IACA certificate")?;
-    let this_update = time::OffsetDateTime::from_unix_timestamp(snapshot.this_update.timestamp())
-        .context("mdoc revocation snapshot this_update is out of range")?;
-    let next_update = time::OffsetDateTime::from_unix_timestamp(snapshot.next_update.timestamp())
-        .context("mdoc revocation snapshot next_update is out of range")?;
-    let revoked_certs = match status {
+    let this_update = time::OffsetDateTime::now_utc();
+    let next_update = this_update + time::Duration::hours(24);
+    let revoked_certs = match entry.status {
         nazo_digital_credentials::CertificateRevocationStatus::Good => Vec::new(),
         nazo_digital_credentials::CertificateRevocationStatus::Revoked => vec![RevokedCertParams {
             serial_number: SerialNumber::from(leaf.raw_serial().to_vec()),
-            revocation_time: this_update,
+            revocation_time: time::OffsetDateTime::from_unix_timestamp(
+                entry
+                    .revoked_at
+                    .context("revoked DS has no recorded revocation time")?
+                    .timestamp(),
+            )
+            .context("DS revocation time is out of range")?,
             reason_code: None,
             invalidity_date: None,
         }],
@@ -147,7 +141,7 @@ pub(crate) async fn signed_mdoc_crl(
         this_update,
         next_update,
         crl_number: SerialNumber::from(
-            u64::try_from(snapshot.this_update.timestamp_micros())
+            u64::try_from(this_update.unix_timestamp_nanos() / 1_000)
                 .context("mdoc revocation snapshot this_update precedes the Unix epoch")?,
         ),
         issuing_distribution_point: None,
@@ -214,154 +208,6 @@ pub(crate) async fn remove_tenant_material(
         Err(error) => Err(error)
             .with_context(|| format!("failed to inspect tenant material {}", tenant_dir.display())),
     }
-}
-
-async fn ensure_openid4vc_revocation_snapshot(
-    paths: &Openid4vcCertificatePaths,
-) -> anyhow::Result<()> {
-    let Some(path) = paths.revocation_snapshot.as_ref() else {
-        return Ok(());
-    };
-    let parent = path
-        .parent()
-        .context("OpenID4VC revocation snapshot path has no parent")?;
-    tokio::fs::create_dir_all(parent).await?;
-    match tokio::fs::symlink_metadata(path).await {
-        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
-            bail!(
-                "OpenID4VC revocation snapshot must be a regular file: {}",
-                path.display()
-            );
-        }
-        Ok(_) => return Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => {
-            return Err(error).with_context(|| format!("failed to inspect {}", path.display()));
-        }
-    }
-    let now = chrono::Utc::now();
-    let snapshot = nazo_digital_credentials::CertificateRevocationSnapshot {
-        version: nazo_digital_credentials::CertificateRevocationSnapshot::VERSION,
-        this_update: now - chrono::Duration::minutes(1),
-        next_update: now + chrono::Duration::hours(24),
-        entries: Vec::new(),
-    };
-    let contents = serde_json::to_vec(&snapshot)?;
-    atomic_write(path, &contents, atomicwrites::AllowOverwrite).await
-}
-
-async fn initialize_mdoc_revocation_snapshot(
-    paths: &Openid4vcCertificatePaths,
-    material: &MdocCertificateMaterial,
-) -> anyhow::Result<()> {
-    let Some(path) = paths.revocation_snapshot.as_ref() else {
-        return Ok(());
-    };
-    let parent = path
-        .parent()
-        .context("OpenID4VC revocation snapshot path has no parent")?;
-    tokio::fs::create_dir_all(parent).await?;
-    let issuer = paths
-        .mdoc_profile
-        .as_ref()
-        .expect("mdoc material requires profile")
-        .issuer_contact_uri
-        .clone();
-    let certificate = nazo_digital_credentials::certificate_identity(&material.leaf_der);
-    let mut snapshot = match tokio::fs::read(path).await {
-        Ok(bytes) => nazo_digital_credentials::CertificateRevocationSnapshot::from_json(&bytes)
-            .map_err(|error| anyhow::anyhow!(error))?,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            let now = chrono::Utc::now();
-            nazo_digital_credentials::CertificateRevocationSnapshot {
-                version: nazo_digital_credentials::CertificateRevocationSnapshot::VERSION,
-                this_update: now - chrono::Duration::minutes(1),
-                next_update: now + chrono::Duration::hours(24),
-                entries: Vec::new(),
-            }
-        }
-        Err(error) => {
-            return Err(error).with_context(|| {
-                format!(
-                    "failed to read OpenID4VC revocation snapshot {}",
-                    path.display()
-                )
-            });
-        }
-    };
-    if !snapshot
-        .entries
-        .iter()
-        .any(|entry| entry.issuer == issuer && entry.certificate == certificate)
-    {
-        snapshot.this_update = chrono::Utc::now();
-        snapshot
-            .entries
-            .push(nazo_digital_credentials::CertificateRevocationEntry {
-                issuer,
-                certificate,
-                status: nazo_digital_credentials::CertificateRevocationStatus::Good,
-            });
-        let contents = serde_json::to_vec(&snapshot)?;
-        atomic_write(path, &contents, atomicwrites::AllowOverwrite).await?;
-    }
-    Ok(())
-}
-
-async fn existing_openid4vc_bundle_matches(
-    paths: &Openid4vcCertificatePaths,
-    private_key: &KeyPair,
-) -> anyhow::Result<bool> {
-    if paths.chain != paths.anchors {
-        bail!(
-            "OpenID4VC signing certificate chain and trust anchors must reference one atomic certificate bundle"
-        );
-    }
-    let chain = match tokio::fs::read(&paths.chain).await {
-        Ok(value) => value,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(error) => {
-            return Err(error).with_context(|| format!("failed to read {}", paths.chain.display()));
-        }
-    };
-    let Ok(certificates) = CertificateDer::pem_slice_iter(&chain).collect::<Result<Vec<_>, _>>()
-    else {
-        return Ok(false);
-    };
-    if certificates.len() != 2 {
-        return Ok(false);
-    }
-    let (_, leaf) = x509_parser::parse_x509_certificate(certificates[0].as_ref())
-        .map_err(|error| anyhow::anyhow!("failed to parse OpenID4VC leaf certificate: {error}"))?;
-    let (_, ca) = x509_parser::parse_x509_certificate(certificates[1].as_ref())
-        .map_err(|error| anyhow::anyhow!("failed to parse OpenID4VC CA certificate: {error}"))?;
-    if leaf.public_key().subject_public_key.data.as_ref() != private_key.der_bytes()
-        || certificates[0] == certificates[1]
-        || leaf.is_ca()
-        || !ca.is_ca()
-        || ca.subject() != ca.issuer()
-        || leaf.issuer() != ca.subject()
-        || !leaf.validity().is_valid()
-        || !ca.validity().is_valid()
-        || ca.verify_signature(Some(ca.public_key())).is_err()
-        || leaf.verify_signature(Some(ca.public_key())).is_err()
-    {
-        return Ok(false);
-    }
-    if let Some(profile) = paths.mdoc_profile.as_ref()
-        && (!mdoc_certificate_profile_matches(&leaf, &ca, profile)
-            || !iaca_private_key_matches(paths, certificates[1].as_ref(), &ca).await?)
-    {
-        return Ok(false);
-    }
-    let Ok(Some(subject_alt_names)) = leaf.subject_alternative_name() else {
-        return Ok(false);
-    };
-    Ok(subject_alt_names.value.general_names.len() == 1
-        && matches!(
-            &subject_alt_names.value.general_names[0],
-            x509_parser::extensions::GeneralName::DNSName(name) if *name == paths.hostname
-        ))
 }
 
 fn mdoc_certificate_profile_matches(
@@ -452,26 +298,6 @@ fn mdoc_certificate_profile_matches(
 
 fn subject_key_identifier_from_public_key(public_key: &[u8]) -> Vec<u8> {
     Sha1::digest(public_key).to_vec()
-}
-
-async fn iaca_private_key_matches(
-    paths: &Openid4vcCertificatePaths,
-    ca_der: &[u8],
-    ca: &x509_parser::certificate::X509Certificate<'_>,
-) -> anyhow::Result<bool> {
-    let key_path = iaca_private_key_path(&paths.chain, ca_der)?;
-    let private_key_pem = match tokio::fs::read_to_string(&key_path).await {
-        Ok(value) => value,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(error) => {
-            return Err(error).with_context(|| format!("failed to read {}", key_path.display()));
-        }
-    };
-    let private_key = match KeyPair::from_pem(&private_key_pem) {
-        Ok(key) => key,
-        Err(_) => return Ok(false),
-    };
-    Ok(private_key.public_key_raw() == ca.public_key().subject_public_key.data.as_ref())
 }
 
 fn build_openid4vc_certificate_bundle(
@@ -595,194 +421,11 @@ fn issuer_alternative_name(uri: &str) -> CustomExtension {
     CustomExtension::from_oid_content(&[2, 5, 29, 18], content)
 }
 
-async fn activate_openid4vc_certificate_bundle(
-    paths: &Openid4vcCertificatePaths,
-    bundle: &Openid4vcCertificateBundle,
-) -> anyhow::Result<()> {
-    if paths.chain != paths.anchors {
-        bail!(
-            "OpenID4VC signing certificate chain and trust anchors must reference one atomic certificate bundle"
-        );
-    }
-    let parent = paths
-        .chain
-        .parent()
-        .context("OpenID4VC certificate bundle path has no parent")?;
-    tokio::fs::create_dir_all(parent).await?;
-    match tokio::fs::symlink_metadata(&paths.chain).await {
-        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
-            bail!(
-                "OpenID4VC certificate bundle must be a regular file: {}",
-                paths.chain.display()
-            );
-        }
-        Ok(_) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => {
-            return Err(error)
-                .with_context(|| format!("failed to inspect {}", paths.chain.display()));
-        }
-    }
-    if let Some(material) = bundle.mdoc_material.as_ref() {
-        persist_iaca_private_key(paths, material).await?;
-    }
-    atomic_write(&paths.chain, &bundle.contents, atomicwrites::AllowOverwrite).await
-}
-
-async fn atomic_write(
-    path: &std::path::Path,
-    contents: &[u8],
-    overwrite: atomicwrites::OverwriteBehavior,
-) -> anyhow::Result<()> {
-    let destination = path.to_owned();
-    let contents = contents.to_vec();
-    tokio::task::spawn_blocking(move || -> std::io::Result<()> {
-        use std::io::Write as _;
-
-        atomicwrites::AtomicFile::new(&destination, overwrite)
-            .write(|file| file.write_all(&contents))
-            .map_err(std::io::Error::from)
-    })
-    .await
-    .context("OpenID4VC atomic writer task failed")?
-    .with_context(|| {
-        format!(
-            "failed to atomically write OpenID4VC material {}",
-            path.display()
-        )
-    })
-}
-
-pub(crate) fn iaca_private_key_path(
-    certificate_bundle: &std::path::Path,
-    ca_der: &[u8],
-) -> anyhow::Result<PathBuf> {
-    let parent = certificate_bundle
-        .parent()
-        .context("OpenID4VC certificate bundle path has no parent")?;
-    Ok(parent
-        .join("iaca-keys")
-        .join(format!("{}.pem", sha256_hex(ca_der))))
-}
-
 fn sha256_hex(bytes: &[u8]) -> String {
     Sha256::digest(bytes)
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect()
-}
-
-async fn persist_iaca_private_key(
-    paths: &Openid4vcCertificatePaths,
-    material: &MdocCertificateMaterial,
-) -> anyhow::Result<()> {
-    let key_path = iaca_private_key_path(&paths.chain, &material.ca_der)?;
-    let key_directory = key_path.parent().expect("IACA key path has parent");
-    tokio::fs::create_dir_all(key_directory).await?;
-    restrict_iaca_key_directory_permissions(key_directory)?;
-    match tokio::fs::symlink_metadata(key_directory).await {
-        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
-            bail!(
-                "OpenID4VC IACA key directory must be a real directory: {}",
-                key_directory.display()
-            );
-        }
-        Ok(_) => {}
-        Err(error) => {
-            return Err(error)
-                .with_context(|| format!("failed to inspect {}", key_directory.display()));
-        }
-    }
-    match tokio::fs::symlink_metadata(&key_path).await {
-        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
-            bail!(
-                "OpenID4VC IACA private key must be a regular file: {}",
-                key_path.display()
-            );
-        }
-        Ok(_) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => {
-            return Err(error).with_context(|| format!("failed to inspect {}", key_path.display()));
-        }
-    }
-    let written = match tokio::fs::read_to_string(&key_path).await {
-        Ok(existing) => {
-            let existing_key = KeyPair::from_pem(&existing)
-                .context("failed to parse existing IACA private key")?;
-            let (_, ca) =
-                x509_parser::parse_x509_certificate(&material.ca_der).map_err(|error| {
-                    anyhow::anyhow!("failed to parse generated IACA certificate: {error}")
-                })?;
-            if existing_key.public_key_raw() != ca.public_key().subject_public_key.data.as_ref() {
-                bail!(
-                    "existing IACA private key does not match certificate {}",
-                    key_path.display()
-                );
-            }
-            Ok(())
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            atomic_write_private(&key_path, material.issuer_material_pem.as_bytes()).await
-        }
-        Err(error) => Err(error)
-            .with_context(|| format!("failed to read IACA private key {}", key_path.display())),
-    };
-    written?;
-    restrict_iaca_private_key_permissions(&key_path)
-}
-
-async fn atomic_write_private(path: &std::path::Path, contents: &[u8]) -> anyhow::Result<()> {
-    let destination = path.to_owned();
-    let contents = contents.to_vec();
-    tokio::task::spawn_blocking(move || -> std::io::Result<()> {
-        use std::io::Write as _;
-
-        let mut options = std::fs::OpenOptions::new();
-        options.write(true).create(true).truncate(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt as _;
-            options.mode(0o600);
-        }
-        atomicwrites::AtomicFile::new(&destination, atomicwrites::DisallowOverwrite)
-            .write_with_options(|file| file.write_all(&contents), options)
-            .map_err(std::io::Error::from)
-    })
-    .await
-    .context("OpenID4VC IACA private-key writer task failed")?
-    .with_context(|| {
-        format!(
-            "failed to atomically write IACA private key {}",
-            path.display()
-        )
-    })
-}
-
-#[cfg(unix)]
-fn restrict_iaca_key_directory_permissions(path: &std::path::Path) -> anyhow::Result<()> {
-    use std::os::unix::fs::PermissionsExt as _;
-
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
-        .with_context(|| format!("failed to restrict IACA key directory {}", path.display()))
-}
-
-#[cfg(not(unix))]
-fn restrict_iaca_key_directory_permissions(_path: &std::path::Path) -> anyhow::Result<()> {
-    Ok(())
-}
-
-#[cfg(unix)]
-fn restrict_iaca_private_key_permissions(path: &std::path::Path) -> anyhow::Result<()> {
-    use std::os::unix::fs::PermissionsExt as _;
-
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
-        .with_context(|| format!("failed to restrict IACA private key {}", path.display()))
-}
-
-#[cfg(not(unix))]
-fn restrict_iaca_private_key_permissions(_path: &std::path::Path) -> anyhow::Result<()> {
-    Ok(())
 }
 
 fn parse_generate_local(
@@ -933,38 +576,35 @@ pub(crate) async fn operator_generate_local_database_for_tenant(
         persistence,
     )
     .await?;
-    let certificate_paths = database_certificate_paths(&settings, binding, config, &options)?;
-    let kid =
-        generate_local_with_database_manager(&manager, certificate_paths.as_ref(), options).await?;
-    let certificate_chain =
-        match certificate_paths {
-            Some(paths) => Some(tokio::fs::read_to_string(&paths.chain).await.with_context(
-                || {
-                    format!(
-                        "failed to read generated certificate chain {}",
-                        paths.chain.display()
-                    )
-                },
-            )?),
-            None => None,
-        };
-    Ok((kid, manager.database_revision().await?, certificate_chain))
+    let profile = database_certificate_profile(binding, config, &options)?;
+    let kid = generate_local_with_database_manager(&manager, profile.as_ref(), options).await?;
+    let state = manager.database_openid4vc_state().await?;
+    Ok((
+        kid,
+        state.revision.to_string(),
+        state
+            .material
+            .map(|material| material.public.certificate_chain_pem),
+    ))
 }
 
-fn database_certificate_paths(
-    settings: &Settings,
+fn database_certificate_profile(
     binding: &nazo_identity::TenantDirectoryBinding,
     config: &ConfigSource,
     options: &GenerateLocalKeyOptions,
-) -> anyhow::Result<Option<Openid4vcCertificatePaths>> {
-    let Some(chain) = settings.openid4vc.signing_certificate_chain_file.clone() else {
+) -> anyhow::Result<Option<Openid4vcCertificateProfile>> {
+    let both = [
+        SigningPurpose::Credential,
+        SigningPurpose::PresentationRequest,
+    ]
+    .into_iter()
+    .collect();
+    if options.purposes != both {
         return Ok(None);
-    };
-    let anchors = settings
-        .openid4vc
-        .trust_anchors_file
-        .clone()
-        .context("tenant-local certificate generation requires OpenID4VC trust storage")?;
+    }
+    if options.alg != jsonwebtoken::Algorithm::ES256 {
+        bail!("OpenID4VC certificates require ES256");
+    }
     let issuer = Url::parse(&binding.issuer)?;
     let Host::Domain(hostname) = issuer
         .host()
@@ -972,72 +612,409 @@ fn database_certificate_paths(
     else {
         bail!("tenant issuer must include a DNS hostname");
     };
-    Ok(Some(Openid4vcCertificatePaths {
-        chain,
-        anchors,
-        revocation_snapshot: settings.openid4vc.revocation_snapshot_file.clone(),
+    Ok(Some(Openid4vcCertificateProfile {
         hostname: hostname.to_owned(),
-        mdoc_profile: options
-            .purposes
-            .contains(&SigningPurpose::Credential)
-            .then(|| mdoc_certificate_profile(config, &issuer))
-            .transpose()?
-            .flatten(),
+        mdoc_profile: mdoc_certificate_profile(config, &issuer)?,
     }))
 }
 
 async fn generate_local_with_database_manager(
-    manager: &nazo_key_management::KeyManager,
-    certificate_paths: Option<&Openid4vcCertificatePaths>,
+    manager: &KeyManager,
+    profile: Option<&Openid4vcCertificateProfile>,
     options: GenerateLocalKeyOptions,
 ) -> anyhow::Result<String> {
-    let openid4vc_purposes = [
-        SigningPurpose::Credential,
-        SigningPurpose::PresentationRequest,
-    ]
-    .into_iter()
-    .collect();
-    if certificate_paths.is_some() && options.purposes != openid4vc_purposes {
-        bail!(
-            "OpenID4VC certificate generation requires one ES256 key scoped to both credential and presentation_request"
-        );
+    let Some(profile) = profile else {
+        return manager
+            .database_register_local(nazo_key_management::LocalKeyRegistration {
+                algorithm: options.alg,
+                purposes: options.purposes,
+            })
+            .await;
+    };
+    let state = manager.database_openid4vc_state().await?;
+    if let Some(material) = state.material {
+        validate_managed_profile(&material, profile)?;
+        return Ok(material.public.signing_kid);
     }
-    let kid = manager
-        .database_register_local(nazo_key_management::LocalKeyRegistration {
-            algorithm: options.alg,
-            purposes: options.purposes,
-        })
-        .await?;
-    if let Some(certificate_paths) = certificate_paths {
-        ensure_openid4vc_certificates_from_database(manager, &kid, certificate_paths).await?;
+    if manager
+        .snapshot()
+        .signing_verification_key(SigningPurpose::Credential, jsonwebtoken::Algorithm::ES256)
+        .is_some()
+        || manager
+            .snapshot()
+            .signing_verification_key(
+                SigningPurpose::PresentationRequest,
+                jsonwebtoken::Algorithm::ES256,
+            )
+            .is_some()
+    {
+        bail!("existing OpenID4VC key requires explicit mdoc-import before use");
     }
-    Ok(kid)
+    let signing_key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256)?;
+    let material = build_managed_material(&signing_key, profile, None)?;
+    let kid = material.public.signing_kid.clone();
+    match manager
+        .database_commit_openid4vc(state.revision, material, Some(signing_key.serialize_pem()))
+        .await
+    {
+        Ok(()) => Ok(kid),
+        Err(error) => {
+            // Concurrent bootstrap may already have committed a complete generation.
+            let winner = manager.database_openid4vc_state().await?;
+            if winner.revision != state.revision
+                && let Some(material) = winner.material
+            {
+                validate_managed_profile(&material, profile)?;
+                manager.refresh().await?;
+                return Ok(material.public.signing_kid);
+            }
+            Err(error)
+        }
+    }
 }
 
-async fn ensure_openid4vc_certificates_from_database(
-    manager: &nazo_key_management::KeyManager,
-    kid: &str,
-    paths: &Openid4vcCertificatePaths,
-) -> anyhow::Result<()> {
-    let private_key_pem = manager.database_local_private_key_pem(kid)?;
-    let private_key = KeyPair::from_pem(&private_key_pem)
-        .context("failed to parse credential signing key as PKCS#8 PEM")?;
-    if existing_openid4vc_bundle_matches(paths, &private_key).await? {
-        if paths.mdoc_profile.is_none() {
-            ensure_openid4vc_revocation_snapshot(paths).await?;
-        }
-        return Ok(());
-    }
+fn build_managed_material(
+    signing_key: &KeyPair,
+    profile: &Openid4vcCertificateProfile,
+    previous: Option<Openid4vcMaterial>,
+) -> anyhow::Result<Openid4vcMaterial> {
     let bundle = build_openid4vc_certificate_bundle(
-        &private_key,
-        &paths.hostname,
-        paths.mdoc_profile.as_ref(),
+        signing_key,
+        &profile.hostname,
+        profile.mdoc_profile.as_ref(),
     )?;
-    activate_openid4vc_certificate_bundle(paths, &bundle).await?;
-    if let Some(material) = bundle.mdoc_material.as_ref() {
-        initialize_mdoc_revocation_snapshot(paths, material).await
+    let chain = String::from_utf8(bundle.contents)?;
+    let (mut anchors, mut iacas, mut revocation_snapshot) = match previous {
+        Some(previous) => (
+            previous.public.trust_anchors_pem,
+            previous.iaca_private_materials,
+            previous.public.revocation_snapshot,
+        ),
+        None => (String::new(), BTreeMap::new(), None),
+    };
+    // Historical roots and IACA keys are needed by credentials already issued.
+    let certificates =
+        CertificateDer::pem_slice_iter(chain.as_bytes()).collect::<Result<Vec<_>, _>>()?;
+    let ca_pem = pem_certificate(certificates[1].as_ref());
+    if !anchors.contains(&ca_pem) {
+        anchors.push_str(&ca_pem);
+    }
+    let now = chrono::Utc::now();
+    let snapshot = revocation_snapshot.get_or_insert_with(|| {
+        nazo_digital_credentials::CertificateRevocationSnapshot {
+            version: nazo_digital_credentials::CertificateRevocationSnapshot::VERSION,
+            this_update: now,
+            next_update: now + chrono::Duration::hours(24),
+            entries: Vec::new(),
+        }
+    });
+    snapshot.this_update = now;
+    snapshot.next_update = now + chrono::Duration::hours(24);
+    if let Some(material) = bundle.mdoc_material {
+        iacas.insert(sha256_hex(&material.ca_der), material.issuer_material_pem);
+        snapshot
+            .entries
+            .push(nazo_digital_credentials::CertificateRevocationEntry {
+                issuer: profile
+                    .mdoc_profile
+                    .as_ref()
+                    .expect("mdoc profile")
+                    .issuer_contact_uri
+                    .clone(),
+                certificate: nazo_digital_credentials::certificate_identity(&material.leaf_der),
+                status: nazo_digital_credentials::CertificateRevocationStatus::Good,
+                revoked_at: None,
+            });
+    }
+    Ok(Openid4vcMaterial {
+        public: Openid4vcPublicMaterial {
+            signing_kid: format!("es256-{}", uuid::Uuid::now_v7()),
+            certificate_chain_pem: chain,
+            trust_anchors_pem: anchors,
+            revocation_snapshot,
+        },
+        iaca_private_materials: iacas,
+    })
+}
+
+fn pem_certificate(der: &[u8]) -> String {
+    use base64::Engine as _;
+    let encoded = base64::engine::general_purpose::STANDARD.encode(der);
+    let mut pem = String::from("-----BEGIN CERTIFICATE-----\n");
+    for chunk in encoded.as_bytes().chunks(64) {
+        pem.push_str(std::str::from_utf8(chunk).expect("base64 is ASCII"));
+        pem.push('\n');
+    }
+    pem.push_str("-----END CERTIFICATE-----\n");
+    pem
+}
+
+fn validate_managed_profile(
+    material: &Openid4vcMaterial,
+    profile: &Openid4vcCertificateProfile,
+) -> anyhow::Result<()> {
+    let certificates =
+        CertificateDer::pem_slice_iter(material.public.certificate_chain_pem.as_bytes())
+            .collect::<Result<Vec<_>, _>>()?;
+    if certificates.len() != 2 {
+        bail!("managed OpenID4VC chain must contain DS and CA");
+    }
+    let (_, leaf) = x509_parser::parse_x509_certificate(certificates[0].as_ref())
+        .map_err(|e| anyhow::anyhow!("invalid signing certificate: {e}"))?;
+    let (_, ca) = x509_parser::parse_x509_certificate(certificates[1].as_ref())
+        .map_err(|e| anyhow::anyhow!("invalid CA certificate: {e}"))?;
+    let dns_matches = leaf.subject_alternative_name()?.is_some_and(|san| san.value.general_names.iter().any(|name| matches!(name, x509_parser::extensions::GeneralName::DNSName(dns) if *dns == profile.hostname)));
+    if !dns_matches
+        || leaf.is_ca()
+        || !ca.is_ca()
+        || leaf.issuer() != ca.subject()
+        || ca.subject() != ca.issuer()
+        || ca.verify_signature(Some(ca.public_key())).is_err()
+        || leaf.verify_signature(Some(ca.public_key())).is_err()
+        || !leaf.validity().is_valid()
+        || !ca.validity().is_valid()
+        || profile
+            .mdoc_profile
+            .as_ref()
+            .is_some_and(|p| !mdoc_certificate_profile_matches(&leaf, &ca, p))
+    {
+        bail!(
+            "managed certificate no longer matches tenant profile; explicit mdoc rotation is required"
+        );
+    }
+    Ok(())
+}
+
+/// One-time administrator import. Runtime startup never reads this directory.
+async fn import_mdoc_directory(
+    manager: &KeyManager,
+    profile: &Openid4vcCertificateProfile,
+    source: &Path,
+) -> anyhow::Result<String> {
+    let state = manager.database_openid4vc_state().await?;
+    if state.material.is_some() {
+        bail!("managed OpenID4VC material already exists; import cannot overwrite it");
+    }
+    let snapshot = manager.snapshot();
+    let key = snapshot
+        .signing_verification_key(SigningPurpose::Credential, jsonwebtoken::Algorithm::ES256)
+        .context("import requires the existing credential signing key in the database")?;
+    let chain = tokio::fs::read_to_string(source.join("certificate-bundle.pem"))
+        .await
+        .context("failed to read import certificate-bundle.pem")?;
+    let mut anchors = String::new();
+    let mut iacas = BTreeMap::new();
+    let revocation_snapshot = if let Some(mdoc_profile) = &profile.mdoc_profile {
+        let bytes = tokio::fs::read(source.join("revocation-snapshot.json"))
+            .await
+            .context("failed to read import revocation-snapshot.json")?;
+        let mut snapshot =
+            nazo_digital_credentials::CertificateRevocationSnapshot::from_json(&bytes)
+                .map_err(|e| anyhow::anyhow!("invalid imported revocation state: {e}"))?;
+        for entry in &mut snapshot.entries {
+            if entry.status == nazo_digital_credentials::CertificateRevocationStatus::Revoked
+                && entry.revoked_at.is_none()
+            {
+                entry.revoked_at = Some(snapshot.this_update);
+            }
+        }
+        let mut owned_certificates = BTreeSet::new();
+        let mut directory = tokio::fs::read_dir(source.join("iaca-keys"))
+            .await
+            .context("failed to read import iaca-keys directory")?;
+        while let Some(entry) = directory.next_entry().await? {
+            if entry
+                .path()
+                .extension()
+                .is_none_or(|extension| extension != "pem")
+            {
+                continue;
+            }
+            let pem = tokio::fs::read_to_string(entry.path()).await?;
+            let certificates =
+                CertificateDer::pem_slice_iter(pem.as_bytes()).collect::<Result<Vec<_>, _>>()?;
+            if certificates.len() != 2 {
+                bail!("imported IACA record must contain its DS and IACA certificates");
+            }
+            let (_, leaf) = x509_parser::parse_x509_certificate(certificates[0].as_ref())
+                .map_err(|e| anyhow::anyhow!("invalid imported DS: {e}"))?;
+            let (_, ca) = x509_parser::parse_x509_certificate(certificates[1].as_ref())
+                .map_err(|e| anyhow::anyhow!("invalid imported IACA: {e}"))?;
+            let private_key = KeyPair::from_pem(&pem)?;
+            if !ca.is_ca()
+                || ca.subject() != ca.issuer()
+                || leaf.issuer() != ca.subject()
+                || private_key.public_key_raw() != ca.public_key().subject_public_key.data.as_ref()
+                || ca.verify_signature(Some(ca.public_key())).is_err()
+                || leaf.verify_signature(Some(ca.public_key())).is_err()
+                || !is_mdoc_document_signing_certificate(&leaf)
+            {
+                bail!("imported IACA key and certificate chain do not match");
+            }
+            let id = sha256_hex(certificates[1].as_ref());
+            if entry.file_name().to_str() != Some(format!("{id}.pem").as_str()) {
+                bail!("imported IACA filename does not match its certificate fingerprint");
+            }
+            let issuer = &mdoc_profile.issuer_contact_uri;
+            let identity = nazo_digital_credentials::certificate_identity(certificates[0].as_ref());
+            if !snapshot
+                .entries
+                .iter()
+                .any(|entry| entry.issuer == *issuer && entry.certificate == identity)
+            {
+                bail!("imported revocation state is missing an IACA's DS status");
+            }
+            owned_certificates.insert((issuer.clone(), identity));
+            anchors.push_str(&pem_certificate(certificates[1].as_ref()));
+            iacas.insert(id, pem);
+        }
+        if iacas.is_empty() {
+            bail!("mdoc import requires IACA private material");
+        }
+        if snapshot.entries.iter().any(|entry| {
+            !owned_certificates.contains(&(entry.issuer.clone(), entry.certificate.clone()))
+        }) {
+            bail!("mdoc import accepts revocation facts only for its owned IACA records");
+        }
+        Some(snapshot)
     } else {
-        ensure_openid4vc_revocation_snapshot(paths).await
+        let now = chrono::Utc::now();
+        Some(nazo_digital_credentials::CertificateRevocationSnapshot {
+            version: nazo_digital_credentials::CertificateRevocationSnapshot::VERSION,
+            this_update: now,
+            next_update: now + chrono::Duration::hours(24),
+            entries: Vec::new(),
+        })
+    };
+    let certificates =
+        CertificateDer::pem_slice_iter(chain.as_bytes()).collect::<Result<Vec<_>, _>>()?;
+    if certificates.len() != 2 {
+        bail!("imported signing chain must contain DS and CA");
+    }
+    let active_ca = pem_certificate(certificates[1].as_ref());
+    if profile.mdoc_profile.is_some() && !iacas.contains_key(&sha256_hex(certificates[1].as_ref()))
+    {
+        bail!("import is missing the active IACA private material");
+    }
+    if let Some(iaca) = iacas.get(&sha256_hex(certificates[1].as_ref())) {
+        let owned_chain =
+            CertificateDer::pem_slice_iter(iaca.as_bytes()).collect::<Result<Vec<_>, _>>()?;
+        if owned_chain[0] != certificates[0] {
+            bail!("active signing certificate does not match its IACA record's DS certificate");
+        }
+    }
+    if !anchors.contains(&active_ca) {
+        anchors.push_str(&active_ca);
+    }
+    let material = Openid4vcMaterial {
+        public: Openid4vcPublicMaterial {
+            signing_kid: key.kid.clone(),
+            certificate_chain_pem: chain,
+            trust_anchors_pem: anchors,
+            revocation_snapshot,
+        },
+        iaca_private_materials: iacas,
+    };
+    validate_managed_profile(&material, profile)?;
+    manager
+        .database_commit_openid4vc(state.revision, material, None)
+        .await?;
+    manager.database_revision().await
+}
+
+async fn rotate_managed_material(
+    manager: &KeyManager,
+    profile: &Openid4vcCertificateProfile,
+) -> anyhow::Result<String> {
+    let state = manager.database_openid4vc_state().await?;
+    let previous = state
+        .material
+        .context("rotation requires initialized OpenID4VC material")?;
+    let key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256)?;
+    let material = build_managed_material(&key, profile, Some(previous))?;
+    manager
+        .database_commit_openid4vc(state.revision, material, Some(key.serialize_pem()))
+        .await?;
+    manager.database_revision().await
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) enum MdocManagementAction {
+    Import(PathBuf),
+    Rotate,
+    Revoke { issuer_id: String },
+}
+
+pub(crate) async fn operator_manage_mdoc(
+    config: &ConfigSource,
+    binding: &nazo_identity::TenantDirectoryBinding,
+    persistence: &dyn crate::operator_task::OperatorPersistence,
+    action: MdocManagementAction,
+) -> anyhow::Result<String> {
+    let settings = Settings::from_directory_binding(config, binding)?;
+    let manager = database_key_manager_for_tenant(
+        config,
+        settings.key_settings(),
+        binding.tenant.tenant_id,
+        persistence,
+    )
+    .await?;
+    let options = parse_generate_local(
+        "ES256",
+        &["credential".into(), "presentation_request".into()],
+    )?;
+    let profile =
+        database_certificate_profile(binding, config, &options)?.expect("OpenID4VC purposes");
+    match action {
+        MdocManagementAction::Import(source) => {
+            import_mdoc_directory(&manager, &profile, &source).await
+        }
+        MdocManagementAction::Rotate => rotate_managed_material(&manager, &profile).await,
+        MdocManagementAction::Revoke { issuer_id } => {
+            let state = manager.database_openid4vc_state().await?;
+            let mut material = state
+                .material
+                .context("revocation requires initialized mdoc material")?;
+            let pem = material
+                .iaca_private_materials
+                .get(&issuer_id)
+                .context("unknown IACA fingerprint")?;
+            let certificates =
+                CertificateDer::pem_slice_iter(pem.as_bytes()).collect::<Result<Vec<_>, _>>()?;
+            let identity = nazo_digital_credentials::certificate_identity(
+                certificates
+                    .first()
+                    .context("IACA record has no DS certificate")?
+                    .as_ref(),
+            );
+            let snapshot = material
+                .public
+                .revocation_snapshot
+                .as_mut()
+                .context("mdoc revocation state is missing")?;
+            let issuer = profile
+                .mdoc_profile
+                .as_ref()
+                .context("mdoc profile is not configured")?
+                .issuer_contact_uri
+                .as_str();
+            let entry = snapshot
+                .entries
+                .iter_mut()
+                .find(|entry| entry.issuer == issuer && entry.certificate == identity)
+                .context("DS revocation status is missing")?;
+            if entry.status == nazo_digital_credentials::CertificateRevocationStatus::Revoked {
+                return Ok(state.revision.to_string());
+            }
+            entry.status = nazo_digital_credentials::CertificateRevocationStatus::Revoked;
+            entry.revoked_at = Some(chrono::Utc::now());
+            snapshot.this_update = chrono::Utc::now();
+            snapshot.next_update = snapshot.this_update + chrono::Duration::hours(24);
+            manager
+                .database_commit_openid4vc(state.revision, material, None)
+                .await?;
+            manager.database_revision().await
+        }
     }
 }
 

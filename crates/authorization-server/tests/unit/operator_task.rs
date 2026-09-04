@@ -130,15 +130,14 @@ fn resume_ownership_table_pins_every_closed_variant() {
         // Read-only operations have no side effect to duplicate.
         (ControlOperationPayload::KeysList, true),
         (ControlOperationPayload::KeysValidate, true),
-        // Local key generation can persist a private key before publishing
-        // keyset.json, so a crash leaves an ambiguous side effect. External
-        // registration is idempotent for an identical registration.
+        // Local generation publishes one atomic database aggregate and reuses
+        // matching registrations. External registration is also idempotent.
         (
             ControlOperationPayload::KeysGenerateLocal {
                 alg: "ES256".to_owned(),
                 purposes: vec!["credential".to_owned()],
             },
-            false,
+            true,
         ),
         (
             ControlOperationPayload::KeysRegisterExternal {

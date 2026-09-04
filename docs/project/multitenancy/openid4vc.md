@@ -4,18 +4,11 @@
 
 状态：`IMPLEMENTED / LOCALLY VALIDATED`。
 
-OpenID4VC 的 SQL 已带 tenant predicate，但此前 crypto、trust、管理令牌与 revocation reloader 由进程全局配置构造。仅删除目录模式拒绝会造成秘密和后台任务跨租户共享，因此必须将真实资源纳入每租户 `TenantRuntime`。
+OpenID4VC 的 SQL 已带 tenant predicate。签发证书链、IACA 私钥、信任锚与本地撤销事实属于同一 tenant 的加密 signing-key generation；运行时只能从该 generation 获取它们。
 
 ## 最短实现
 
-没有新增 profile 表、Provider map 或任意文件 URL。目录 binding 只增加通用正整数 `runtime_revision`；每个租户使用确定性位置：
-
-```text
-DATA_DIR/tenants/{tenant_uuid}/openid4vc/
-  signing-certificate-chain.pem
-  trust-anchors.pem
-  revocation-snapshot.json   # 仅启用吊销检查时需要
-```
+没有新增 profile 表、Provider map 或任意文件 URL。证书和撤销 material 与私钥 keyset 一起通过现有加密 JSON/CAS 持久化；公开投影不含 IACA 私钥。
 
 部署级 `OPENID4VC_DATA_ENCRYPTION_KEY` 是 root，不直接供所有租户使用。每个 tenant 使用现有 HKDF 边界按 tenant UUID 和独立 purpose 派生：
 
@@ -23,17 +16,15 @@ DATA_DIR/tenants/{tenant_uuid}/openid4vc/
 - VCI management token；
 - VP management token。
 
-公共协议配置仍来自同一部署配置，但在构造时复制到各租户不可变服务图；秘密状态不共享。
+外部 wallet/client 的只读 scoped trust policy 仍独立保存；它不承载本地 IACA 私钥、签发证书或撤销事实。
 
 ## 生命周期
 
-- `load_revocation_policy` 只加载状态，不再产生无 owner 的任务。
-- 每个启用 revocation 的 `TenantRuntime` 启动自己的 reloader handle。
-- runtime 被替换或禁用时，先从新索引移除，再 abort 并 await 旧 worker。
-- binding 未变化时复用整个 runtime；`runtime_revision` 改变时重建目标租户完整服务图，不复用旧 keyset 或 lifecycle。
-- 新材料加载失败时 candidate 不发布，继续服务 last-good。
+- KeyManager refresh publishes a whole generation. Signing takes one lease, pinning its ES256 key, leaf/x5c and `kid` through the completed signature.
+- Verification reads the current public generation on each request. It derives revocation policy from that generation and fails closed when enabled facts are absent or stale; no revocation reload task or file I/O exists.
+- Historical IACA roots and local revocation records remain in managed material while credentials can still validate against them.
 
-运维更新材料的最短路径：原子替换目标租户确定性文件，然后提交签名 `tenant-directory-reload`。该操作只推进 tenant-local runtime revision 与全局目录 revision，不引入 material 类型、路径或 digest 的通用数据库模型。
+运维通过 `nazoauth mdoc-import`、`mdoc-rotate`、`mdoc-revoke` 对同一 tenant generation 提交 CAS 更新。运行中的 KeyManager lifecycle 读取并发布提交后的 generation。命令和迁移步骤见 [Managed OpenID4VC state](../../operations/mdoc-shared-state.md)。
 
 ## 明确不做
 
@@ -48,12 +39,12 @@ DATA_DIR/tenants/{tenant_uuid}/openid4vc/
 - 两个租户派生不同的数据密钥及 VCI/VP 管理令牌。
 - 同名 nonce、offer、state、kid 和 credential configuration 不跨租户互认。
 - trust anchor、attestation、VP result 与 revocation state 跨租户失败关闭。
-- 文件替换加 `reload` 无重启生效，其他 tenant runtime 不重建。
-- 损坏材料保留 last-good；disable 后 worker 停止且不再写入。
+- generation 更新无重启生效，签名中的 key、certificate 和 `kid` 不跨 generation 混用。
+- 损坏或过期的 managed material 不发布为健康 generation。
 - OpenID4VC discovery 与端点行为来自当前 tenant runtime。
 
 外部客户端按标准公开协议进行黑盒验证，不获得任何内部测试接口。
 
 ## 回滚
 
-恢复目标租户上一个确定性文件集合并再次推进 `runtime_revision`。如果旧二进制不理解当前 migration head，则不得只回滚二进制。
+升级前备份数据库、wrapping root 和原有 mdoc 文件。需要退回文件存储版本时，停止相关实例，按同一备份点恢复数据库、配置、文件和对应二进制；不得只回滚二进制，或在撤销后恢复旧快照而丢失撤销事实。

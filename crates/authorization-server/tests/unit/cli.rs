@@ -296,3 +296,74 @@ fn unknown_command_reports_usage() {
         format!("unknown command serve\n{USAGE}")
     );
 }
+
+#[test]
+fn mdoc_management_is_explicit_and_tenant_scoped() {
+    let tenant = uuid::Uuid::now_v7();
+    let tenant_arg = tenant.to_string();
+    assert_eq!(
+        parse(&[
+            "nazoauth",
+            "mdoc-import",
+            "--tenant",
+            &tenant_arg,
+            "--from",
+            "old-mdoc"
+        ])
+        .unwrap(),
+        Command::MdocManage {
+            tenant_id: tenant,
+            action: crate::keyctl::MdocManagementAction::Import(PathBuf::from("old-mdoc"))
+        }
+    );
+    assert_eq!(
+        parse(&["nazoauth", "mdoc-rotate", "--tenant", &tenant_arg]).unwrap(),
+        Command::MdocManage {
+            tenant_id: tenant,
+            action: crate::keyctl::MdocManagementAction::Rotate
+        }
+    );
+    assert_eq!(
+        parse(&[
+            "nazoauth",
+            "mdoc-revoke",
+            "--tenant",
+            &tenant_arg,
+            "--issuer-id",
+            "iaca-id"
+        ])
+        .unwrap(),
+        Command::MdocManage {
+            tenant_id: tenant,
+            action: crate::keyctl::MdocManagementAction::Revoke {
+                issuer_id: "iaca-id".into()
+            }
+        }
+    );
+    for args in [
+        vec!["nazoauth", "mdoc-import", "--from", "old-mdoc"],
+        vec!["nazoauth", "mdoc-import", "--tenant", &tenant_arg],
+        vec![
+            "nazoauth",
+            "mdoc-rotate",
+            "--tenant",
+            &tenant_arg,
+            "--tenant",
+            &tenant_arg,
+        ],
+        vec![
+            "nazoauth",
+            "mdoc-rotate",
+            "--tenant",
+            &tenant_arg,
+            "--from",
+            "old-mdoc",
+        ],
+        vec!["nazoauth", "mdoc-revoke", "--tenant", &tenant_arg],
+    ] {
+        assert!(
+            parse(&args).is_err(),
+            "accepted malformed management invocation: {args:?}"
+        );
+    }
+}

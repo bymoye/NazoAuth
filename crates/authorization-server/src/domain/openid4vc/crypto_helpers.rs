@@ -4,7 +4,6 @@ use coset::{CoseKeyBuilder, iana};
 use jsonwebtoken::{Algorithm, DecodingKey};
 use nazo_digital_credentials::CredentialTrustError;
 use nazo_openid4vci::ProofError;
-use p256::PublicKey;
 use rustls::pki_types::{CertificateDer, pem::PemObject as _};
 use serde_json::{Map, Value, json};
 
@@ -152,27 +151,6 @@ pub(super) fn algorithm_name(algorithm: Algorithm) -> Option<&'static str> {
         Algorithm::EdDSA => Some("EdDSA"),
         _ => None,
     }
-}
-
-pub(super) fn p256_public_key_from_jwk(jwk: &Value) -> anyhow::Result<PublicKey> {
-    let x = URL_SAFE_NO_PAD.decode(
-        jwk.get("x")
-            .and_then(Value::as_str)
-            .ok_or_else(|| anyhow::anyhow!("missing x"))?,
-    )?;
-    let y = URL_SAFE_NO_PAD.decode(
-        jwk.get("y")
-            .and_then(Value::as_str)
-            .ok_or_else(|| anyhow::anyhow!("missing y"))?,
-    )?;
-    if x.len() != 32 || y.len() != 32 {
-        anyhow::bail!("invalid P-256 coordinate length");
-    }
-    let mut point = [0_u8; 65];
-    point[0] = 4;
-    point[1..33].copy_from_slice(&x);
-    point[33..].copy_from_slice(&y);
-    PublicKey::from_sec1_bytes(&point).map_err(Into::into)
 }
 
 pub(super) fn parse_pem_certificates(pem: &[u8]) -> anyhow::Result<Vec<Vec<u8>>> {

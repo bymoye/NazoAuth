@@ -19,6 +19,7 @@ ed25519-dalek.workspace = true
 fs2.workspace = true
 jsonwebtoken = { workspace = true, features = ["aws_lc_rs"] }
 nazo-auth.workspace = true
+nazo-digital-credentials.workspace = true
 pem.workspace = true
 pkcs8.workspace = true
 p256 = { workspace = true, features = ["ecdsa", "pkcs8"] }

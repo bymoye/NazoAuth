@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     sync::{Arc, Mutex},
     time::Instant,
 };
@@ -9,7 +9,8 @@ use nazo_auth::{SignRequest, Signer, SigningPurpose};
 
 use super::{
     ExternalKeyRegistration, KeyGeneration, KeyHandle, KeyManager, KeyRecordStatus, KeySettings,
-    KeyState, LocalKeyRegistration, ManagedKey, StoredVerificationKey, TestSigningBehavior,
+    KeyState, LocalKeyRegistration, ManagedKey, Openid4vcMaterial, Openid4vcPublicMaterial,
+    StoredVerificationKey, TestSigningBehavior,
 };
 use crate::{
     PersistedSigningKeyset, SigningKeyRepository, SigningKeyRepositoryFuture,
@@ -286,6 +287,47 @@ async fn jwt_encoding_preserves_compact_wire_bytes() {
     );
 
     assert_eq!(token, expected);
+}
+
+#[tokio::test]
+async fn openid4vc_lease_pins_material_and_restricts_signing_purposes() {
+    let manager = KeyManager::for_test(jsonwebtoken::Algorithm::ES256);
+    let kid = manager.snapshot().active_kid.clone();
+    manager.set_openid4vc_material_for_test(Openid4vcMaterial {
+        public: Openid4vcPublicMaterial {
+            signing_kid: kid.clone(),
+            certificate_chain_pem: String::new(),
+            trust_anchors_pem: String::new(),
+            revocation_snapshot: None,
+        },
+        iaca_private_materials: BTreeMap::new(),
+    });
+
+    let lease = manager
+        .prepare_openid4vc_signing()
+        .expect("fixture material should expose the ES256 test key");
+    assert_eq!(lease.kid(), kid);
+    assert_eq!(lease.material().signing_kid, kid);
+
+    let signature = lease
+        .sign(SignRequest {
+            purpose: SigningPurpose::Credential,
+            algorithm: "ES256",
+            signing_input: b"openid4vc lease",
+        })
+        .await
+        .expect("credential purpose should use the pinned key");
+    assert!(!signature.as_bytes().is_empty());
+
+    let error = lease
+        .sign(SignRequest {
+            purpose: SigningPurpose::IdToken,
+            algorithm: "ES256",
+            signing_input: b"wrong purpose",
+        })
+        .await
+        .expect_err("the lease must not sign unrelated purposes");
+    assert_eq!(error, nazo_auth::SignError::KeyUnavailable);
 }
 
 #[test]

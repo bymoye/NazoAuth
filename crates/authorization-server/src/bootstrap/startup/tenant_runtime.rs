@@ -56,7 +56,6 @@ struct TenantRuntimeLifecycle {
     runtime_module_reconciler: Option<JoinHandle<()>>,
     key_lifecycle: Option<JoinHandle<()>>,
     ciba_ping_worker: Option<JoinHandle<()>>,
-    openid4vc_revocation_worker: Option<JoinHandle<()>>,
 }
 
 impl TenantRuntime {
@@ -142,38 +141,12 @@ impl TenantRuntime {
         #[cfg(test)]
         let ciba_ping_worker = None;
 
-        let openid4vc_revocation_worker = assembly
-            .openid4vc_revocation_policy()
-            .filter(|policy| policy.is_enabled())
-            .zip(
-                assembly
-                    .startup
-                    .settings
-                    .openid4vc
-                    .revocation_snapshot_file
-                    .as_ref(),
-            )
-            .map(|(policy, path)| {
-                background::spawn_revocation_snapshot_reloader(
-                    policy.clone(),
-                    path.clone(),
-                    Duration::from_secs(
-                        assembly
-                            .startup
-                            .settings
-                            .openid4vc
-                            .revocation_reload_interval_seconds,
-                    ),
-                )
-            });
-
         let runtime_module_reconciler =
             RuntimeModules::spawn_reconciler(assembly.startup.runtime_modules.clone());
         let key_lifecycle = background::spawn_key_lifecycle(assembly.startup.keyset.clone());
         lifecycle.runtime_module_reconciler = Some(runtime_module_reconciler);
         lifecycle.key_lifecycle = Some(key_lifecycle);
         lifecycle.ciba_ping_worker = ciba_ping_worker;
-        lifecycle.openid4vc_revocation_worker = openid4vc_revocation_worker;
         Ok(())
     }
 
@@ -184,12 +157,7 @@ impl TenantRuntime {
         if let Some(assembly) = self.assembly.as_ref() {
             assembly.startup.keyset.stop_lifecycle();
         }
-        let (
-            runtime_module_reconciler,
-            key_lifecycle,
-            ciba_ping_worker,
-            openid4vc_revocation_worker,
-        ) = {
+        let (runtime_module_reconciler, key_lifecycle, ciba_ping_worker) = {
             let mut lifecycle = self
                 .lifecycle
                 .lock()
@@ -198,7 +166,6 @@ impl TenantRuntime {
                 lifecycle.runtime_module_reconciler.take(),
                 lifecycle.key_lifecycle.take(),
                 lifecycle.ciba_ping_worker.take(),
-                lifecycle.openid4vc_revocation_worker.take(),
             )
         };
         if let Some(worker) = runtime_module_reconciler {
@@ -207,14 +174,6 @@ impl TenantRuntime {
                 && !error.is_cancelled()
             {
                 tracing::warn!(%error, "tenant runtime-module reconciler stopped unexpectedly");
-            }
-        }
-        if let Some(worker) = openid4vc_revocation_worker {
-            worker.abort();
-            if let Err(error) = worker.await
-                && !error.is_cancelled()
-            {
-                tracing::warn!(%error, "tenant OpenID4VC revocation worker stopped unexpectedly");
             }
         }
         if let Some(worker) = ciba_ping_worker {

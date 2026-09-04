@@ -139,3 +139,9 @@ For each production environment, preserve:
 - configured `VALKEY_COMMAND_TIMEOUT_MS`
 - incident runbooks and paging rules
 - results from the latest restore rehearsal and Valkey outage test
+
+## OpenID4VC authority state
+
+Managed mdoc certificates, IACA private material and revocation facts use the
+shared encrypted tenant keyset. See [migration and rotation](mdoc-shared-state.md)
+for the explicit import required by existing file-backed deployments.

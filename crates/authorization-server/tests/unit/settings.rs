@@ -273,7 +273,7 @@ fn tenants_with_the_same_avatar_base_are_isolated_by_uuid() {
 }
 
 #[test]
-fn directory_openid4vc_derives_tenant_secrets_and_deterministic_material_paths() {
+fn directory_openid4vc_derives_tenant_secrets() {
     let config = ConfigSource::from_pairs_for_test([
         ("DATA_DIR", "test-runtime/directory-openid4vc"),
         ("TRANSPORT_MODE", "trusted-proxy"),
@@ -335,22 +335,6 @@ fn directory_openid4vc_derives_tenant_secrets_and_deterministic_material_paths()
         first.openid4vc.verifier_management_token,
         second.openid4vc.verifier_management_token
     );
-    let first_material = first
-        .storage
-        .data_dir
-        .join("tenants/00000000-0000-0000-0000-000000000011/openid4vc");
-    assert_eq!(
-        first.openid4vc.signing_certificate_chain_file,
-        Some(first_material.join("certificate-bundle.pem"))
-    );
-    assert_eq!(
-        first.openid4vc.trust_anchors_file,
-        Some(first_material.join("certificate-bundle.pem"))
-    );
-    assert_eq!(
-        first.openid4vc.revocation_snapshot_file,
-        Some(first_material.join("revocation-snapshot.json"))
-    );
 }
 
 #[test]
@@ -361,19 +345,7 @@ fn key_attestation_policy_can_defer_trust_to_scoped_runtime_policy() {
             "OPENID4VC_DATA_ENCRYPTION_KEY",
             "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
         ),
-        (
-            "OPENID4VC_SIGNING_CERTIFICATE_CHAIN_FILE",
-            "runtime/openid4vc-chain.pem",
-        ),
-        (
-            "OPENID4VC_TRUST_ANCHORS_FILE",
-            "runtime/openid4vc-roots.pem",
-        ),
         ("OPENID4VC_REVOCATION_POLICY", "required"),
-        (
-            "OPENID4VC_REVOCATION_SNAPSHOT_FILE",
-            "runtime/openid4vc-revocation.json",
-        ),
         (
             "OPENID4VCI_CREDENTIAL_CONFIGURATIONS_JSON",
             ATTESTATION_CREDENTIAL_CONFIGURATIONS,
@@ -860,19 +832,7 @@ fn configured_module_dependencies_default_closed_and_accept_explicit_values() {
             "OPENID4VC_DATA_ENCRYPTION_KEY",
             "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
         ),
-        (
-            "OPENID4VC_SIGNING_CERTIFICATE_CHAIN_FILE",
-            "runtime/openid4vc-chain.pem",
-        ),
-        (
-            "OPENID4VC_TRUST_ANCHORS_FILE",
-            "runtime/openid4vc-roots.pem",
-        ),
         ("OPENID4VC_REVOCATION_POLICY", "required"),
-        (
-            "OPENID4VC_REVOCATION_SNAPSHOT_FILE",
-            "runtime/openid4vc-revocation.json",
-        ),
         (
             "OPENID4VP_WALLET_AUTHORIZATION_ORIGINS",
             "https://wallet.example",

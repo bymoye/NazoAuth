@@ -1,11 +1,168 @@
-use std::collections::BTreeSet;
+use std::{
+    collections::BTreeSet,
+    sync::{Arc, Mutex},
+};
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use nazo_auth::SigningPurpose;
+use nazo_digital_credentials::{
+    CertificateRevocationEntry, CertificateRevocationSnapshot, CertificateRevocationStatus,
+    certificate_identity,
+};
+use rcgen::{
+    BasicConstraints, CertificateParams, CertifiedIssuer, IsCa, KeyPair, KeyUsagePurpose,
+    PKCS_ECDSA_P256_SHA256,
+};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
+use crate::{KeyManager, Openid4vcPublicMaterial, SigningKeyRepositoryFuture};
+
 use super::*;
+
+#[derive(Default)]
+struct TestRepository(Mutex<Option<PersistedSigningKeyset>>);
+
+impl SigningKeyRepository for TestRepository {
+    fn load(&self) -> SigningKeyRepositoryFuture<'_, Option<PersistedSigningKeyset>> {
+        Box::pin(async move { Ok(self.0.lock().unwrap().clone()) })
+    }
+
+    fn create_if_absent(
+        &self,
+        candidate: PersistedSigningKeyset,
+    ) -> SigningKeyRepositoryFuture<'_, SigningKeysetCreateResult> {
+        Box::pin(async move {
+            let mut record = self.0.lock().unwrap();
+            Ok(match record.clone() {
+                Some(existing) => SigningKeysetCreateResult::Existing(existing),
+                None => {
+                    *record = Some(candidate.clone());
+                    SigningKeysetCreateResult::Created(candidate)
+                }
+            })
+        })
+    }
+
+    fn compare_and_swap(
+        &self,
+        expected_revision: i64,
+        candidate: PersistedSigningKeyset,
+    ) -> SigningKeyRepositoryFuture<'_, SigningKeysetCompareAndSwapResult> {
+        Box::pin(async move {
+            let mut record = self.0.lock().unwrap();
+            let current = record.clone().expect("keyset exists before CAS");
+            Ok(if current.revision == expected_revision {
+                *record = Some(candidate.clone());
+                SigningKeysetCompareAndSwapResult::Applied(candidate)
+            } else {
+                SigningKeysetCompareAndSwapResult::Conflict(current)
+            })
+        })
+    }
+}
+
+async fn database_fixture() -> (
+    KeyManager,
+    Arc<TestRepository>,
+    Uuid,
+    SigningKeyWrappingKeyRing,
+) {
+    let repository = Arc::new(TestRepository::default());
+    let tenant_id = Uuid::now_v7();
+    let wrapping_keys = SigningKeyWrappingKeyRing::new(
+        "openid4vc-test-root",
+        [0x52_u8; 32],
+        Some(("openid4vc-test-previous".to_owned(), [0x33_u8; 32])),
+    )
+    .unwrap();
+    let manager = KeyManager::load_or_create_database(
+        settings(Vec::new()),
+        tenant_id,
+        repository.clone(),
+        wrapping_keys.clone(),
+    )
+    .await
+    .unwrap();
+    (manager, repository, tenant_id, wrapping_keys)
+}
+
+struct Openid4vcFixture {
+    material: Openid4vcMaterial,
+    private_key_pem: String,
+}
+
+fn openid4vc_fixture(status: Option<CertificateRevocationStatus>, stale: bool) -> Openid4vcFixture {
+    let signing_key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).unwrap();
+    let ca_key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).unwrap();
+    let now = time::OffsetDateTime::now_utc();
+
+    let mut ca_params = CertificateParams::default();
+    ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    ca_params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+    ca_params.not_before = now - time::Duration::minutes(1);
+    ca_params.not_after = now + time::Duration::hours(1);
+    let ca = CertifiedIssuer::self_signed(ca_params, ca_key).unwrap();
+
+    let mut leaf_params = CertificateParams::new(vec!["issuer.test".to_owned()]).unwrap();
+    leaf_params.is_ca = IsCa::NoCa;
+    leaf_params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
+    leaf_params.not_before = now - time::Duration::minutes(1);
+    leaf_params.not_after = now + time::Duration::hours(1);
+    let leaf = leaf_params.signed_by(&signing_key, &ca).unwrap();
+
+    let leaf_der = leaf.der().to_vec();
+    let snapshot = status.map(|status| CertificateRevocationSnapshot {
+        version: CertificateRevocationSnapshot::VERSION,
+        this_update: chrono::Utc::now() - chrono::Duration::hours(1),
+        next_update: chrono::Utc::now() + chrono::Duration::hours(1),
+        entries: vec![CertificateRevocationEntry {
+            issuer: "https://issuer.test".to_owned(),
+            certificate: certificate_identity(&leaf_der),
+            status,
+            revoked_at: (status == CertificateRevocationStatus::Revoked)
+                .then_some(chrono::Utc::now()),
+        }],
+    });
+    let snapshot = if stale {
+        Some(CertificateRevocationSnapshot {
+            version: CertificateRevocationSnapshot::VERSION,
+            this_update: chrono::Utc::now() - chrono::Duration::hours(2),
+            next_update: chrono::Utc::now() - chrono::Duration::minutes(1),
+            entries: Vec::new(),
+        })
+    } else {
+        snapshot
+    };
+    let ca_pem = ca.pem();
+    let leaf_pem = leaf.pem();
+    let ca_id = hex_sha256(ca.der());
+    Openid4vcFixture {
+        material: Openid4vcMaterial {
+            public: Openid4vcPublicMaterial {
+                signing_kid: format!("openid4vc-{}", Uuid::now_v7()),
+                certificate_chain_pem: format!("{leaf_pem}{ca_pem}"),
+                trust_anchors_pem: ca_pem.clone(),
+                revocation_snapshot: snapshot,
+            },
+            iaca_private_materials: [(
+                ca_id,
+                format!("{}{}{}", ca.key().serialize_pem(), leaf_pem, ca_pem),
+            )]
+            .into_iter()
+            .collect(),
+        },
+        private_key_pem: signing_key.serialize_pem(),
+    }
+}
+
+fn hex_sha256(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
 
 fn settings(external_command: Vec<String>) -> KeySettings {
     KeySettings {
@@ -409,4 +566,175 @@ fn local_private_key_export_requires_a_local_database_key() {
     with_external["keys"].as_array_mut().unwrap().push(external);
     let loaded = load_payload(&settings(Vec::new()), &with_external).unwrap();
     assert!(local_private_key_pem(&loaded, "external").is_err());
+}
+
+#[tokio::test]
+async fn openid4vc_wrong_leaf_is_rejected_before_cas() {
+    let (manager, repository, tenant_id, wrapping_keys) = database_fixture().await;
+    let expected = manager.database_openid4vc_state().await.unwrap();
+    let fixture = openid4vc_fixture(None, false);
+    let other = openid4vc_fixture(None, false);
+    let mut material = fixture.material.clone();
+    material.public.certificate_chain_pem = other.material.public.certificate_chain_pem;
+
+    let error = manager
+        .database_commit_openid4vc(expected.revision, material, Some(fixture.private_key_pem))
+        .await
+        .expect_err("certificate/key mismatch must fail before CAS");
+    assert!(error.to_string().contains("does not match its managed key"));
+    let record = repository.load().await.unwrap().unwrap();
+    assert_eq!(record.revision, expected.revision);
+    assert!(
+        manager
+            .database_openid4vc_state()
+            .await
+            .unwrap()
+            .material
+            .is_none()
+    );
+    assert!(decrypt_payload(tenant_id, &wrapping_keys, &record).is_ok());
+}
+
+#[tokio::test]
+async fn openid4vc_revision_conflict_does_not_publish_material() {
+    let (manager, repository, _tenant_id, _wrapping_keys) = database_fixture().await;
+    let expected = manager.database_openid4vc_state().await.unwrap();
+    let fixture = openid4vc_fixture(None, false);
+    let error = manager
+        .database_commit_openid4vc(
+            expected.revision - 1,
+            fixture.material,
+            Some(fixture.private_key_pem),
+        )
+        .await
+        .expect_err("a stale expected revision must conflict");
+    assert!(error.to_string().contains("revision conflict"));
+    let record = repository.load().await.unwrap().unwrap();
+    assert_eq!(record.revision, expected.revision);
+    assert!(
+        manager
+            .database_openid4vc_state()
+            .await
+            .unwrap()
+            .material
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn openid4vc_public_projection_redacts_iaca_and_reload_rebases_observation() {
+    let (manager, repository, tenant_id, wrapping_keys) = database_fixture().await;
+    let expected = manager.database_openid4vc_state().await.unwrap();
+    let fixture = openid4vc_fixture(None, true);
+    let private_material = fixture
+        .material
+        .iaca_private_materials
+        .values()
+        .next()
+        .unwrap()
+        .clone();
+    manager
+        .database_commit_openid4vc(
+            expected.revision,
+            fixture.material.clone(),
+            Some(fixture.private_key_pem),
+        )
+        .await
+        .unwrap();
+
+    let record = repository.load().await.unwrap().unwrap();
+    assert_eq!(record.wrapping_key_id, wrapping_keys.current_id());
+    let public_json = serde_json::to_string(&record.public_metadata).unwrap();
+    assert!(!public_json.contains("PRIVATE KEY"));
+    assert!(!format!("{:?}", fixture.material).contains("PRIVATE KEY"));
+    assert!(
+        record.public_metadata["openid4vc"]
+            .get("iaca_private_materials")
+            .is_none()
+    );
+    let encrypted_payload = decrypt_payload(tenant_id, &wrapping_keys, &record).unwrap();
+    assert!(decrypt_payload(Uuid::now_v7(), &wrapping_keys, &record).is_err());
+    assert_eq!(
+        encrypted_payload["openid4vc"]["iaca_private_materials"]
+            .as_object()
+            .unwrap()
+            .values()
+            .next()
+            .and_then(Value::as_str),
+        Some(private_material.as_str())
+    );
+
+    let state = manager.database_openid4vc_state().await.unwrap();
+    let persisted_next_update = state
+        .material
+        .as_ref()
+        .unwrap()
+        .public
+        .revocation_snapshot
+        .as_ref()
+        .unwrap()
+        .next_update;
+    assert!(persisted_next_update < chrono::Utc::now());
+    let loaded_snapshot = manager
+        .openid4vc_public_material()
+        .unwrap()
+        .revocation_snapshot
+        .clone()
+        .unwrap();
+    assert!(loaded_snapshot.this_update <= chrono::Utc::now());
+    assert!(loaded_snapshot.next_update > chrono::Utc::now());
+    assert_eq!(
+        loaded_snapshot.next_update - loaded_snapshot.this_update,
+        chrono::Duration::seconds(crate::lifecycle::OPENID4VC_REVOCATION_MAX_STALE_SECONDS)
+    );
+
+    let reloaded = KeyManager::load_or_create_database(
+        settings(Vec::new()),
+        tenant_id,
+        repository.clone(),
+        wrapping_keys,
+    )
+    .await
+    .unwrap();
+    let reloaded_snapshot = reloaded
+        .openid4vc_public_material()
+        .unwrap()
+        .revocation_snapshot
+        .clone()
+        .unwrap();
+    assert!(reloaded_snapshot.next_update > chrono::Utc::now());
+    assert_eq!(
+        reloaded_snapshot.next_update - reloaded_snapshot.this_update,
+        chrono::Duration::seconds(crate::lifecycle::OPENID4VC_REVOCATION_MAX_STALE_SECONDS)
+    );
+}
+
+#[tokio::test]
+async fn openid4vc_revoked_active_leaf_cannot_prepare_signing() {
+    let (manager, _repository, _tenant_id, _wrapping_keys) = database_fixture().await;
+    let expected = manager.database_openid4vc_state().await.unwrap();
+    let fixture = openid4vc_fixture(Some(CertificateRevocationStatus::Good), false);
+    manager
+        .database_commit_openid4vc(
+            expected.revision,
+            fixture.material.clone(),
+            Some(fixture.private_key_pem),
+        )
+        .await
+        .unwrap();
+    let expected = manager.database_openid4vc_state().await.unwrap();
+    let mut revoked = fixture.material;
+    revoked.public.revocation_snapshot.as_mut().unwrap().entries[0].status =
+        CertificateRevocationStatus::Revoked;
+    revoked.public.revocation_snapshot.as_mut().unwrap().entries[0].revoked_at =
+        Some(chrono::Utc::now());
+    manager
+        .database_commit_openid4vc(expected.revision, revoked, None)
+        .await
+        .unwrap();
+    let error = manager
+        .prepare_openid4vc_signing()
+        .err()
+        .expect("revoked active DS must not sign");
+    assert!(error.to_string().contains("revoked"));
 }

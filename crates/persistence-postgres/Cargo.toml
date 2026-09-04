@@ -41,6 +41,8 @@ uuid = { workspace = true, features = ["v7", "serde"] }
 
 [dev-dependencies]
 ed25519-dalek.workspace = true
+jsonwebtoken.workspace = true
+rcgen.workspace = true
 syn = { version = "3.0.0", features = ["full", "visit"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync"] }
 

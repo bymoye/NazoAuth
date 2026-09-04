@@ -23,8 +23,8 @@ use super::{
     },
     crypto_helpers::{
         algorithm_name, cbor_to_json, decoding_key, decoding_key_trust, json_to_cbor,
-        jwk_to_cose_key, jwk_to_ec2_cose_key, p256_public_key_from_jwk, parse_pem_certificates,
-        parse_x509, timestamp_claim, verify_openid4vc_chain,
+        jwk_to_cose_key, jwk_to_ec2_cose_key, parse_pem_certificates, parse_x509, timestamp_claim,
+        verify_openid4vc_chain,
     },
     proof_validator::KeyAttestationContext,
 };
@@ -659,25 +659,7 @@ fn crypto_helpers_round_trip_json_cbor_values_and_reject_invalid_shapes() {
 }
 
 #[test]
-fn crypto_helpers_validate_p256_and_pem_certificate_inputs() {
-    let (jwk, _) = es256_test_key(43);
-    assert!(p256_public_key_from_jwk(&jwk).is_ok());
-    assert!(p256_public_key_from_jwk(&json!({"x": "bad", "y": "bad"})).is_err());
-    assert!(
-        p256_public_key_from_jwk(&json!({
-            "x": URL_SAFE_NO_PAD.encode([1_u8; 31]),
-            "y": URL_SAFE_NO_PAD.encode([2_u8; 32]),
-        }))
-        .is_err()
-    );
-    assert!(
-        p256_public_key_from_jwk(&json!({
-            "x": URL_SAFE_NO_PAD.encode([1_u8; 32]),
-            "y": URL_SAFE_NO_PAD.encode([2_u8; 32]),
-        }))
-        .is_err()
-    );
-
+fn crypto_helpers_validate_pem_certificate_inputs() {
     let key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).expect("generate certificate key");
     let certificate = CertificateParams::new(vec!["issuer.example".to_owned()])
         .expect("certificate params")

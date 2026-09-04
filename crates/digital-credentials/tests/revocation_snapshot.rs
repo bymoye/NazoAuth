@@ -33,6 +33,7 @@ fn snapshot(
             issuer: ISSUER.to_owned(),
             certificate: certificate_identity(certificate),
             status,
+            revoked_at: None,
         }],
     }
 }
@@ -340,6 +341,7 @@ fn global_certificate_status_requires_consistent_entries() {
         issuer: "x509:other-authority.example".to_owned(),
         certificate: identity.clone(),
         status: CertificateRevocationStatus::Good,
+        revoked_at: None,
     });
     CertificateRevocationPolicy::required(Arc::new(all_good))
         .check_chain(None, std::slice::from_ref(&certificate), Utc::now())
@@ -350,6 +352,7 @@ fn global_certificate_status_requires_consistent_entries() {
         issuer: "x509:other-authority.example".to_owned(),
         certificate: identity,
         status: CertificateRevocationStatus::Revoked,
+        revoked_at: None,
     });
     assert_eq!(
         CertificateRevocationPolicy::required(Arc::new(conflicting)).check_chain(
