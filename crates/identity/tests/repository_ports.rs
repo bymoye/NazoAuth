@@ -131,12 +131,17 @@ fn avatar_storage_errors_are_descriptive_without_exposing_unrelated_state() {
 fn avatar_direct_upload_contract_keeps_storage_details_opaque() {
     let target = AvatarUploadTarget {
         url: "https://storage.example.test/upload".to_owned(),
-        method: "POST".to_owned(),
-        fields: std::collections::BTreeMap::from([("key".to_owned(), "staging-id".to_owned())]),
-        headers: std::collections::BTreeMap::new(),
+        method: "PUT".to_owned(),
+        headers: std::collections::BTreeMap::from([(
+            "upload-token".to_owned(),
+            "opaque".to_owned(),
+        )]),
     };
-    assert_eq!(target.method, "POST");
-    assert_eq!(target.fields.get("key"), Some(&"staging-id".to_owned()));
+    assert_eq!(target.method, "PUT");
+    assert_eq!(
+        target.headers.get("upload-token"),
+        Some(&"opaque".to_owned())
+    );
 }
 
 #[test]

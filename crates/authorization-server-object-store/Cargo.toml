@@ -8,19 +8,21 @@ publish = false
 
 [dependencies]
 anyhow.workspace = true
+aws-credential-types = "1.2.12"
+aws-sigv4 = { version = "1.4.5", default-features = false, features = ["http1", "sign-http"] }
 chrono.workspace = true
 futures-util.workspace = true
+http = "1.4.0"
 nazo-identity.workspace = true
 nazo-oauth-server.workspace = true
+reqwest = { version = "0.12.28", default-features = false, features = ["rustls-tls"] }
 rust-s3 = { version = "0.37.2", default-features = false, features = ["tokio-rustls-tls"] }
 sha2.workspace = true
 
 [dev-dependencies]
 base64.workspace = true
-serde_json.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 uuid = { workspace = true, features = ["v7"] }
-reqwest = { version = "0.12.28", default-features = false, features = ["multipart", "rustls-tls"] }
 
 [lints]
 workspace = true

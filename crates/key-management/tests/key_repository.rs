@@ -1,7 +1,7 @@
 use std::sync::{Arc, Mutex};
 
 use nazo_key_management::{
-    KeyManager, KeySettings, PersistedSigningKeyset, SigningKeyRepository,
+    KeyManager, KeySettings, PersistedSigningKeyset, SealedKeyMaterial, SigningKeyRepository,
     SigningKeyRepositoryFuture, SigningKeyWrappingKeyRing, SigningKeysetCompareAndSwapResult,
     SigningKeysetCreateResult,
 };
@@ -82,6 +82,54 @@ impl SigningKeyRepository for MemoryRepository {
             })
         })
     }
+}
+
+fn decrypted_payload(
+    repository: &MemoryRepository,
+    tenant: Uuid,
+    ring: &SigningKeyWrappingKeyRing,
+) -> serde_json::Value {
+    let record = repository.0.lock().unwrap().clone().unwrap();
+    let sealed = SealedKeyMaterial::from_persisted_bytes(
+        record.wrapping_key_id,
+        &record.encrypted_private_material,
+    )
+    .unwrap();
+    serde_json::from_slice(
+        &ring
+            .open_generation(tenant, record.revision, &record.public_metadata, &sealed)
+            .unwrap(),
+    )
+    .unwrap()
+}
+
+fn replace_payload(
+    repository: &MemoryRepository,
+    tenant: Uuid,
+    ring: &SigningKeyWrappingKeyRing,
+    payload: serde_json::Value,
+) {
+    let mut record = repository.0.lock().unwrap().clone().unwrap();
+    let mut public_metadata = payload.clone();
+    public_metadata
+        .as_object_mut()
+        .unwrap()
+        .remove("request_object_private_pem");
+    for key in public_metadata["keys"].as_array_mut().unwrap() {
+        key.as_object_mut().unwrap().remove("private_pkcs8_der");
+    }
+    let sealed = ring
+        .seal_generation(
+            tenant,
+            record.revision,
+            &public_metadata,
+            &serde_json::to_vec(&payload).unwrap(),
+        )
+        .unwrap();
+    record.public_metadata = public_metadata;
+    record.encrypted_private_material = sealed.into_persisted_bytes();
+    record.wrapping_key_id = ring.current_id().to_owned();
+    *repository.0.lock().unwrap() = Some(record);
 }
 
 #[tokio::test]
@@ -199,16 +247,173 @@ async fn explicit_file_import_preserves_existing_kid_without_second_authority() 
     let legacy = KeyManager::load_or_create(settings.clone()).await.unwrap();
     let expected_kid = legacy.snapshot().active_kid.clone();
     let repository = Arc::new(MemoryRepository::default());
+    let tenant = Uuid::now_v7();
+    let ring = SigningKeyWrappingKeyRing::new("current", [5_u8; 32], None).unwrap();
     let imported = KeyManager::import_legacy_file_keyset(
-        settings,
-        Uuid::now_v7(),
+        settings.clone(),
+        tenant,
         repository.clone(),
-        SigningKeyWrappingKeyRing::new("current", [5_u8; 32], None).unwrap(),
+        ring.clone(),
     )
     .await
     .unwrap();
     assert_eq!(imported.snapshot().active_kid, expected_kid);
     assert_eq!(repository.load().await.unwrap().unwrap().revision, 1);
+
+    let retried = KeyManager::import_legacy_file_keyset(settings.clone(), tenant, repository, ring)
+        .await
+        .expect("the same imported keyset must be idempotent");
+    assert_eq!(retried.snapshot().active_kid, expected_kid);
+
+    let conflicting_repository = Arc::new(MemoryRepository::default());
+    KeyManager::load_or_create_database(
+        settings.clone(),
+        tenant,
+        conflicting_repository.clone(),
+        SigningKeyWrappingKeyRing::new("current", [5_u8; 32], None).unwrap(),
+    )
+    .await
+    .unwrap();
+    let error = match KeyManager::import_legacy_file_keyset(
+        settings,
+        tenant,
+        conflicting_repository,
+        SigningKeyWrappingKeyRing::new("current", [5_u8; 32], None).unwrap(),
+    )
+    .await
+    {
+        Ok(_) => {
+            panic!("a preinitialized database must not discard different imported key material")
+        }
+        Err(error) => error,
+    };
+    assert!(error.to_string().contains("different"));
+}
+
+#[tokio::test]
+async fn database_startup_maintains_an_overdue_keyset_before_it_is_ready() {
+    let settings = KeySettings {
+        keys_dir: std::env::temp_dir().join(format!("nazoauth-key-startup-{}", Uuid::now_v7())),
+        external_command: Vec::new(),
+        external_timeout: std::time::Duration::from_secs(1),
+        rotation_interval: chrono::Duration::days(90),
+        prepublish_window: chrono::Duration::days(1),
+        verification_grace: chrono::Duration::minutes(10),
+    };
+    let repository = Arc::new(MemoryRepository::default());
+    let tenant = Uuid::now_v7();
+    let ring = SigningKeyWrappingKeyRing::new("current", [10_u8; 32], None).unwrap();
+    let manager = KeyManager::load_or_create_database(
+        settings.clone(),
+        tenant,
+        repository.clone(),
+        ring.clone(),
+    )
+    .await
+    .unwrap();
+    let revision = repository.load().await.unwrap().unwrap().revision;
+    let mut payload = decrypted_payload(&repository, tenant, &ring);
+    let active_kid = manager.snapshot().active_kid.clone();
+    payload["keys"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|key| key["kid"] == active_kid)
+        .unwrap()["created_at"] = serde_json::json!(
+        (chrono::Utc::now() - chrono::Duration::days(91))
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+    );
+    replace_payload(&repository, tenant, &ring, payload);
+
+    let restarted = KeyManager::load_or_create_database(settings, tenant, repository.clone(), ring)
+        .await
+        .unwrap();
+    assert_eq!(
+        repository.load().await.unwrap().unwrap().revision,
+        revision + 1
+    );
+    let records = restarted.database_list_keys().await.unwrap();
+    let prepublished = records
+        .iter()
+        .find(|record| record.status == nazo_key_management::KeyRecordStatus::Prepublished)
+        .expect("startup must publish a rotation candidate before readiness");
+    assert!(
+        restarted
+            .snapshot()
+            .verification_key(&prepublished.kid)
+            .is_some()
+    );
+}
+
+#[tokio::test]
+async fn expired_database_key_remains_encrypted_but_is_not_advertised_or_verifiable() {
+    let settings = KeySettings {
+        keys_dir: std::env::temp_dir().join(format!("nazoauth-key-retired-{}", Uuid::now_v7())),
+        external_command: Vec::new(),
+        external_timeout: std::time::Duration::from_secs(1),
+        rotation_interval: chrono::Duration::seconds(-1),
+        prepublish_window: chrono::Duration::zero(),
+        verification_grace: chrono::Duration::minutes(10),
+    };
+    let repository = Arc::new(MemoryRepository::default());
+    let tenant = Uuid::now_v7();
+    let ring = SigningKeyWrappingKeyRing::new("current", [11_u8; 32], None).unwrap();
+    let manager = KeyManager::load_or_create_database(
+        settings.clone(),
+        tenant,
+        repository.clone(),
+        ring.clone(),
+    )
+    .await
+    .unwrap();
+    let retired_kid = manager.snapshot().active_kid.clone();
+    manager.refresh().await.unwrap();
+    let mut payload = decrypted_payload(&repository, tenant, &ring);
+    payload["keys"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|key| key["kid"] == retired_kid)
+        .unwrap()["retire_at"] = serde_json::json!(
+        (chrono::Utc::now() - chrono::Duration::seconds(1))
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+    );
+    replace_payload(&repository, tenant, &ring, payload);
+
+    let restarted = KeyManager::load_or_create_database(settings, tenant, repository.clone(), ring)
+        .await
+        .unwrap();
+    assert!(
+        repository.load().await.unwrap().unwrap().public_metadata["keys"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|key| key["kid"] == retired_kid)
+    );
+    assert!(
+        restarted
+            .snapshot()
+            .verification_key(&retired_kid)
+            .is_none()
+    );
+    assert!(
+        restarted.snapshot().jwks()["keys"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|key| key["kid"] != retired_kid)
+    );
+    assert_eq!(
+        restarted
+            .database_list_keys()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|record| record.kid == retired_kid)
+            .unwrap()
+            .status,
+        nazo_key_management::KeyRecordStatus::Retired
+    );
 }
 
 #[tokio::test]

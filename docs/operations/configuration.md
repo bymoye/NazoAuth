@@ -167,12 +167,12 @@ every existing `kid` and leaves the source directory untouched for rollback.
 
 Every server instance for a deployment must receive the same
 `SIGNING_KEY_ENCRYPTION_KEY_ID` and `SIGNING_KEY_ENCRYPTION_KEY`. The key is
-exactly 32 unpadded base64url bytes. Do not generate it per instance or replace
+32 bytes encoded as unpadded base64url. Do not generate it per instance or replace
 it before the database generation is rewrapped. During a wrapping-key change,
 deploy the current and previous pair to every instance, let an operator publish
 a new generation, verify all instances can load it, then remove the previous
 pair. Back up the encrypted PostgreSQL row and the wrapping root together;
-losing both makes token-signing and Request Object decryption unrecoverable.
+the database ciphertext cannot recover private keys without its wrapping root.
 
 For a file-backed deployment upgrade, stop old writers and run the one-shot
 offline import before starting the database-backed server:
@@ -184,7 +184,9 @@ nazoauth keys-import --tenant <tenant-uuid> --from <legacy-jwk-keys-directory>
 The target tenant must already be active in the directory and the process must
 have the deployment wrapping-key configuration. The command does not delete,
 rewrite, or keep reading the source directory. Keep it and a PostgreSQL backup
-until rollback is no longer required.
+until rollback is no longer required. Repeating the import is accepted only
+when the database contains the same imported key identities and private
+material; an unrelated keyset already created by server startup is an error.
 
 ## Composable capability defaults
 

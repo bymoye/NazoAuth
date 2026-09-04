@@ -18,7 +18,7 @@ use actix_web::error::PayloadError;
 use actix_web::{
     cookie::Cookie,
     http::{header, header::HeaderMap},
-    web::{Bytes, Data},
+    web::{Bytes, Data, Json},
 };
 use chrono::Utc;
 use diesel::prelude::*;
@@ -34,8 +34,15 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use crate::config::ConfigSource;
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use nazo_postgres::create_pool;
 use nazo_postgres::get_conn;
+
+fn valid_png() -> Vec<u8> {
+    STANDARD
+        .decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==")
+        .expect("static PNG fixture should decode")
+}
 
 fn avatar_url_version(avatar_url: &str) -> Option<&str> {
     avatar_url
@@ -88,11 +95,13 @@ async fn upload_avatar(
 async fn begin_direct_avatar_upload(
     state: Data<TestInfrastructure>,
     req: HttpRequest,
+    content_length: usize,
 ) -> HttpResponse {
     super::begin_direct_avatar_upload(
         crate::test_support::profile_sessions(&state),
         crate::test_support::avatar_profiles(&state),
         req,
+        Json(super::AvatarUploadBeginRequest { content_length }),
     )
     .await
 }
@@ -167,7 +176,7 @@ fn request_with_session_and_csrf(state: &TestInfrastructure, sid: &str, csrf: &s
         .to_http_request()
 }
 
-fn multipart_payload(boundary: &str, field_name: &str, body: &'static [u8]) -> Multipart {
+fn multipart_payload(boundary: &str, field_name: &str, body: impl AsRef<[u8]>) -> Multipart {
     let mut headers = HeaderMap::new();
     headers.insert(
         header::CONTENT_TYPE,
@@ -184,7 +193,7 @@ fn multipart_payload(boundary: &str, field_name: &str, body: &'static [u8]) -> M
         .as_bytes(),
     );
     payload.extend_from_slice(b"Content-Type: application/octet-stream\r\n\r\n");
-    payload.extend_from_slice(body);
+    payload.extend_from_slice(body.as_ref());
     payload.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
     actix_multipart::Multipart::new(
         &headers,
@@ -777,7 +786,22 @@ async fn upload_avatar_rejects_session_request_without_csrf_before_file_or_profi
 async fn direct_avatar_authorization_rejects_session_request_without_csrf() {
     let state = Data::new(test_state());
     let req = request_with_session_but_no_csrf(&state);
-    assert_avatar_write_rejects_missing_csrf(begin_direct_avatar_upload(state, req).await).await;
+    assert_avatar_write_rejects_missing_csrf(begin_direct_avatar_upload(state, req, 1).await).await;
+}
+
+#[test]
+fn direct_avatar_begin_payload_requires_a_declared_length() {
+    assert!(
+        serde_json::from_value::<super::AvatarUploadBeginRequest>(serde_json::json!({})).is_err()
+    );
+    assert_eq!(
+        serde_json::from_value::<super::AvatarUploadBeginRequest>(serde_json::json!({
+            "content_length": 0
+        }))
+        .expect("zero is syntactically valid JSON")
+        .content_length,
+        0
+    );
 }
 
 #[actix_web::test]
@@ -1099,13 +1123,13 @@ async fn upload_avatar_persists_versioned_file_and_metadata() {
     let sid = format!("avatar-upload-success-{suffix}");
     let csrf = format!("csrf-{suffix}");
     fixture.store_session(&user, &sid).await;
-    let png = b"\x89PNG\r\n\x1a\navatar-bytes";
+    let png = valid_png();
 
     let (status, body, has_set_cookie) = response_json(
         upload_avatar(
             fixture.state.clone(),
             fixture.request(&sid, &csrf),
-            multipart_payload("success-avatar-boundary", "avatar", png),
+            multipart_payload("success-avatar-boundary", "avatar", &png),
         )
         .await,
     )
@@ -1195,11 +1219,7 @@ async fn upload_avatar_fails_closed_when_storage_root_cannot_be_created() {
         upload_avatar(
             blocked_state,
             fixture.request(&sid, &csrf),
-            multipart_payload(
-                "blocked-avatar-boundary",
-                "avatar",
-                b"\x89PNG\r\n\x1a\navatar",
-            ),
+            multipart_payload("blocked-avatar-boundary", "avatar", valid_png()),
         )
         .await,
     )
@@ -1288,7 +1308,7 @@ async fn get_avatar_uses_detected_content_type_and_sets_security_headers() {
     )
     .await
     .unwrap();
-    let png = b"\x89PNG\r\n\x1a\navatar-bytes".to_vec();
+    let png = valid_png();
     tokio::fs::write(avatar_path(&fixture.state, user.id), &png)
         .await
         .unwrap();
@@ -1356,12 +1376,9 @@ async fn get_avatar_rejects_metadata_that_declares_a_different_supported_image_t
     )
     .await
     .unwrap();
-    tokio::fs::write(
-        avatar_path(&fixture.state, user.id),
-        b"\x89PNG\r\n\x1a\navatar-bytes",
-    )
-    .await
-    .unwrap();
+    tokio::fs::write(avatar_path(&fixture.state, user.id), valid_png())
+        .await
+        .unwrap();
 
     let (status, body, _) =
         response_json(get_avatar(fixture.state.clone(), fixture.request(&sid, &csrf)).await).await;
@@ -1384,8 +1401,8 @@ async fn get_avatar_serves_the_committed_version_while_a_file_replacement_is_in_
     fixture.store_session(&user, &sid).await;
     let user_dir = avatar_user_dir(&fixture.state, user.id);
     tokio::fs::create_dir_all(&user_dir).await.unwrap();
-    let old_avatar = b"\x89PNG\r\n\x1a\nold-avatar";
-    tokio::fs::write(avatar_path(&fixture.state, user.id), old_avatar)
+    let old_avatar = valid_png();
+    tokio::fs::write(avatar_path(&fixture.state, user.id), &old_avatar)
         .await
         .unwrap();
     tokio::fs::write(
@@ -1531,12 +1548,9 @@ async fn delete_avatar_removes_avatar_successfully_and_surfaces_file_removal_fai
     fixture.store_session(&success_user, &success_sid).await;
     let success_dir = avatar_user_dir(&fixture.state, success_user.id);
     tokio::fs::create_dir_all(&success_dir).await.unwrap();
-    tokio::fs::write(
-        avatar_path(&fixture.state, success_user.id),
-        b"\x89PNG\r\n\x1a\n",
-    )
-    .await
-    .unwrap();
+    tokio::fs::write(avatar_path(&fixture.state, success_user.id), valid_png())
+        .await
+        .unwrap();
     tokio::fs::write(
         avatar_meta_path(&fixture.state, success_user.id),
         r#"{"content_type":"image/png","version":"v1"}"#,

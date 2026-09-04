@@ -116,6 +116,8 @@ pub struct AvatarUploadStart {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DirectAvatarUploadError {
+    InvalidContentLength,
+    TooLarge,
     InvalidCurrentReference,
     Missing,
     Expired,
@@ -168,10 +170,19 @@ impl AvatarDirectUploadService {
         self.max_bytes
     }
 
+    /// Starts one direct upload authorization for the exact request-body
+    /// length supplied by the client.
     pub async fn begin_upload(
         &self,
         account: &PublicAccount,
+        content_length: usize,
     ) -> Result<AvatarUploadStart, DirectAvatarUploadError> {
+        if content_length == 0 {
+            return Err(DirectAvatarUploadError::InvalidContentLength);
+        }
+        if content_length > self.max_bytes {
+            return Err(DirectAvatarUploadError::TooLarge);
+        }
         if account
             .profile
             .avatar_url
@@ -200,7 +211,7 @@ impl AvatarDirectUploadService {
             .storage
             .authorize_upload(
                 &authorization.staging_object_id,
-                self.max_bytes,
+                content_length,
                 authorization.expires_at,
             )
             .await

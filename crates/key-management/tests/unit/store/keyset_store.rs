@@ -1465,6 +1465,7 @@ fn in_memory_manager(algorithm: jsonwebtoken::Algorithm) -> KeyManager {
         active_signing_key: ActiveSigningKey::LocalPkcs8Der(material.private_pkcs8_der.clone()),
         verification_keys: vec![StoredVerificationKey {
             public_jwk,
+            retire_at: None,
             managed: ManagedKey {
                 kid,
                 algorithm: signing_algorithm_name(algorithm).unwrap().to_owned(),

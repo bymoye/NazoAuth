@@ -426,6 +426,7 @@ pub(crate) async fn try_load_keyset(
         }
         verification_keys.push(StoredVerificationKey {
             public_jwk,
+            retire_at,
             managed: ManagedKey {
                 kid: kid.to_owned(),
                 algorithm: crate::serialization::signing_algorithm_name(alg)

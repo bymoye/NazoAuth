@@ -16,7 +16,10 @@ use std::{
 
 use chrono::{Duration as ChronoDuration, Utc};
 use diesel::migration::CREATE_MIGRATIONS_TABLE;
-use diesel::{sql_query, sql_types::Text};
+use diesel::{
+    sql_query,
+    sql_types::{Bool, Text},
+};
 use diesel_async::{
     AsyncConnection as _, AsyncPgConnection, RunQueryDsl as _, SimpleAsyncConnection as _,
 };
@@ -29,6 +32,14 @@ use nazo_operator_protocol::{
 const DEPLOYMENT: &str = "deployment-process";
 const CONFIG_REVISION: &str = "config-revision-process";
 const MIGRATION_RUNTIME_ROLE: &str = "nazoauth_operator_process_runtime";
+const SIGNING_KEY_ENCRYPTION_KEY_ID: &str = "operator-process-test";
+const SIGNING_KEY_ENCRYPTION_KEY: &str = "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA";
+
+#[derive(diesel::QueryableByName)]
+struct ExistsRow {
+    #[diesel(sql_type = Bool)]
+    exists: bool,
+}
 
 /// Mirror of the persistence-layer isolated-schema fixture: the public
 /// security-audit migration is pre-marked applied because its state table is
@@ -114,7 +125,9 @@ fn write_runtime_fixtures(root: &Path) {
     fs::create_dir_all(root.join("state")).unwrap();
     fs::write(
         root.join("server.yaml"),
-        format!("DATA_DIR: runtime\nDEPLOYMENT_ID: {DEPLOYMENT}\n"),
+        format!(
+            "DATA_DIR: runtime\nDEPLOYMENT_ID: {DEPLOYMENT}\nSIGNING_KEY_ENCRYPTION_KEY_ID: {SIGNING_KEY_ENCRYPTION_KEY_ID}\nSIGNING_KEY_ENCRYPTION_KEY: {SIGNING_KEY_ENCRYPTION_KEY}\n"
+        ),
     )
     .unwrap();
     fs::create_dir_all(root.join("runtime/instance")).unwrap();
@@ -124,7 +137,6 @@ fn write_runtime_fixtures(root: &Path) {
     )
     .unwrap();
     fs::write(root.join("config-revision"), format!("{CONFIG_REVISION}\n")).unwrap();
-    fs::create_dir_all(root.join("keys")).unwrap();
     // Operator-state deployment anchor: non-bootstrap tasks require it, and
     // persist_operator_state_identity would write the same value on first use.
     fs::write(root.join("state/deployment-id"), format!("{DEPLOYMENT}\n")).unwrap();
@@ -147,7 +159,6 @@ fn spawn_operator_task(root: &Path, compact: &str, options: SpawnOptions<'_>) ->
             root.join("config-revision"),
         )
         .env("NAZOAUTH_OPERATOR_STATE_DIRECTORY", root.join("state"))
-        .env("JWK_KEYS_DIR", root.join("keys"))
         .env("NAZOAUTH_MIGRATION_RUNTIME_ROLE", MIGRATION_RUNTIME_ROLE)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -616,7 +627,7 @@ async fn admission_refuses_every_forged_or_unservicable_operation_class() {
 }
 
 /// The keys family executes through the real key-management engine, proving
-/// the E05 dispatch end to end; the generated keyset makes a subsequent
+/// the E05 dispatch end to end; the database-backed keyset makes a subsequent
 /// keys-validate succeed on its own journaled operation.
 #[tokio::test]
 async fn keys_family_runs_through_the_real_engine_and_journals_the_outcome() {
@@ -641,6 +652,26 @@ async fn keys_family_runs_through_the_real_engine_and_journals_the_outcome() {
 
     let root = temporary_directory("keys");
     write_runtime_fixtures(&root);
+    let initialize = run_operator_task(
+        &root,
+        &sign_control_operation(
+            &operation(
+                "019c8ca2-30a6-7000-8000-00000000b00a",
+                &kid,
+                ControlOperationPayload::MigrateApply,
+            ),
+            &controller,
+        )
+        .unwrap(),
+        vec![("DATABASE_URL", database_url.clone())],
+    );
+    assert_success(&initialize);
+    assert_eq!(
+        decode_control_result(&initialize.stdout).unwrap().outcome,
+        ControlOutcome::Succeeded,
+        "stderr: {}",
+        String::from_utf8_lossy(&initialize.stderr)
+    );
     let generate_compact = sign_control_operation(
         &operation(
             "019c8ca2-30a6-7000-8000-00000000b00b",
@@ -661,8 +692,24 @@ async fn keys_family_runs_through_the_real_engine_and_journals_the_outcome() {
     );
     assert_success(&first);
     let result = decode_control_result(&first.stdout).unwrap();
-    assert_eq!(result.outcome, ControlOutcome::Succeeded);
-    assert!(root.join("keys/keyset.json").is_file());
+    assert_eq!(
+        result.outcome,
+        ControlOutcome::Succeeded,
+        "result: {result:?}; stderr: {}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    assert!(!root.join("keys").exists());
+    let mut connection = AsyncPgConnection::establish(&database_url)
+        .await
+        .expect("test database should connect for signing-key assertion");
+    let keyset = sql_query("SELECT EXISTS (SELECT 1 FROM tenant_signing_keysets) AS exists")
+        .get_result::<ExistsRow>(&mut connection)
+        .await
+        .expect("database signing keyset should be queryable");
+    assert!(
+        keyset.exists,
+        "key generation must persist its authority in PostgreSQL"
+    );
 
     // Replay returns the identical durable result and never regenerates.
     let replay = run_operator_task(

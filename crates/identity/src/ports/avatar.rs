@@ -49,12 +49,11 @@ impl std::fmt::Display for AvatarStorageError {
 
 /// A provider-neutral browser upload request. The caller forwards these opaque
 /// values verbatim; neither identity nor HTTP code understands object-store
-/// fields, headers, buckets, or signatures.
+/// headers, buckets, or signatures.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AvatarUploadTarget {
     pub url: String,
     pub method: String,
-    pub fields: BTreeMap<String, String>,
     pub headers: BTreeMap<String, String>,
 }
 
@@ -140,12 +139,14 @@ pub trait AvatarUploadStatePort: Send + Sync {
 }
 
 /// Object-store capability bound by the composition root to one tenant.
-/// Final object identifiers are application-generated opaque values.
+/// Final object identifiers are application-generated opaque values. The
+/// authorization target is bound to the caller's declared request-body length;
+/// completion still applies the service's maximum read bound.
 pub trait AvatarDirectUploadPort: Send + Sync {
     fn authorize_upload<'a>(
         &'a self,
         staging_object_id: &'a str,
-        max_bytes: usize,
+        content_length: usize,
         expires_at: DateTime<Utc>,
     ) -> AvatarStorageFuture<'a, AvatarUploadTarget>;
 

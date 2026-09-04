@@ -30,19 +30,18 @@ async fn provider_derives_disjoint_opaque_tenant_object_namespaces() {
         .authorize_upload("upload-a", 1024, expiry)
         .await
         .unwrap()
-        .fields
-        .remove("key")
-        .unwrap();
+        .url;
     let second_key = second_store
         .authorize_upload("upload-a", 1024, expiry)
         .await
         .unwrap()
-        .fields
-        .remove("key")
-        .unwrap();
+        .url;
+
+    let first_key = first_key.split('?').next().unwrap();
+    let second_key = second_key.split('?').next().unwrap();
 
     assert_ne!(first_key, second_key);
     assert!(!first_key.contains(&first.as_uuid().to_string()));
     assert!(!second_key.contains(&second.as_uuid().to_string()));
-    assert!(first_key.starts_with("avatars/"));
+    assert!(first_key.contains("/avatars/staging/"));
 }

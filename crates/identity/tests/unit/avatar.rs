@@ -72,20 +72,21 @@ fn final_object_identifier_binds_upload_and_exact_bytes() {
 struct DirectStorage {
     staged: AvatarStagedObject,
     published: Arc<Mutex<Vec<(String, String)>>>,
+    authorization_calls: Arc<AtomicUsize>,
 }
 
 impl AvatarDirectUploadPort for DirectStorage {
     fn authorize_upload<'a>(
         &'a self,
         _staging_object_id: &'a str,
-        _max_bytes: usize,
+        _content_length: usize,
         _expires_at: chrono::DateTime<chrono::Utc>,
     ) -> AvatarStorageFuture<'a, AvatarUploadTarget> {
+        self.authorization_calls.fetch_add(1, Ordering::Relaxed);
         Box::pin(async {
             Ok(AvatarUploadTarget {
                 url: "https://object-store.test/upload".to_owned(),
                 method: "POST".to_owned(),
-                fields: Default::default(),
                 headers: Default::default(),
             })
         })
@@ -266,6 +267,52 @@ fn direct_account() -> PublicAccount {
     }
 }
 
+fn direct_service_for_length_test(
+    authorization_calls: Arc<AtomicUsize>,
+) -> AvatarDirectUploadService {
+    let storage = Arc::new(DirectStorage {
+        staged: AvatarStagedObject {
+            bytes: b"unused until completion".to_vec(),
+            version: "etag-length".to_owned(),
+        },
+        published: Arc::new(Mutex::new(Vec::new())),
+        authorization_calls,
+    });
+    AvatarDirectUploadService::from_ports(
+        Arc::new(AvatarRepository(Arc::new(Mutex::new(direct_account())))),
+        Arc::new(NoGrants),
+        storage,
+        Arc::new(DirectState::default()),
+        1024,
+        300,
+        30,
+    )
+}
+
+#[tokio::test]
+async fn direct_upload_rejects_empty_declared_length_before_storage_authorization() {
+    let authorization_calls = Arc::new(AtomicUsize::new(0));
+    let service = direct_service_for_length_test(authorization_calls.clone());
+
+    assert_eq!(
+        service.begin_upload(&direct_account(), 0).await,
+        Err(DirectAvatarUploadError::InvalidContentLength)
+    );
+    assert_eq!(authorization_calls.load(Ordering::Relaxed), 0);
+}
+
+#[tokio::test]
+async fn direct_upload_rejects_oversized_declared_length_before_storage_authorization() {
+    let authorization_calls = Arc::new(AtomicUsize::new(0));
+    let service = direct_service_for_length_test(authorization_calls.clone());
+
+    assert_eq!(
+        service.begin_upload(&direct_account(), 1025).await,
+        Err(DirectAvatarUploadError::TooLarge)
+    );
+    assert_eq!(authorization_calls.load(Ordering::Relaxed), 0);
+}
+
 #[tokio::test]
 async fn direct_upload_fixes_validated_snapshot_before_database_cas() {
     let mut encoded = std::io::Cursor::new(Vec::new());
@@ -275,12 +322,14 @@ async fn direct_upload_fixes_validated_snapshot_before_database_cas() {
     let account = direct_account();
     let account_store = Arc::new(Mutex::new(account.clone()));
     let published = Arc::new(Mutex::new(Vec::new()));
+    let bytes = encoded.into_inner();
     let storage = Arc::new(DirectStorage {
         staged: AvatarStagedObject {
-            bytes: encoded.into_inner(),
+            bytes: bytes.clone(),
             version: "etag-1".to_owned(),
         },
         published: published.clone(),
+        authorization_calls: Arc::new(AtomicUsize::new(0)),
     });
     let state = Arc::new(DirectState::default());
     let service = AvatarDirectUploadService::from_ports(
@@ -293,7 +342,10 @@ async fn direct_upload_fixes_validated_snapshot_before_database_cas() {
         30,
     );
 
-    let start = service.begin_upload(&account).await.expect("authorization");
+    let start = service
+        .begin_upload(&account, bytes.len())
+        .await
+        .expect("authorization");
     let overview = service
         .complete_upload(&account, &start.upload_id)
         .await
@@ -328,6 +380,7 @@ async fn direct_upload_releases_pending_claim_after_invalid_staged_bytes() {
             version: "etag-1".to_owned(),
         },
         published: published.clone(),
+        authorization_calls: Arc::new(AtomicUsize::new(0)),
     });
     let state = Arc::new(DirectState::default());
     let service = AvatarDirectUploadService::from_ports(
@@ -339,7 +392,10 @@ async fn direct_upload_releases_pending_claim_after_invalid_staged_bytes() {
         300,
         30,
     );
-    let start = service.begin_upload(&account).await.expect("authorization");
+    let start = service
+        .begin_upload(&account, b"not an image".len())
+        .await
+        .expect("authorization");
 
     assert_eq!(
         service.complete_upload(&account, &start.upload_id).await,
@@ -364,6 +420,7 @@ async fn direct_upload_retry_from_another_service_returns_the_selected_candidate
             version: "etag-1".to_owned(),
         },
         published: Arc::new(Mutex::new(Vec::new())),
+        authorization_calls: Arc::new(AtomicUsize::new(0)),
     });
     let state = Arc::new(DirectState::default());
     let repository = Arc::new(AvatarRepository(account_store.clone()));
@@ -385,7 +442,10 @@ async fn direct_upload_retry_from_another_service_returns_the_selected_candidate
         300,
         30,
     );
-    let start = first.begin_upload(&account).await.expect("authorization");
+    let start = first
+        .begin_upload(&account, bytes.len())
+        .await
+        .expect("authorization");
     let accepted = second
         .complete_upload(&account, &start.upload_id)
         .await

@@ -11,6 +11,7 @@ use std::{
 use crate::local::SigningBackend;
 use arc_swap::ArcSwap;
 use base64::{Engine, encoded_len, engine::general_purpose::URL_SAFE_NO_PAD};
+use chrono::Utc;
 use nazo_auth::{SignError, SignRequest, Signature, Signer, SigningPurpose};
 use serde::Serialize;
 use serde_json::Value;
@@ -119,6 +120,7 @@ pub(crate) enum ActiveSigningKey {
 pub(crate) struct StoredVerificationKey {
     pub(crate) public_jwk: Value,
     pub(crate) managed: ManagedKey,
+    pub(crate) retire_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 #[derive(Clone)]
@@ -136,12 +138,19 @@ pub struct VerificationKey {
     pub kid: String,
     pub public_jwk: Value,
     pub(crate) signing_purposes: BTreeSet<SigningPurpose>,
+    pub(crate) retire_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 impl VerificationKey {
     #[must_use]
     pub fn can_sign(&self, purpose: SigningPurpose) -> bool {
         self.signing_purposes.contains(&purpose)
+    }
+
+    #[must_use]
+    pub fn can_verify(&self) -> bool {
+        self.retire_at
+            .is_none_or(|retire_at| retire_at > Utc::now())
     }
 }
 
@@ -158,7 +167,9 @@ pub struct KeySnapshot {
 impl KeySnapshot {
     #[must_use]
     pub fn verification_key(&self, kid: &str) -> Option<&VerificationKey> {
-        self.verification_keys.iter().find(|key| key.kid == kid)
+        self.verification_keys
+            .iter()
+            .find(|key| key.kid == kid && key.can_verify())
     }
 
     #[must_use]
@@ -177,7 +188,7 @@ impl KeySnapshot {
             .or_else(|| {
                 self.verification_keys
                     .iter()
-                    .filter(|key| key.kid != self.active_kid)
+                    .filter(|key| key.kid != self.active_kid && key.can_verify())
                     .find(matches)
             })
     }
@@ -504,6 +515,7 @@ impl KeyManager {
             active_signing_key,
             verification_keys: vec![StoredVerificationKey {
                 public_jwk,
+                retire_at: None,
                 managed: ManagedKey {
                     kid,
                     algorithm: crate::store::signing_algorithm_name(algorithm)
@@ -556,6 +568,7 @@ impl KeyManager {
                 .unwrap();
         loaded.verification_keys.push(StoredVerificationKey {
             public_jwk,
+            retire_at: None,
             managed: ManagedKey {
                 kid,
                 algorithm: crate::store::signing_algorithm_name(algorithm)
@@ -942,6 +955,7 @@ pub(crate) fn snapshot_from_loaded(loaded: &LoadedKeyset) -> KeySnapshot {
         verification_keys: loaded
             .verification_keys
             .iter()
+            .filter(|key| key.managed.can_verify())
             .map(|key| VerificationKey {
                 kid: key.managed.kid.clone(),
                 public_jwk: key.public_jwk.clone(),
@@ -950,6 +964,7 @@ pub(crate) fn snapshot_from_loaded(loaded: &LoadedKeyset) -> KeySnapshot {
                 } else {
                     BTreeSet::new()
                 },
+                retire_at: key.retire_at,
             })
             .collect(),
         id_token_signing_algorithms,

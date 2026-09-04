@@ -694,12 +694,49 @@ async fn pending_migrations_create_all_runtime_module_state_tables() {
     let Some(database_url) = database_url() else {
         return;
     };
+    // The runtime-module migration establishes its clean-install baseline once
+    // per schema. Other integration tests deliberately mutate the shared
+    // default schema, so this assertion needs its own fresh migration ledger.
+    const PUBLIC_SECURITY_AUDIT_MIGRATION_VERSION: &str = "20260805000100";
     nazo_postgres::run_pending_migrations(&database_url)
         .await
-        .expect("pending migrations should apply");
-    let mut connection = AsyncPgConnection::establish(&database_url)
+        .expect("public migrations needed by the isolated schema should apply");
+    let schema = format!("runtime_module_baseline_{}", Uuid::now_v7().simple());
+    let mut coordinator = AsyncPgConnection::establish(&database_url)
         .await
-        .expect("test database should connect");
+        .expect("test database should connect for isolated schema creation");
+    coordinator
+        .batch_execute(&format!("CREATE SCHEMA \"{schema}\";"))
+        .await
+        .expect("isolated schema should create");
+    drop(coordinator);
+    let separator = if database_url.contains('?') { '&' } else { '?' };
+    let isolated_url =
+        format!("{database_url}{separator}options=-csearch_path%3D{schema}%2Cpublic");
+    {
+        let mut connection = AsyncPgConnection::establish(&isolated_url)
+            .await
+            .expect("isolated migration database should connect");
+        connection
+            .batch_execute(diesel::migration::CREATE_MIGRATIONS_TABLE)
+            .await
+            .expect("isolated migration ledger should create");
+        sql_query(
+            "INSERT INTO __diesel_schema_migrations (version)
+             VALUES ($1)
+             ON CONFLICT (version) DO NOTHING",
+        )
+        .bind::<Text, _>(PUBLIC_SECURITY_AUDIT_MIGRATION_VERSION)
+        .execute(&mut connection)
+        .await
+        .expect("public-only migration should be excluded from the isolated ledger");
+    }
+    nazo_postgres::run_pending_migrations(&isolated_url)
+        .await
+        .expect("pending migrations should apply to the isolated schema");
+    let mut connection = AsyncPgConnection::establish(&isolated_url)
+        .await
+        .expect("isolated test database should connect");
     let tables = sql_query(
         r#"
         SELECT table_name
@@ -781,6 +818,12 @@ async fn pending_migrations_create_all_runtime_module_state_tables() {
         ),
         "SCIM security-events runtime module should be in every closed catalog: {catalog_probe:?}"
     );
+    connection
+        .batch_execute(&format!(
+            "SET search_path TO public; DROP SCHEMA \"{schema}\" CASCADE;"
+        ))
+        .await
+        .expect("isolated schema should drop");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

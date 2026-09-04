@@ -138,6 +138,32 @@ fn retired_key_neither_verifies_nor_signs() {
     assert!(!key.can_sign(SigningPurpose::AccessToken));
 }
 
+#[test]
+fn captured_snapshot_stops_exposing_a_key_after_its_retirement_deadline() {
+    let snapshot = super::KeySnapshot {
+        active_kid: "active".to_owned(),
+        active_alg: jsonwebtoken::Algorithm::EdDSA,
+        verification_keys: vec![super::VerificationKey {
+            kid: "expired".to_owned(),
+            public_jwk: serde_json::json!({"kid":"expired","alg":"EdDSA"}),
+            signing_purposes: BTreeSet::new(),
+            retire_at: Some(chrono::Utc::now() - chrono::Duration::seconds(1)),
+        }],
+        id_token_signing_algorithms: Vec::new(),
+        response_signing_algorithms: Vec::new(),
+        request_object_encryption_jwk: serde_json::Value::Null,
+    };
+
+    assert!(snapshot.verification_key("expired").is_none());
+    assert!(
+        snapshot.jwks()["keys"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|key| key["kid"] != "expired")
+    );
+}
+
 #[tokio::test]
 async fn http_signing_lease_keeps_label_and_key_on_one_generation_during_rotation() {
     let manager = KeyManager::for_test(jsonwebtoken::Algorithm::EdDSA);
@@ -337,6 +363,12 @@ async fn database_rotation_retains_old_public_key_for_grace_and_snapshot_bounds(
     );
     let manager = database_manager(settings).await;
     let old_kid = manager.snapshot().active_kid.clone();
+    let algorithm = manager.snapshot().active_alg;
+    let token = manager.encode_jwt(
+        SigningPurpose::AccessToken,
+        &jsonwebtoken::Header::new(algorithm),
+        &serde_json::json!({"sub":"before-rotation", "exp":chrono::Utc::now().timestamp() + 600}),
+    ).await.unwrap();
     let before = chrono::Utc::now();
     manager.refresh().await.unwrap(); // publishes a prepublished key
     manager.refresh().await.unwrap(); // activates it
@@ -348,6 +380,17 @@ async fn database_rotation_retains_old_public_key_for_grace_and_snapshot_bounds(
         .find(|record| record.kid == old_kid)
         .expect("prior active key remains published");
     assert_eq!(old.status, KeyRecordStatus::Grace);
+    let snapshot = manager.snapshot();
+    let old_public = snapshot.verification_key(&old_kid).unwrap();
+    let jwk: jsonwebtoken::jwk::Jwk =
+        serde_json::from_value(old_public.public_jwk.clone()).unwrap();
+    let decoded = jsonwebtoken::decode::<serde_json::Value>(
+        &token,
+        &jsonwebtoken::DecodingKey::from_jwk(&jwk).unwrap(),
+        &jsonwebtoken::Validation::new(algorithm),
+    )
+    .unwrap();
+    assert_eq!(decoded.claims["sub"], "before-rotation");
     let retire_at = chrono::DateTime::parse_from_rfc3339(old.retire_at.as_deref().unwrap())
         .unwrap()
         .with_timezone(&chrono::Utc);

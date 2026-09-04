@@ -32,12 +32,13 @@ impl AvatarProfileService {
     pub(crate) async fn begin_direct_upload(
         &self,
         account: &nazo_identity::PublicAccount,
+        content_length: usize,
     ) -> Result<nazo_identity::AvatarUploadStart, nazo_identity::DirectAvatarUploadError> {
         match self {
             Self::Local(_) => Err(nazo_identity::DirectAvatarUploadError::Storage(
                 nazo_identity::ports::AvatarStorageError::Unsupported,
             )),
-            Self::Direct(service) => service.begin_upload(account).await,
+            Self::Direct(service) => service.begin_upload(account, content_length).await,
         }
     }
 

@@ -28,7 +28,9 @@ ed25519-dalek.workspace = true
 nazo-identity.workspace = true
 nazo-operator-protocol.workspace = true
 nazo-postgres.workspace = true
+nazo-valkey.workspace = true
 rand.workspace = true
+reqwest = { version = "0.12.28", default-features = false, features = ["rustls-tls"] }
 uuid = { workspace = true, features = ["v7"] }
 
 [lints]

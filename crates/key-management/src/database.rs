@@ -30,25 +30,25 @@ pub(crate) async fn load_or_create(
     repository: Arc<dyn SigningKeyRepository>,
     wrapping_keys: SigningKeyWrappingKeyRing,
 ) -> anyhow::Result<(LoadedKeyset, DatabaseKeysetBinding)> {
-    let record = match repository.load().await? {
-        Some(record) => record,
+    match repository.load().await? {
+        Some(_) => {}
         None => {
             let candidate = persist_payload(tenant_id, 1, initial_payload()?, &wrapping_keys)?;
             match repository.create_if_absent(candidate).await? {
-                SigningKeysetCreateResult::Created(record)
-                | SigningKeysetCreateResult::Existing(record) => record,
+                SigningKeysetCreateResult::Created(_) | SigningKeysetCreateResult::Existing(_) => {}
             }
         }
+    }
+    let binding = DatabaseKeysetBinding {
+        tenant_id,
+        repository,
+        wrapping_keys,
     };
-    let loaded = load_record(settings, tenant_id, &wrapping_keys, &record)?;
-    Ok((
-        loaded,
-        DatabaseKeysetBinding {
-            tenant_id,
-            repository,
-            wrapping_keys,
-        },
-    ))
+    // Startup is a lifecycle boundary.  Do not wait for the periodic refresh
+    // before creating a required prepublished key or promoting one that has
+    // completed its prepublication window.
+    let loaded = refresh(settings, &binding).await?;
+    Ok((loaded, binding))
 }
 
 /// One-shot migration of an existing file keyset. This is deliberately never
@@ -64,19 +64,99 @@ pub(crate) async fn import_legacy_file_keyset(
         repository,
         wrapping_keys,
     };
+    let imported_payload = legacy_file_payload(settings).await?;
     let record = match binding.repository.load().await? {
-        Some(record) => record,
+        Some(record) => {
+            let existing = decrypt_payload(binding.tenant_id, &binding.wrapping_keys, &record)?;
+            ensure_import_is_compatible(&imported_payload, &existing)?;
+            record
+        }
         None => {
-            let payload = legacy_file_payload(settings).await?;
-            let candidate = persist_payload(tenant_id, 1, payload, &binding.wrapping_keys)?;
+            let candidate = persist_payload(
+                tenant_id,
+                1,
+                imported_payload.clone(),
+                &binding.wrapping_keys,
+            )?;
             match binding.repository.create_if_absent(candidate).await? {
-                SigningKeysetCreateResult::Created(record)
-                | SigningKeysetCreateResult::Existing(record) => record,
+                SigningKeysetCreateResult::Created(record) => record,
+                SigningKeysetCreateResult::Existing(record) => {
+                    let existing =
+                        decrypt_payload(binding.tenant_id, &binding.wrapping_keys, &record)?;
+                    ensure_import_is_compatible(&imported_payload, &existing)?;
+                    record
+                }
             }
         }
     };
     let loaded = load_record(settings, tenant_id, &binding.wrapping_keys, &record)?;
     Ok((loaded, binding))
+}
+
+fn ensure_import_is_compatible(imported: &Value, existing: &Value) -> anyhow::Result<()> {
+    if imported.get("request_object_private_pem") != existing.get("request_object_private_pem") {
+        anyhow::bail!("database signing keyset has different request-object key material");
+    }
+    let existing_keys = existing
+        .get("keys")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("database keyset missing keys"))?;
+    for imported_key in imported
+        .get("keys")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("legacy keyset missing keys"))?
+    {
+        let kid = imported_key
+            .get("kid")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("legacy keyset key missing kid"))?;
+        let existing_key = existing_keys
+            .iter()
+            .find(|key| key.get("kid").and_then(Value::as_str) == Some(kid))
+            .ok_or_else(|| {
+                anyhow!("database signing keyset does not contain imported key {kid}")
+            })?;
+        if import_identity(imported_key)? != import_identity(existing_key)? {
+            anyhow::bail!("database signing keyset key {kid} has different imported material");
+        }
+    }
+    Ok(())
+}
+
+fn import_identity(entry: &Value) -> anyhow::Result<Value> {
+    let backend = entry
+        .get("backend")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("keyset key missing backend"))?;
+    let mut identity = serde_json::Map::new();
+    for field in ["kid", "alg", "backend", "purposes", "public_jwk"] {
+        identity.insert(
+            field.to_owned(),
+            entry.get(field).cloned().unwrap_or(Value::Null),
+        );
+    }
+    match backend {
+        "local-db" => {
+            identity.insert(
+                "private_pkcs8_der".to_owned(),
+                entry
+                    .get("private_pkcs8_der")
+                    .cloned()
+                    .ok_or_else(|| anyhow!("local database key missing private material"))?,
+            );
+        }
+        "external-command" => {
+            identity.insert(
+                "key_ref".to_owned(),
+                entry
+                    .get("key_ref")
+                    .cloned()
+                    .ok_or_else(|| anyhow!("external key missing key reference"))?,
+            );
+        }
+        _ => anyhow::bail!("keyset key has unsupported backend {backend}"),
+    }
+    Ok(Value::Object(identity))
 }
 
 #[derive(Clone)]
@@ -661,6 +741,7 @@ fn load_payload(settings: &KeySettings, payload: &Value) -> anyhow::Result<Loade
         }
         verification_keys.push(StoredVerificationKey {
             public_jwk,
+            retire_at: retired_at,
             managed: ManagedKey {
                 kid,
                 algorithm: signing_algorithm_name(algorithm).unwrap().to_owned(),

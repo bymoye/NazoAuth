@@ -46,15 +46,22 @@ impl ConfigSource {
 use super::*;
 
 fn install_test_server_config_extension() {
-    install_server_config_extension(ServerConfigExtension::new(
-        "VALKEY_URL: \"redis://127.0.0.1:6379/0\"\n".to_owned(),
-        vec![
-            "VALKEY_COMMAND_TIMEOUT_MS",
+    install_server_config_extension(
+        ServerConfigExtension::new(
+            "VALKEY_URL: \"redis://127.0.0.1:6379/0\"\n".to_owned(),
+            vec![
+                "VALKEY_COMMAND_TIMEOUT_MS",
+                "VALKEY_STATE_EPOCH",
+                "VALKEY_URL",
+            ],
             "VALKEY_STATE_EPOCH",
-            "VALKEY_URL",
-        ],
-        "VALKEY_STATE_EPOCH",
-    ))
+        )
+        .merge(ServerConfigExtension::configuration_only(
+            "AVATAR_OBJECT_STORE: \"local\"\n".to_owned(),
+            vec!["AVATAR_OBJECT_STORE"],
+        ))
+        .expect("test configuration extensions must compose"),
+    )
     .unwrap();
 }
 
@@ -1118,6 +1125,7 @@ fn canonical_config_keys_are_locked_to_the_reviewed_baseline() {
             "VALKEY_COMMAND_TIMEOUT_MS",
             "VALKEY_STATE_EPOCH",
             "VALKEY_URL",
+            "AVATAR_OBJECT_STORE",
         ]
     );
 }

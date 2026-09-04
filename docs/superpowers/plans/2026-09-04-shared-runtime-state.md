@@ -1,55 +1,79 @@
-# Shared runtime state implementation plan
+# Shared runtime state implementation and acceptance
 
-**Goal:** Deliver S3-compatible direct avatar upload and a database-authoritative signing-key lifecycle that works across disposable service instances.
+## Goal and boundaries
 
-**Architecture:** Persistence ports own durable avatar references and encrypted key generations; object-storage ports own immutable avatar objects; transient-state ports own short-lived upload authorizations. The current concrete adapters use PostgreSQL, S3-compatible storage and Valkey. NazoAuth owns validation and state transitions without depending on those implementations; ctl invokes existing operator contracts. Instances may cache keys in memory, but never require local key files for normal database-backed operation.
+Provide browser-direct avatar uploads and database-authoritative signing keys
+across disposable server instances. The core owns business state transitions;
+ports express durable persistence, object storage and temporary upload state.
+PostgreSQL, S3-compatible storage and Valkey are concrete adapters selected by
+the executable composition root. Core crates depend on neither SQL/Diesel nor
+S3 configuration or SDK types. Static dependency checks enforce this boundary.
 
-**Workspaces:** Integration and keys: `feat/shared-runtime-state`. Avatar: `feat/s3-avatar-direct-upload`. Both use isolated worktrees; preserve the primary checkout and all its untracked files. Hostinger is the integration build/test host; temporary test services must be isolated from production.
+Implementation work uses isolated branches `feat/shared-runtime-state` and
+`feat/shared-key-install`; the original checkouts and their user files remain
+unchanged. Hostinger verification uses isolated test services, never production
+storage or the running OIDF environment.
 
-## Constraints and accepted decisions
+## Delivered behavior
 
-- HARD BOUNDARY: NazoAuth and key-management business logic must not depend on PostgreSQL/SQL/Diesel or concrete database types. Declare ports at the existing abstract boundary, implement SQL and concurrency in the PostgreSQL adapter, and inject through the composition root. The current concrete database is an implementation choice, never a runtime-domain dependency.
-- HARD BOUNDARY: NazoAuth must not depend on S3 protocol or SDK either. A concrete storage adapter owns endpoint/bucket/signature configuration and protocol operations; composition injects generic upload authorization, fixed-object publication, read and delete capabilities. Authorizations expose transport-neutral URL/method/headers/form fields, never an S3-specific business DTO.
-- Preserve local avatar storage for single-instance deployments; S3 mode must not fall back to local storage.
-- Direct upload authorizations bind a tenant/user, one server-generated object key, expiry, and an enforced size limit. Do not trust MIME declarations as image validation.
-- Uploads land in private temporary storage. Finalization fixes the exact bytes before validation/publication so a reusable signed upload cannot replace the accepted avatar.
-- The database alone selects the current avatar. Handle uncertain database outcomes without deleting a possibly referenced object. Garbage collection must not remove an upload still being published.
-- Use existing maintained S3/crypto libraries where suitable; no cloud-vendor-specific event pipeline or separate image service.
-- Database key metadata and encrypted private material are tenant/purpose scoped. Inject one deployment wrapping-key ring explicitly, with no per-instance generated replacement. Do not reuse client-secret pepper as an encryption key.
-- Use the existing signing algorithms and external signing boundary. Do not introduce a mandatory KMS service.
-- Key initialization and rotation must converge under concurrent instances. Public-key prepublication, bounded snapshot freshness and old-key retention must cover signing and verification windows.
-- Import existing key material with its original kid and public keys; then use one authoritative backend. No ongoing file/database dual writes.
-- Existing keyctl/operator operations must target the same database lifecycle; do not add a second ctl implementation of business rules.
-- Root-secret consistency, mdoc certificate/CRL material and migration safety must be inspected alongside integration; do not claim Issue #108 fully closed while other necessary instance-local state remains.
+- Avatar authorization fixes the tenant, user, object, expiry and byte limit.
+  Browsers upload directly to storage. Finalization decodes real image bytes,
+  publishes the exact validated source version and compares/sets the database
+  avatar reference. Shared leases allow another instance to finalize; retries
+  and staging replay cannot replace accepted bytes. Local multipart storage
+  remains its existing separate capability.
+- `SigningKeyRepository` is the tenant-bound persistence port. The PostgreSQL
+  adapter owns atomic create/CAS and the migration. AES-GCM encrypted generations
+  authenticate tenant, revision and public metadata; private keys never enter
+  the public projection. Concurrent initialization converges on one authority.
+- Runtime and operator key operations load that same database authority.
+  Startup performs due lifecycle maintenance. Prepublication, bounded signing
+  snapshots and verification retention cover rotation. Expired snapshots stop
+  signing; retired keys stop appearing in JWKS and lookup even in captured
+  snapshots after their retirement deadline.
+- `keys-import` is an explicit offline operation. It preserves original key IDs
+  and material, leaves source files untouched, accepts compatible retries and
+  rejects an unrelated database keyset. Ordinary startup has no file fallback.
+- ctl clean install provisions a deployment wrapping root once and references a
+  secret file. Updates require existing root/configuration/runtime access.
+  Backup and recovery preserve the configured current/previous ring. Host wire
+  schema 10 reflects the expanded install secret contract.
+- The old ctl current-data copy mode is explicitly refused: copying a key
+  directory cannot migrate the database authority. Existing deployments must
+  import with the same wrapping root before managed update; a fresh install
+  would generate a different root and is not a migration procedure.
 
-## Task 1 — Direct avatar upload
+## Verification record
 
-Ownership: avatar-specific identity ports/service, server avatar HTTP/adapters, matching settings and composition, frontend consumers if present, upload-state adapter, avatar-specific migration if required, tests/docs and required dependency declarations. Record touched shared files before integration.
+The final commands, counts and proof boundaries are recorded in
+`docs/operations/shared-runtime-state-verification.md` after Hostinger acceptance.
+Targeted checks include real PostgreSQL concurrent initialization/CAS and restart,
+wrong-root rejection and rewrapping; real Valkey lease transitions; real MinIO
+signed PUT/conditional publication; and a combined A-authorize/B-finalize/B-read/
+A-retry service test using all three concrete backends. HTTP authentication and
+CSRF are covered separately by the server regression suite.
 
-- [ ] Inspect current upload/read/delete consumers and write the concrete task design in the avatar worktree.
-- [ ] Add behavior tests for direct-upload authorization, fixed key/size/expiry, tenant ownership, real image validation, repeated finalization, concurrent replacements, stale upload overwrite, expiration and cleanup.
-- [ ] Implement immutable object operations shared by local and S3 paths, then authorization/finalization HTTP contracts and consumers. Use presigned POST when needed to enforce size before ingress; document the required S3 capability contract.
-- [ ] Verify with a real isolated S3-compatible service, including cross-instance finalization; test failures must not silently skip.
-- [ ] Commit the coherent avatar slice and report exact commands/results and integration touchpoints.
+Review also corrected repeated configuration-extension fixtures, invalid PNG
+fixtures, a stale S3 prefix assertion, and process tests that still assumed
+filesystem signing keys. These fixes preserve meaningful validation instead of
+weakening the production behavior.
 
-## Task 2 — Database signing keys
+## Operational limits and rollback
 
-Ownership: `crates/key-management`, key persistence ports/PostgreSQL implementation and migration, server key composition/config/keyctl/operator integration, focused tests/docs. Coordinate Cargo.lock and shared settings files at integration.
+The combined avatar proof constructs independent service instances and uses a
+real browser-style HTTP PUT to object storage; it does not launch two authenticated HTTP
+server processes. Bucket CORS and lifecycle remain deployment configuration.
 
-- [ ] Inspect lifecycle, external signer, request-object decryption keys, purpose-scoped keys, current operator contract, tenant bootstrap and mdoc consumers; write a concrete key task design.
-- [ ] Add failing tests for two managers sharing one database, encrypted persistence/AAD binding, initialization and rotation races, restart without key files, import preservation and bounded stale signing.
-- [ ] Implement a database-backed key repository through the existing dependency direction. Keep crypto and lifecycle rules in key-management and atomic persistence in PostgreSQL.
-- [ ] Wire production and operator operations to the same authority. Preserve imported key identity and supported algorithms; make missing wrapping material explicit.
-- [ ] Verify focused crypto/key tests and real PostgreSQL lifecycle tests, then commit the coherent slice.
+All instances must receive the same wrapping ring. Preserve original key files
+and a database backup until migration acceptance; do not roll back the schema
+while current writers use it. Avatar publication failure leaves the database
+reference authoritative, and an uncertain database outcome never deletes a
+possibly referenced final object.
 
-## Task 3 — Integration and acceptance
+mdoc IACA private keys, certificates and CRLs retain their distinct deployment
+lifecycle and must be supplied consistently to each instance. This work does not
+by itself establish that every requirement of Issue #108 is closed.
 
-- [ ] Review both slices for correctness and unnecessary abstractions; resolve shared-file conflicts by preserving both features.
-- [ ] Verify local/S3 mode configuration, ctl compatibility, secret injection, migration/import documentation and any remaining #108 boundaries.
-- [ ] Run format, focused tests, workspace compile/clippy and applicable integration gates on Hostinger. Reuse build caches but never reuse a production database or bucket.
-- [ ] Prove A-upload/B-finalize and B-read; two-instance key/JWKS convergence; concurrent rotation; restart after process loss; preservation of old-token verification.
-- [ ] Report code, tests and operational proof separately. Do not claim deployment, release, remote push or Issue closure without performing the corresponding action.
-
-Rollback: preserve imported source material and database backups; never delete original keys during import. Before schema rollback, stop writers and establish which code can read the persisted generation. Avatar failures before database publication leave the prior avatar authoritative.
-
-Stop conditions: preserve user modifications; investigate failing gates rather than bypassing them; do not modify production services for acceptance testing.
+Code verification, Release-profile builds, publication and production deployment
+are separate outcomes. No release publication, production cutover or issue
+closure is implied by this implementation record.

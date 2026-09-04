@@ -6,11 +6,16 @@ use actix_web::http::header::HeaderValue;
 use actix_web::{
     HttpRequest, HttpResponse,
     http::{StatusCode, header},
-    web::{Data, Path},
+    web::{Data, Json, Path},
 };
 use futures_util::StreamExt as _;
 use nazo_http_actix::{bytes_response, csrf_error, json_response, oauth_error};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+
+#[derive(Deserialize)]
+pub(crate) struct AvatarUploadBeginRequest {
+    content_length: usize,
+}
 
 #[derive(Serialize)]
 struct AvatarUploadStartResponse {
@@ -23,7 +28,6 @@ struct AvatarUploadStartResponse {
 struct AvatarUploadTargetResponse {
     url: String,
     method: String,
-    fields: std::collections::BTreeMap<String, String>,
     headers: std::collections::BTreeMap<String, String>,
 }
 
@@ -31,6 +35,7 @@ pub(crate) async fn begin_direct_avatar_upload(
     sessions: Data<SessionProfileHandles>,
     avatars: Data<crate::bootstrap::AvatarProfileService>,
     req: HttpRequest,
+    Json(payload): Json<AvatarUploadBeginRequest>,
 ) -> HttpResponse {
     if !sessions.has_valid_csrf_token(&req, None) {
         return csrf_error();
@@ -39,17 +44,29 @@ pub(crate) async fn begin_direct_avatar_upload(
         Ok(user) => user,
         Err(response) => return response,
     };
-    match avatars.begin_direct_upload(&user).await {
+    match avatars
+        .begin_direct_upload(&user, payload.content_length)
+        .await
+    {
         Ok(start) => json_response(AvatarUploadStartResponse {
             upload_id: start.upload_id,
             expires_at: start.expires_at.to_rfc3339(),
             upload: AvatarUploadTargetResponse {
                 url: start.target.url,
                 method: start.target.method,
-                fields: start.target.fields,
                 headers: start.target.headers,
             },
         }),
+        Err(nazo_identity::DirectAvatarUploadError::InvalidContentLength) => oauth_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "头像文件大小必须大于零.",
+        ),
+        Err(nazo_identity::DirectAvatarUploadError::TooLarge) => oauth_error(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "invalid_request",
+            "头像文件过大.",
+        ),
         Err(nazo_identity::DirectAvatarUploadError::Storage(
             nazo_identity::ports::AvatarStorageError::Unsupported,
         )) => oauth_error(

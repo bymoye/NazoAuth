@@ -25,6 +25,8 @@ use uuid::Uuid;
 const MIGRATION_RUNTIME_ROLE: &str = "nazoauth_t1_convergence_runtime";
 const DEPLOYMENT: &str = "deployment-directory-process";
 const CONFIG_REVISION: &str = "config-revision-directory-process";
+const SIGNING_KEY_ENCRYPTION_KEY_ID: &str = "directory-process-test";
+const SIGNING_KEY_ENCRYPTION_KEY: &str = "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA";
 
 fn database_url() -> Option<String> {
     let url = std::env::var("NAZO_TEST_DATABASE_URL")
@@ -105,7 +107,9 @@ fn write_runtime_fixtures(root: &Path) {
     fs::create_dir_all(root.join("state")).unwrap();
     fs::write(
         root.join("server.yaml"),
-        format!("DATA_DIR: runtime\nDEPLOYMENT_ID: {DEPLOYMENT}\n"),
+        format!(
+            "DATA_DIR: runtime\nDEPLOYMENT_ID: {DEPLOYMENT}\nSIGNING_KEY_ENCRYPTION_KEY_ID: {SIGNING_KEY_ENCRYPTION_KEY_ID}\nSIGNING_KEY_ENCRYPTION_KEY: {SIGNING_KEY_ENCRYPTION_KEY}\n"
+        ),
     )
     .unwrap();
     fs::create_dir_all(root.join("runtime/instance")).unwrap();
@@ -115,7 +119,6 @@ fn write_runtime_fixtures(root: &Path) {
     )
     .unwrap();
     fs::write(root.join("config-revision"), format!("{CONFIG_REVISION}\n")).unwrap();
-    fs::create_dir_all(root.join("keys")).unwrap();
     fs::write(root.join("state/deployment-id"), format!("{DEPLOYMENT}\n")).unwrap();
 }
 
@@ -131,7 +134,6 @@ fn run_operator_task(root: &Path, compact: &str, database_url: &str) -> Output {
             root.join("config-revision"),
         )
         .env("NAZOAUTH_OPERATOR_STATE_DIRECTORY", root.join("state"))
-        .env("JWK_KEYS_DIR", root.join("keys"))
         .env("NAZOAUTH_MIGRATION_RUNTIME_ROLE", MIGRATION_RUNTIME_ROLE)
         .env("DATABASE_URL", database_url)
         .stdin(Stdio::piped())

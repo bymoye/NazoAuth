@@ -13,10 +13,8 @@ const BUCKET: &str = "NAZO_TEST_S3_BUCKET";
 const ACCESS_KEY: &str = "NAZO_TEST_S3_ACCESS_KEY";
 const SECRET_KEY: &str = "NAZO_TEST_S3_SECRET_KEY";
 const REGION: &str = "NAZO_TEST_S3_REGION";
-const MAX_BYTES: usize = 1_024;
-
 #[tokio::test]
-async fn minio_presigned_post_publishes_an_immutable_candidate() {
+async fn minio_presigned_put_publishes_an_immutable_candidate() {
     let Some(config) = minio_config() else {
         return;
     };
@@ -25,24 +23,29 @@ async fn minio_presigned_post_publishes_an_immutable_candidate() {
     let upload_id = Uuid::now_v7().to_string();
     let final_id = format!("final-{upload_id}");
     let conflicting_final_id = format!("conflict-{upload_id}");
+    println!(
+        "avatar S3 integration tenant={} upload={upload_id}",
+        tenant_id.as_uuid()
+    );
     let original = STANDARD
-        .decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScL5VQAAAABJRU5ErkJggg==")
+        .decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==")
         .expect("valid PNG fixture");
-    let replay = b"replayed staged image bytes";
+    let mut replay = original.clone();
+    replay[0] ^= 1;
 
     let target = store
         .authorize_upload(
             &upload_id,
-            MAX_BYTES,
+            original.len(),
             chrono::Utc::now() + chrono::Duration::minutes(5),
         )
         .await
-        .expect("presigned POST");
-    post(&target, &original)
+        .expect("presigned PUT");
+    put(&target, &original)
         .await
-        .expect("original POST is accepted");
+        .expect("original PUT is accepted");
     let staged = store
-        .read_staged(&upload_id, MAX_BYTES)
+        .read_staged(&upload_id, original.len())
         .await
         .expect("staged object is readable");
     assert_eq!(staged.bytes, original);
@@ -64,7 +67,7 @@ async fn minio_presigned_post_publishes_an_immutable_candidate() {
         original
     );
 
-    post(&target, replay)
+    put(&target, &replay)
         .await
         .expect("staging replay is accepted");
     assert!(matches!(
@@ -87,16 +90,16 @@ async fn minio_presigned_post_publishes_an_immutable_candidate() {
         original
     );
 
-    let oversized_target = store
+    let mismatched_size_target = store
         .authorize_upload(
-            &format!("oversized-{upload_id}"),
-            MAX_BYTES,
+            &format!("mismatched-size-{upload_id}"),
+            original.len(),
             chrono::Utc::now() + chrono::Duration::minutes(5),
         )
         .await
-        .expect("oversized policy target");
+        .expect("exact-length target");
     assert!(
-        post(&oversized_target, &vec![0; MAX_BYTES + 1])
+        put(&mismatched_size_target, &vec![0; original.len() + 1])
             .await
             .is_err()
     );
@@ -134,27 +137,32 @@ fn minio_config() -> Option<S3AvatarObjectStoreConfig> {
     })
 }
 
-async fn post(target: &AvatarUploadTarget, bytes: &[u8]) -> Result<(), String> {
-    if target.method != "POST" || !target.headers.is_empty() {
-        return Err("direct target is not a headerless POST".to_owned());
+async fn put(target: &AvatarUploadTarget, bytes: &[u8]) -> Result<(), String> {
+    if target.method != "PUT" || !target.headers.is_empty() {
+        return Err("direct target is not a headerless PUT".to_owned());
     }
-    let mut form = reqwest::multipart::Form::new();
-    for (name, value) in &target.fields {
-        form = form.text(name.clone(), value.clone());
-    }
-    let file = reqwest::multipart::Part::bytes(bytes.to_vec())
-        .file_name("avatar.png")
-        .mime_str("image/png")
-        .map_err(|error| error.to_string())?;
     let response = reqwest::Client::new()
-        .post(&target.url)
-        .multipart(form.part("file", file))
+        .put(&target.url)
+        .body(bytes.to_vec())
         .send()
         .await
         .map_err(|error| error.to_string())?;
     if response.status().is_success() {
         Ok(())
     } else {
-        Err(format!("object store returned HTTP {}", response.status()))
+        let status = response.status();
+        let body = response.text().await.map_err(|error| error.to_string())?;
+        let code = xml_error_field(&body, "Code").unwrap_or("unknown");
+        let message = xml_error_field(&body, "Message").unwrap_or("unknown");
+        Err(format!(
+            "object store returned HTTP {status}: {code}: {message}"
+        ))
     }
+}
+
+fn xml_error_field<'a>(body: &'a str, field: &str) -> Option<&'a str> {
+    let opening = format!("<{field}>");
+    let closing = format!("</{field}>");
+    let value = body.split_once(&opening)?.1;
+    Some(value.split_once(&closing)?.0)
 }
