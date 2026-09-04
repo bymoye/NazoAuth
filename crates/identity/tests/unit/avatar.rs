@@ -5,9 +5,9 @@ use std::sync::{
 };
 
 use crate::ports::{
-    AvatarDirectUploadPort, AvatarRepositoryPort, AvatarStagedObject, AvatarStorageError,
-    AvatarStorageFuture, AvatarUploadAuthorization, AvatarUploadClaim, AvatarUploadStatePort,
-    AvatarUploadTarget, GrantSummaryRepositoryPort, RepositoryFuture,
+    AvatarDirectUploadPort, AvatarRepositoryPort, AvatarStagedObject, AvatarStorageFuture,
+    AvatarUploadAuthorization, AvatarUploadClaim, AvatarUploadStatePort, AvatarUploadTarget,
+    GrantSummaryRepositoryPort, RepositoryFuture,
 };
 use crate::{AccountIdentity, Principal, TenantContext, UserId, UserProfile, UserRole};
 use uuid::Uuid;
@@ -120,7 +120,14 @@ impl AvatarDirectUploadPort for DirectStorage {
         &'a self,
         _final_object_id: &'a str,
     ) -> AvatarStorageFuture<'a, AvatarObject> {
-        Box::pin(async { Err(AvatarStorageError::Missing) })
+        let staged = self.staged.clone();
+        Box::pin(async move {
+            Ok(AvatarObject {
+                bytes: staged.bytes,
+                content_type: AvatarContentType::Png,
+                version: "final".to_owned(),
+            })
+        })
     }
 
     fn delete_staging<'a>(&'a self, _staging_object_id: &'a str) -> AvatarStorageFuture<'a, ()> {
@@ -350,9 +357,10 @@ async fn direct_upload_retry_from_another_service_returns_the_selected_candidate
         .expect("fixture image");
     let account = direct_account();
     let account_store = Arc::new(Mutex::new(account.clone()));
+    let bytes = encoded.into_inner();
     let storage = Arc::new(DirectStorage {
         staged: AvatarStagedObject {
-            bytes: encoded.into_inner(),
+            bytes: bytes.clone(),
             version: "etag-1".to_owned(),
         },
         published: Arc::new(Mutex::new(Vec::new())),
@@ -378,16 +386,24 @@ async fn direct_upload_retry_from_another_service_returns_the_selected_candidate
         30,
     );
     let start = first.begin_upload(&account).await.expect("authorization");
-    let accepted = first
+    let accepted = second
         .complete_upload(&account, &start.upload_id)
         .await
-        .expect("first completion");
+        .expect("second instance completion");
+    assert_eq!(
+        second
+            .read(&accepted.account)
+            .await
+            .expect("second instance reads final")
+            .bytes,
+        bytes
+    );
     let refreshed = account_store.lock().unwrap().clone();
 
-    let retry = second
+    let retry = first
         .complete_upload(&refreshed, &start.upload_id)
         .await
-        .expect("retry recognizes completed candidate");
+        .expect("first instance retry recognizes completed candidate");
     assert_eq!(
         retry.account.profile.avatar_url,
         accepted.account.profile.avatar_url
