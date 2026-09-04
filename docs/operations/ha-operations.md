@@ -13,7 +13,7 @@ timeout, and partial-outage rules for both.
 | PostgreSQL | users, clients, grants, refresh tokens, access-token revocation state, client metadata, audit-relevant durable rows | durable account, client, token, and grant state can be lost or rolled back | restore from tested backups or promote a consistent replica |
 | Valkey | sessions, authorization codes, PAR handles, DPoP proof replay keys, client assertion replay keys, rate-limit counters, consent transaction state | in-flight browser/API transactions fail; replay/rate controls must not silently weaken | fail closed for security-sensitive paths; restart transactions after recovery |
 | PostgreSQL signing-key generation + deployment wrapping root | active, prepublished, and retained token-signing private/public keys plus request-object recipient | issued tokens can become unverifiable or signing continuity can break | restore the matching encrypted row and wrapping root before serving traffic |
-| Avatar directory | user-uploaded avatar files | profile media can be lost or desynchronized from PostgreSQL metadata | restore file backup consistent with PostgreSQL metadata |
+| Configured avatar storage | tenant-isolated local files or S3-compatible objects | profile media can be lost or desynchronized from PostgreSQL metadata | restore objects and metadata consistently; independent local disks are not shared storage |
 
 OpenID4VC mdoc certificate bundles and their IACA private material remain a
 separate deployment-owned authority. Every instance that serves the same mdoc
