@@ -7,6 +7,3 @@ CREATE TABLE tenant_signing_keysets (
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
-
-CREATE INDEX idx_tenant_signing_keysets_updated_at
-    ON tenant_signing_keysets (updated_at);
