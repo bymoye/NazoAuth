@@ -60,6 +60,7 @@ serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 semver.workspace = true
 sha2.workspace = true
+sha1.workspace = true
 tar.workspace = true
 time.workspace = true
 tokio = { workspace = true, features = ["full"] }
@@ -69,6 +70,7 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 url.workspace = true
 x509-parser.workspace = true
 x509-cert.workspace = true
+yasna.workspace = true
 urlencoding.workspace = true
 uuid = { workspace = true, features = ["v7", "serde"] }
 yaml_serde = "0.10.4"

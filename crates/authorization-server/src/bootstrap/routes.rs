@@ -83,7 +83,7 @@ use crate::http::token::{
     },
     dispatch::token,
 };
-use crate::http::well_known::{captcha_config, live, ready, startup};
+use crate::http::well_known::{captcha_config, live, mdoc_crl, ready, startup};
 use crate::settings::Settings;
 use nazo_http_actix::{
     scim_create_user, scim_delete_user, scim_get_user, scim_list_users, scim_patch_user,
@@ -212,7 +212,8 @@ fn configure_with_cors(
         .route(
             "/oauth-protected-resource/{tail:.*}",
             web::get().to(oauth_protected_resource_metadata),
-        );
+        )
+        .route("/mdoc/{issuer_id}.crl", web::get().to(mdoc_crl));
     let well_known = if register_openid4vci_routes {
         well_known.service(
             web::resource("/openid-credential-issuer")

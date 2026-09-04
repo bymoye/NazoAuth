@@ -29,10 +29,11 @@ pub(crate) use profile_services::{
     FederationProfileService, MtlsTrustAnchorService,
 };
 pub(crate) use registration_services::{LocalRegistrationService, RegistrationSecretHasher};
+#[cfg(test)]
+pub(crate) use startup::load_revocation_policy;
+pub(crate) use startup::read_revocation_snapshot;
 pub use startup::run;
 pub(crate) use startup::tenant_runtime::TenantRuntimeRegistry;
-#[cfg(test)]
-pub(crate) use startup::{load_revocation_policy, read_revocation_snapshot};
 pub use transient_state::{
     CibaPingDelivery, CibaPingDeliveryPort, CibaPingFinishOutcome, CibaPingFinishResult,
     ServerStateBackendBindings, ServerTransientStateBindings, ServerTransientStateProvider,

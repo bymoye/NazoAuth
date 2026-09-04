@@ -53,6 +53,32 @@ pub(crate) fn credential_configurations_from_config(
     Ok(configurations)
 }
 
+pub(crate) fn mdoc_issuing_country_from_config(
+    config: &ConfigSource,
+    configurations: &BTreeMap<String, nazo_openid4vci::CredentialConfiguration>,
+) -> anyhow::Result<Option<String>> {
+    let mdoc_enabled = configurations.values().any(|configuration| {
+        configuration.format == nazo_digital_credentials::CredentialFormat::MsoMdoc
+    });
+    if !mdoc_enabled {
+        return Ok(None);
+    }
+
+    let Some(issuing_country) = config.optional_string("OPENID4VC_MDOC_ISSUING_COUNTRY") else {
+        bail!(
+            "OPENID4VC_MDOC_ISSUING_COUNTRY is required when an mso_mdoc credential configuration is enabled"
+        );
+    };
+    if issuing_country.len() != 2
+        || !issuing_country
+            .bytes()
+            .all(|character| character.is_ascii_uppercase())
+    {
+        bail!("OPENID4VC_MDOC_ISSUING_COUNTRY must be two uppercase ASCII letters");
+    }
+    Ok(Some(issuing_country))
+}
+
 fn derive_tenant_secret(
     root: &[u8],
     tenant_id: nazo_identity::TenantId,

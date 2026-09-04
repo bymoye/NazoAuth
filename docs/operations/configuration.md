@@ -87,9 +87,10 @@ AVATAR_STORAGE_DIR = DATA_DIR + "/avatars"
 | `MFA_TOTP_PREVIOUS_ENCRYPTION_KEY` / `MFA_TOTP_PREVIOUS_ENCRYPTION_KEY_ID` | unset | Optional prior key for decrypting existing encrypted envelopes during a controlled key transition. Startup never scans, encrypts, or re-wraps credential rows. |
 | `TOKEN_ISSUANCE_RESPONSE_ENCRYPTION_KEY` / `_ID` | generated under `DATA_DIR/secrets` | Independent current 32-byte base64url key and derived id for durable OAuth token-response envelopes. Do not derive it from `CLIENT_SECRET_PEPPER`; file injection remains available for controlled rotation. Missing or malformed pairs fail startup. |
 | `TOKEN_ISSUANCE_RESPONSE_PREVIOUS_ENCRYPTION_KEY` / `_ID` | unset | Optional previous key retained only during a rotation overlap; use `TOKEN_ISSUANCE_RESPONSE_PREVIOUS_ENCRYPTION_KEY_FILE` for file injection. Existing live envelopes decrypt with current or previous; new envelopes always use current. Startup authenticates every live envelope, and expired rows are lazily removed before a grant key is reused. Remove the previous pair only after all rows encrypted with that id have expired and no writer still uses that key id. |
-| `OPENID4VC_REVOCATION_POLICY` | `disabled` | `disabled`, `optional`, or `required`. The VP verifier requires `required`; enabling a policy also requires a bounded local snapshot file. Request handling never performs network or file I/O. |
+| `OPENID4VC_REVOCATION_POLICY` | `disabled` | `disabled`, `optional`, or `required`. The VP verifier requires `required`; enabling a policy also requires a bounded local snapshot file. VP verification never performs network or file I/O. |
 | `OPENID4VC_REVOCATION_SNAPSHOT_FILE` | unset | Operator-controlled JSON snapshot containing SHA-256 certificate identities and `good`/`revoked` status with hard `this_update`/`next_update` bounds. Invalid reloads retain the previous snapshot only until its own expiry. |
 | `OPENID4VC_REVOCATION_RELOAD_INTERVAL_SECONDS` | `30` | Positive local snapshot reload interval. |
+| `OPENID4VC_MDOC_ISSUING_COUNTRY` | unset | Required only when local keyctl generates a certificate for an enabled `mso_mdoc` configuration. Two uppercase ASCII letters, and the generated DS/IACA Subject `C` uses this value. It is not required for externally issued certificate chains. |
 | `SECURITY_AUDIT_REQUIRE_LEAST_PRIVILEGE` | `true` | Reject startup and high-impact administration when the server role is a superuser, can assume a ledger owner/privileged role, has direct ledger table capabilities, or lacks the writer function grants. |
 | `FAPI_HTTP_SIGNATURE_MAX_AGE_SECONDS` | `60` | Request signature age and replay-marker lifetime; accepted range is 1–300 seconds, with at most five seconds of future clock skew |
 | `SCIM_EVENT_RETENTION_SECONDS` | `604800` | Per-receiver delivery window and outbox retention; accepted range is 3600–2592000 seconds |
@@ -109,6 +110,34 @@ the operating system trust store; bundled WebPKI roots are used only when the
 platform store is empty. This path does not load `libpq` or the system OpenSSL
 ABI. Use `sslmode=require` for remote or untrusted networks and
 `sslmode=disable` only for a separately protected local/private transport.
+
+## Local mdoc certificates and CRLs
+
+Set `OPENID4VC_MDOC_ISSUING_COUNTRY` in the server `.env.yaml` before an
+ordinary tenant receives locally generated mdoc material. The OIDF Suite's
+current mDL dataset uses `UT`, so the conformance deployment's server
+configuration must set `OPENID4VC_MDOC_ISSUING_COUNTRY: "UT"` before its
+temporary tenant is materialized. Tenant-local settings inherit this root
+configuration through the existing directory-binding path; the OIDF resource
+Apply does not carry a second country value.
+
+Existing locally generated mdoc bundles predate this profile and must be
+regenerated through the normal tenant-local key generation path after the
+setting is present. Generation writes a non-public IACA key under the tenant's
+OpenID4VC material directory, named by the IACA certificate fingerprint, then
+atomically activates the public DS/IACA bundle. The public bundle never contains
+that private key.
+
+The DS publishes `/.well-known/mdoc/<iaca-sha256>.crl`. It is signed for each request from
+that IACA's retained key and contains only that IACA's DS when the existing
+revocation snapshot marks it `revoked`. A snapshot must contain an explicit
+`good` or `revoked` entry for that DS and remain within its `this_update` /
+`next_update` interval; missing, stale, or mismatched private-key material makes
+the CRL unavailable rather than returning an empty success response. Preserve
+the snapshot's revocation entries when updating it, and advance `this_update`
+on every change; this timestamp also identifies the CRL revision. Each private IACA PEM record
+also retains its DS and CA certificates, so rotation preserves the old CRL URL
+and its signer. Keep these records for the lifetime of the issued credentials.
 
 ## Derived settings
 

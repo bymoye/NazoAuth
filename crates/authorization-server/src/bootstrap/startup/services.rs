@@ -74,6 +74,9 @@ impl ServiceAssembly {
             &mut extensions,
             web::Data::new(startup.settings.tenant.context),
         );
+        if let Some(source) = crate::keyctl::MdocCrlSource::from_settings(&startup.settings) {
+            insert(&mut extensions, web::Data::new(source));
+        }
         insert(
             &mut extensions,
             identity.runtime_module_admin_endpoint.clone(),
