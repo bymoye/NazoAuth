@@ -717,6 +717,23 @@ async fn mdoc_signing_covers_holder_and_namespace_encoding_errors() {
 }
 
 #[tokio::test]
+async fn mdoc_signing_skips_mdl_country_validation_for_other_document_types() {
+    let (holder_jwk, _) = es256_jwk(34);
+    let (crypto, _, key_dir, _) = real_crypto_fixture().await;
+    let mut input = mdoc_input(
+        Some(HolderBinding::Jwk { jwk: holder_jwk }),
+        json!({"example.namespace": {"value": "accepted"}}),
+    );
+    input.payload.credential_type = "org.example.other".to_owned();
+    let encoded = crypto
+        .sign(&input)
+        .await
+        .expect("non-mDL document should not require an mDL issuing country");
+    assert!(!encoded.is_empty());
+    let _ = std::fs::remove_dir_all(key_dir);
+}
+
+#[tokio::test]
 async fn mdoc_signing_requires_the_issuing_country_from_the_leaf_certificate() {
     let (holder_jwk, _) = es256_jwk(36);
     let (crypto, _, key_dir, _) = real_crypto_fixture().await;
