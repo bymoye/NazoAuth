@@ -6,7 +6,7 @@ use nazo_persistence::{SecurityAuditExporter, SecurityAuditOutboxDelivery};
 
 use super::{
     AuditAnchorWorkerConfig,
-    status::{AnchorCheckpoint, read_health_optional, write_health},
+    status::AnchorCheckpoint,
     transport::{send_checkpoint, send_genesis_checkpoint},
 };
 
@@ -48,18 +48,7 @@ where
         "starting independent audit anchor worker"
     );
 
-    let mut last_anchored = match read_health_optional(&config.preflight.status_file).await {
-        Ok(Some(health)) => AnchorCheckpoint::from_health(&health),
-        Ok(None) => None,
-        Err(error) => {
-            tracing::warn!(
-                target: "audit.anchor",
-                error_kind = %error_kind(&error),
-                "existing audit anchor health could not be read; genesis will be retried idempotently"
-            );
-            None
-        }
-    };
+    let mut last_anchored = None;
 
     loop {
         match run_iteration(&repository, &client, &config, &mut last_anchored).await {
@@ -92,6 +81,14 @@ pub(super) async fn run_iteration<R: AuditAnchorRepository + ?Sized>(
         }
     };
 
+    if let Err(error) = repository
+        .observe_anchor(&config.preflight.deployment_id)
+        .await
+    {
+        tracing::warn!(target: "audit.anchor", error_kind = %error_kind(&error), "audit anchor observation could not be persisted");
+        return IterationOutcome::Retry(retry_delay(1));
+    }
+
     if let Some(exported) = AnchorCheckpoint::from_snapshot(&snapshot) {
         *last_anchored = Some(exported);
     } else if snapshot.head_sequence == 0 {
@@ -101,7 +98,16 @@ pub(super) async fn run_iteration<R: AuditAnchorRepository + ?Sized>(
             .is_some_and(|checkpoint| checkpoint.sequence == 0 && checkpoint.hash == expected_hash);
         if !genesis_is_current {
             match send_genesis_checkpoint(client, config, &snapshot.head_hash).await {
-                Ok(checkpoint) => *last_anchored = Some(checkpoint),
+                Ok(checkpoint) => {
+                    if let Err(error) = repository
+                        .record_genesis(&config.preflight.deployment_id, &snapshot.head_hash)
+                        .await
+                    {
+                        tracing::warn!(target: "audit.anchor", error_kind = %error_kind(&error), "audit anchor genesis acknowledgement could not be persisted");
+                        return IterationOutcome::Retry(retry_delay(1));
+                    }
+                    *last_anchored = Some(checkpoint);
+                }
                 Err(error) => {
                     tracing::warn!(
                         target: "audit.anchor",
@@ -112,21 +118,6 @@ pub(super) async fn run_iteration<R: AuditAnchorRepository + ?Sized>(
                 }
             }
         }
-    }
-
-    if let Err(error) = write_health(
-        &config.preflight,
-        &snapshot,
-        last_anchored.as_ref(),
-        Utc::now(),
-    )
-    .await
-    {
-        tracing::error!(
-            target: "audit.anchor",
-            error_kind = %error_kind(&error),
-            "failed to publish audit anchor health"
-        );
     }
 
     let deliveries = match repository
@@ -150,7 +141,11 @@ pub(super) async fn run_iteration<R: AuditAnchorRepository + ?Sized>(
     for (index, delivery) in deliveries.iter().enumerate() {
         match send_checkpoint(client, config, delivery).await {
             Ok(()) => match repository
-                .mark_exported(delivery.event_id, delivery.attempts)
+                .mark_exported(
+                    delivery.event_id,
+                    delivery.attempts,
+                    &config.preflight.deployment_id,
+                )
                 .await
             {
                 Ok(()) => {

@@ -974,7 +974,6 @@ fn canonical_config_keys_are_locked_to_the_reviewed_baseline() {
             "AUDIT_ANCHOR_MODE",
             "AUDIT_ANCHOR_POLL_INTERVAL_SECONDS",
             "AUDIT_ANCHOR_REQUEST_TIMEOUT_SECONDS",
-            "AUDIT_ANCHOR_STATUS_FILE",
             "AUDIT_ANCHOR_TOKEN",
             "AUDIT_ANCHOR_TOKEN_FILE",
             "AUDIT_ANCHOR_URL",

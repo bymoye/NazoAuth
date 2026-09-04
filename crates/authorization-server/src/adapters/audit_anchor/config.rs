@@ -1,7 +1,4 @@
-use std::{
-    path::{Path, PathBuf},
-    time::Duration,
-};
+use std::time::Duration;
 
 use anyhow::bail;
 use url::Url;
@@ -42,7 +39,6 @@ impl AuditAnchorMode {
 pub(crate) struct AuditAnchorPreflightConfig {
     pub(crate) mode: AuditAnchorMode,
     pub(crate) deployment_id: String,
-    pub(crate) status_file: PathBuf,
     pub(crate) freshness: Duration,
     pub(crate) max_lag: Duration,
 }
@@ -50,9 +46,6 @@ pub(crate) struct AuditAnchorPreflightConfig {
 impl AuditAnchorPreflightConfig {
     pub(crate) fn validate(&self) -> anyhow::Result<()> {
         validate_deployment_id(&self.deployment_id)?;
-        if self.status_file.as_os_str().is_empty() {
-            bail!("AUDIT_ANCHOR_STATUS_FILE must not be empty");
-        }
         if self.mode.is_enabled() && self.freshness.is_zero() {
             bail!("AUDIT_ANCHOR_FRESHNESS_SECONDS must be greater than zero");
         }
@@ -111,7 +104,6 @@ impl AuditAnchorWorkerConfig {
 
 pub(crate) fn preflight_config_from_source(
     source: &ConfigSource,
-    data_dir: &Path,
 ) -> anyhow::Result<AuditAnchorPreflightConfig> {
     let mode = AuditAnchorMode::parse(&source.string("AUDIT_ANCHOR_MODE", "disabled"))?;
     let deployment_id = if mode.is_enabled() {
@@ -122,11 +114,6 @@ pub(crate) fn preflight_config_from_source(
     let config = AuditAnchorPreflightConfig {
         mode,
         deployment_id,
-        status_file: source
-            .optional_string("AUDIT_ANCHOR_STATUS_FILE")
-            .map(|_| source.persistent_path("AUDIT_ANCHOR_STATUS_FILE", None))
-            .transpose()?
-            .unwrap_or_else(|| data_dir.join("instance/audit-anchor-health.json")),
         freshness: Duration::from_secs(source.parse("AUDIT_ANCHOR_FRESHNESS_SECONDS", 120_u64)?),
         max_lag: Duration::from_secs(source.parse("AUDIT_ANCHOR_MAX_LAG_SECONDS", 300_u64)?),
     };
@@ -137,8 +124,7 @@ pub(crate) fn preflight_config_from_source(
 pub(crate) fn worker_config_from_source(
     source: &ConfigSource,
 ) -> anyhow::Result<(String, usize, AuditAnchorWorkerConfig)> {
-    let data_dir = source.persistent_path("DATA_DIR", Some(crate::config::DEFAULT_DATA_DIR))?;
-    let preflight = preflight_config_from_source(source, &data_dir)?;
+    let preflight = preflight_config_from_source(source)?;
     let endpoint = Url::parse(&source.required_string("AUDIT_ANCHOR_URL")?)
         .map_err(|_| anyhow::anyhow!("AUDIT_ANCHOR_URL must be a valid absolute URL"))?;
     let config = AuditAnchorWorkerConfig {

@@ -5,6 +5,6 @@
   "database_restore": "backup",
   "irreversible_migration": true,
   "minimum_supported_version": "0.2.11",
-  "migration_floor": "20260904000100",
-  "rationale": "Protocol v3 and migrations through 20260904000100 include authoritative encrypted tenant signing keysets. Earlier releases use local signing-key files and cannot preserve the current key authority or the tenant avatar storage layout. Recovery to an earlier release requires the controller-verified pre-update database and storage backup with the matching signing-key wrapping root; artifact-only rollback is forbidden."
+  "migration_floor": "20260905000100",
+  "rationale": "Migrations through 20260905000100 persist managed tenant signing material and external audit-anchor checkpoints in shared database state. Earlier releases depend on instance-local signing or audit health files and cannot preserve current authority semantics. Recovery requires the controller-verified pre-update database and storage backup with matching signing-key wrapping root; artifact-only rollback is forbidden."
 }

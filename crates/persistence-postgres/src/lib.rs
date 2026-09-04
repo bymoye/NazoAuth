@@ -126,6 +126,15 @@ impl nazo_persistence::SecurityAuditLedger for AuditLedgerRepository {
         })
     }
 
+    fn anchor_health(
+        &self,
+    ) -> futures_util::future::BoxFuture<
+        '_,
+        Result<nazo_persistence::SecurityAuditAnchorHealth, nazo_identity::ports::RepositoryError>,
+    > {
+        Box::pin(async move { AuditLedgerRepository::anchor_health(self).await })
+    }
+
     fn append(
         &self,
         event: nazo_persistence::SecurityAuditEvent,
@@ -180,7 +189,28 @@ impl nazo_persistence::SecurityAuditExporter for AuditLedgerRepository {
                     last_exported_hash: health.last_exported_hash,
                     last_exported_occurred_at: health.last_exported_occurred_at,
                     last_exported_at: health.last_exported_at,
+                    deployment_id: health.deployment_id,
+                    observed_at: health.observed_at,
                 })
+        })
+    }
+
+    fn observe_anchor<'a>(
+        &'a self,
+        deployment_id: &'a str,
+    ) -> futures_util::future::BoxFuture<'a, Result<(), nazo_identity::ports::RepositoryError>>
+    {
+        Box::pin(async move { AuditLedgerRepository::observe_anchor(self, deployment_id).await })
+    }
+
+    fn record_genesis<'a>(
+        &'a self,
+        deployment_id: &'a str,
+        head_hash: &'a [u8],
+    ) -> futures_util::future::BoxFuture<'a, Result<(), nazo_identity::ports::RepositoryError>>
+    {
+        Box::pin(async move {
+            AuditLedgerRepository::record_genesis(self, deployment_id, head_hash).await
         })
     }
 
@@ -217,14 +247,16 @@ impl nazo_persistence::SecurityAuditExporter for AuditLedgerRepository {
         })
     }
 
-    fn mark_exported(
-        &self,
+    fn mark_exported<'a>(
+        &'a self,
         event_id: uuid::Uuid,
         expected_attempts: i32,
-    ) -> futures_util::future::BoxFuture<'_, Result<(), nazo_identity::ports::RepositoryError>>
+        deployment_id: &'a str,
+    ) -> futures_util::future::BoxFuture<'a, Result<(), nazo_identity::ports::RepositoryError>>
     {
         Box::pin(async move {
-            AuditLedgerRepository::mark_exported(self, event_id, expected_attempts).await
+            AuditLedgerRepository::mark_exported(self, event_id, expected_attempts, deployment_id)
+                .await
         })
     }
 

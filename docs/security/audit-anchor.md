@@ -34,16 +34,7 @@ Transport and non-success responses are rescheduled with bounded exponential
 backoff.  The response body is never logged, and the HMAC secret is never
 included in logs or the checkpoint.
 
-The worker atomically writes `AUDIT_ANCHOR_STATUS_FILE` with schema
-`nazo.audit.anchor.health.v1`.  It records the observed ledger head, pending
-outbox count, oldest pending event, last anchored sequence/hash, observation
-time, and delivery lag.  In `AUDIT_ANCHOR_MODE=required`, high-impact
-management preflight fails closed unless the status is recent, has no pending
-outbox entries, and the recorded last anchor equals the observed ledger head.
-The server also reads the current head through its writer-only database API and
-requires an exact match, so a stale-but-recent status file cannot hide a newer
-pending event. An empty ledger is represented by a signed, externally accepted
-genesis checkpoint before required mode becomes ready.
+The worker records its observation and every externally accepted checkpoint in the shared audit chain state. Event acknowledgement and checkpoint advancement are one database operation. In `AUDIT_ANCHOR_MODE=required`, high-impact management preflight reads that shared state and fails closed unless the worker observation is recent, no outbox entries are pending, and the accepted checkpoint exactly equals the current ledger head. An empty ledger records its signed, externally accepted genesis checkpoint before required mode becomes ready. No instance-local health file is used.
 `optional` records health without blocking; `disabled` is an explicit
 development setting and provides no protection against a privileged local
 attacker.
@@ -63,12 +54,11 @@ Recommended production separation:
   application DML, and grants only ledger append/check-availability functions;
 * give the worker exporter role only outbox claim/ack/health rights;
 * provide the worker `AUDIT_ANCHOR_DATABASE_URL` and `AUDIT_ANCHOR_TOKEN` (or
-  its secret-file form), while the server receives only the preflight status
-  path and deployment identity;
+  its secret-file form), while the server receives only the deployment identity;
 * protect the HTTPS receiver with append-only/WORM retention and verify its
   idempotency behavior independently.
 
-This repository contains the worker protocol and local health/preflight logic;
+This repository contains the worker protocol and shared database preflight logic;
 it does not prove a deployed receiver's WORM guarantees, cross-host
 availability, or real external acceptance.  Those require a deployment-level
 probe and an independent receiver audit.
@@ -79,7 +69,7 @@ function grants. Those are database-wide trust decisions and are not silently
 changed by an application migration.
 
 Worker configuration also includes `AUDIT_ANCHOR_MODE`, `DEPLOYMENT_ID`,
-`AUDIT_ANCHOR_URL`, `AUDIT_ANCHOR_STATUS_FILE`, polling/request/freshness/lag
+`AUDIT_ANCHOR_URL`, polling/request/freshness/lag
 durations, bounded batch size, a positive lock timeout, and an optional
 `AUDIT_ANCHOR_DATABASE_MAX_CONNECTIONS`. The server must never receive the
 worker database URL or sink token.
