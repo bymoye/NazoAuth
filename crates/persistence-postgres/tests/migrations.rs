@@ -784,6 +784,27 @@ async fn pending_migrations_create_all_runtime_module_state_tables() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pending_migrations_create_tenant_scoped_signing_keyset_storage() {
+    let Some(database_url) = database_url() else {
+        return;
+    };
+    nazo_postgres::run_pending_migrations(&database_url)
+        .await
+        .expect("pending migrations should apply");
+    let mut connection = AsyncPgConnection::establish(&database_url)
+        .await
+        .expect("test database should connect");
+    let tables = sql_query(
+        "SELECT table_name FROM information_schema.tables \
+         WHERE table_schema = current_schema() AND table_name = 'tenant_signing_keysets'",
+    )
+    .load::<RuntimeTable>(&mut connection)
+    .await
+    .expect("signing-key table catalog should be readable");
+    assert_eq!(tables.len(), 1, "keysets must be database-authoritative");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn runtime_module_state_migration_enforces_catalogs_and_round_trips() {
     let Some(database_url) = database_url() else {
         return;
