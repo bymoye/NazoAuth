@@ -266,7 +266,6 @@ async fn run_avatar_flow(config: TestConfig) {
         .begin_upload(&account_a, original.len())
         .await
         .expect("instance A should authorize the upload");
-    println!("avatar integration upload={}", start.upload_id);
     browser_put(&start.target, &original)
         .await
         .expect("browser should PUT the image directly to MinIO");
@@ -287,7 +286,6 @@ async fn run_avatar_flow(config: TestConfig) {
         .clone()
         .expect("final avatar URL should be persisted");
     assert!(final_url.starts_with("/auth/me/avatar?v="));
-    println!("avatar integration final={final_url}");
     let read_b = service_b
         .read(&completed_b.account)
         .await

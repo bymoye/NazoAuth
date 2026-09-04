@@ -23,10 +23,6 @@ async fn minio_presigned_put_publishes_an_immutable_candidate() {
     let upload_id = Uuid::now_v7().to_string();
     let final_id = format!("final-{upload_id}");
     let conflicting_final_id = format!("conflict-{upload_id}");
-    println!(
-        "avatar S3 integration tenant={} upload={upload_id}",
-        tenant_id.as_uuid()
-    );
     let original = STANDARD
         .decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==")
         .expect("valid PNG fixture");

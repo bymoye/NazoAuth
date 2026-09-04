@@ -132,7 +132,11 @@ relaying image bytes. The signed requests include the S3 payload-checksum
 header; successful copies drain the response and verify the destination before
 the database can select it. R2 also exposed a failure with the previous
 library-generated DELETE request, while an independently signed DELETE worked;
-the same official signing path now handles both empty-body operations.
+the same official signing path now handles every S3 operation. Before release,
+`rust-s3 was removed because its quick-xml dependency was affected by
+`RUSTSEC-2026-0194 and RUSTSEC-2026-0195. The adapter uses reqwest with the
+`official AWS signer for presigned PUT, HEAD, GET, COPY and DELETE. No advisory
+`exception or third-party XML parser is required.
 See the [upstream signing implementation](https://github.com/durch/rust-s3/blob/master/s3/src/signing.rs)
 and [CopyObject contract](https://docs.aws.amazon.com/AmazonS3/latest/API/API_CopyObject.html).
 

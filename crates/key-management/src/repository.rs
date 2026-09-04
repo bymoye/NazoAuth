@@ -1,6 +1,5 @@
 use std::{fmt, future::Future, pin::Pin};
 
-use rand::Rng as _;
 use uuid::Uuid;
 
 pub type SigningKeyRepositoryFuture<'a, T> =
@@ -141,8 +140,7 @@ impl SigningKeyWrappingKeyRing {
         purpose: &str,
         plaintext: &[u8],
     ) -> anyhow::Result<SealedKeyMaterial> {
-        let mut nonce = [0_u8; 12];
-        rand::rng().fill_bytes(&mut nonce);
+        let nonce: [u8; 12] = rand::random();
         Ok(SealedKeyMaterial {
             wrapping_key_id: self.current.id.clone(),
             nonce,
@@ -204,8 +202,7 @@ impl SigningKeyWrappingKeyRing {
     }
 
     fn seal_with_aad(&self, plaintext: &[u8], aad: Vec<u8>) -> anyhow::Result<SealedKeyMaterial> {
-        let mut nonce = [0_u8; 12];
-        rand::rng().fill_bytes(&mut nonce);
+        let nonce: [u8; 12] = rand::random();
         Ok(SealedKeyMaterial {
             wrapping_key_id: self.current.id.clone(),
             nonce,

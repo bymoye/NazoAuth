@@ -7,7 +7,7 @@
 The authorization server owns authenticated HTTP endpoints and injects those ports.
 It does not parse S3 settings or depend on an S3 SDK.
 
-`nazo-oauth-server-object-store` implements the direct-object port with `rust-s3` and the official AWS SigV4 signer for conditional copies and deletes.
+`nazo-oauth-server-object-store` implements the direct-object port with `reqwest` and the official AWS SigV4 signer for all S3 operations.
 Its launcher contributes concrete configuration through the generic configuration
 extension and is selected in the executable composition root. Another storage
 protocol can implement the same capabilities without changing the avatar service.

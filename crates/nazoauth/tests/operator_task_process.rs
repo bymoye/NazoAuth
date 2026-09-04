@@ -692,12 +692,7 @@ async fn keys_family_runs_through_the_real_engine_and_journals_the_outcome() {
     );
     assert_success(&first);
     let result = decode_control_result(&first.stdout).unwrap();
-    assert_eq!(
-        result.outcome,
-        ControlOutcome::Succeeded,
-        "result: {result:?}; stderr: {}",
-        String::from_utf8_lossy(&first.stderr)
-    );
+    assert_eq!(result.outcome, ControlOutcome::Succeeded);
     assert!(!root.join("keys").exists());
     let mut connection = AsyncPgConnection::establish(&database_url)
         .await
