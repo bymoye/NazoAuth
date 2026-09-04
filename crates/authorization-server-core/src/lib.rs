@@ -27,6 +27,7 @@ mod metadata;
 mod oauth_parameters;
 mod oidc_logout;
 mod profile;
+mod rate_limit;
 mod resource_indicator;
 mod sender_constraint;
 mod session_management;
@@ -88,8 +89,8 @@ pub use ciba::{
     CibaDecision, CibaDecisionEvaluation, CibaDecisionFailure, CibaPingNotification,
     CibaPingNotificationStatus, CibaPollCommit, CibaPollFailure, CibaPollTransition,
     CibaRequestState, CibaService, CibaStateFuture, CibaStatePortError, CibaStateStorePort,
-    CibaStatus, CibaStoredRequest, ciba_retention_deadline, evaluate_ciba_decision,
-    evaluate_ciba_poll,
+    CibaStateVersion, CibaStatus, CibaStoredRequest, ciba_retention_deadline,
+    evaluate_ciba_decision, evaluate_ciba_poll,
 };
 pub use ciba_ping::{
     CibaPingResponseAction, MAX_CIBA_LOGOUT_URI_BYTES, classify_ciba_ping_status,
@@ -130,7 +131,7 @@ pub use device::{
     DeviceAuthorizationState, DeviceCreateFailure, DeviceCreateResult, DeviceDecisionFailure,
     DeviceGrantFuture, DeviceGrantPortError, DeviceGrantRepositoryPort, DeviceGrantService,
     DeviceGrantWrite, DevicePollCommit, DevicePollFailure, DevicePollTransition, DeviceStateFuture,
-    DeviceStatePortError, DeviceStateStorePort, StoredDeviceAuthorization,
+    DeviceStatePortError, DeviceStateStorePort, DeviceStateVersion, StoredDeviceAuthorization,
     device_authorization_payload, device_authorization_request_payload, evaluate_device_poll,
 };
 pub use dpop::{
@@ -182,6 +183,9 @@ pub use oidc_logout::{
     validate_post_logout_redirect,
 };
 pub use profile::SecurityProfile;
+pub use rate_limit::{
+    RequestRateLimitBucket, RequestRateLimitError, RequestRateLimitFuture, RequestRateLimitPort,
+};
 pub use resource_indicator::{
     ResourceIndicatorError, encode_resource_indicators, parse_resource_indicator_parameter,
     parse_resource_indicators,

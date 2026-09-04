@@ -463,6 +463,125 @@ impl UserRepository {
         .await
         .map_err(AdminAuthorizedUpdateError::into_repository)
     }
+
+    pub async fn set_tenant_admin_authorized(
+        &self,
+        control_tenant_id: TenantId,
+        actor_id: UserId,
+        target_tenant_id: TenantId,
+        target_id: UserId,
+        admin_level: i32,
+    ) -> Result<AdminUserUpdateOutcome, RepositoryError> {
+        if admin_level < 0 || control_tenant_id == target_tenant_id {
+            return Ok(AdminUserUpdateOutcome::Denied(
+                AdminPolicyError::InvalidRoleLevel,
+            ));
+        }
+        let mut connection = self
+            .pool
+            .get()
+            .await
+            .map_err(|_| RepositoryError::Unavailable)?;
+        diesel_async::AsyncConnection::transaction::<_, AdminAuthorizedUpdateError, _>(
+            &mut connection,
+            async move |connection| {
+                let accounts = users::table
+                    .filter(users::id.eq_any([actor_id.as_uuid(), target_id.as_uuid()]))
+                    .order(users::id.asc())
+                    .select(PublicAccountRow::as_select())
+                    .for_update()
+                    .load::<PublicAccountRow>(connection)
+                    .await?
+                    .into_iter()
+                    .map(PublicAccount::try_from)
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|error| AdminAuthorizedUpdateError::Consistency(error.0))?;
+                let actor = accounts
+                    .iter()
+                    .find(|account| account.id() == actor_id.as_uuid());
+                let authorized = actor.is_some_and(|actor| {
+                    actor.tenant().tenant_id == control_tenant_id
+                        && actor.principal.active
+                        && actor
+                            .principal
+                            .admin_level()
+                            .is_some_and(|level| level >= 2)
+                });
+                if !authorized {
+                    let persisted_actor = actor.map(|_| actor_id);
+                    insert_identity_security_event(
+                        connection,
+                        &admin_event(
+                            control_tenant_id,
+                            persisted_actor,
+                            Some(target_id),
+                            IdentitySecurityOutcome::Denied,
+                            IdentitySecurityReason::ActorNotAuthorized,
+                        ),
+                    )
+                    .await
+                    .map_err(AdminAuthorizedUpdateError::Repository)?;
+                    return Ok(AdminUserUpdateOutcome::Denied(
+                        AdminPolicyError::ActorNotAuthorized,
+                    ));
+                }
+                let Some(target) = accounts.iter().find(|account| {
+                    account.id() == target_id.as_uuid()
+                        && account.tenant().tenant_id == target_tenant_id
+                }) else {
+                    insert_identity_security_event(
+                        connection,
+                        &admin_event(
+                            target_tenant_id,
+                            Some(actor_id),
+                            None,
+                            IdentitySecurityOutcome::Denied,
+                            IdentitySecurityReason::TargetNotFound,
+                        ),
+                    )
+                    .await
+                    .map_err(AdminAuthorizedUpdateError::Repository)?;
+                    return Ok(AdminUserUpdateOutcome::TargetNotFound);
+                };
+                let (role, level) = if admin_level == 0 {
+                    ("user", 0)
+                } else {
+                    ("admin", admin_level)
+                };
+                let updated = diesel::update(
+                    users::table
+                        .filter(users::id.eq(target.id()))
+                        .filter(users::tenant_id.eq(target_tenant_id.as_uuid())),
+                )
+                .set((
+                    users::role.eq(role),
+                    users::admin_level.eq(level),
+                    users::updated_at.eq(diesel::dsl::now),
+                ))
+                .returning(PublicAccountRow::as_returning())
+                .get_result::<PublicAccountRow>(connection)
+                .await?;
+                insert_identity_security_event(
+                    connection,
+                    &admin_event(
+                        target_tenant_id,
+                        Some(actor_id),
+                        Some(target_id),
+                        IdentitySecurityOutcome::Success,
+                        IdentitySecurityReason::AdminUpdated,
+                    ),
+                )
+                .await
+                .map_err(AdminAuthorizedUpdateError::Repository)?;
+                Ok(AdminUserUpdateOutcome::Updated(Box::new(
+                    PublicAccount::try_from(updated)
+                        .map_err(|error| AdminAuthorizedUpdateError::Consistency(error.0))?,
+                )))
+            },
+        )
+        .await
+        .map_err(AdminAuthorizedUpdateError::into_repository)
+    }
     pub async fn subject_claims_by_id(
         &self,
         tenant: TenantContext,
@@ -725,6 +844,27 @@ impl nazo_identity::ports::AdminUserRepositoryPort for UserRepository {
                 .await
         })
     }
+
+    fn set_tenant_admin_authorized(
+        &self,
+        control_tenant_id: nazo_identity::TenantId,
+        actor_id: nazo_identity::UserId,
+        target_tenant_id: nazo_identity::TenantId,
+        target_id: nazo_identity::UserId,
+        admin_level: i32,
+    ) -> nazo_identity::ports::RepositoryFuture<'_, nazo_identity::AdminUserUpdateOutcome> {
+        Box::pin(async move {
+            UserRepository::set_tenant_admin_authorized(
+                self,
+                control_tenant_id,
+                actor_id,
+                target_tenant_id,
+                target_id,
+                admin_level,
+            )
+            .await
+        })
+    }
 }
 
 impl nazo_identity::ports::ProfileRepositoryPort for UserRepository {
@@ -812,6 +952,46 @@ impl nazo_identity::ports::SessionAccountPort for UserRepository {
         Box::pin(
             async move { UserRepository::public_account_by_id(self, tenant_id, user_id).await },
         )
+    }
+}
+
+impl nazo_persistence::CibaAccountStore for UserRepository {
+    fn by_email<'a>(
+        &'a self,
+        tenant_id: nazo_identity::TenantId,
+        email: &'a str,
+    ) -> futures_util::future::BoxFuture<
+        'a,
+        Result<Option<nazo_identity::PublicAccount>, nazo_identity::ports::RepositoryError>,
+    > {
+        Box::pin(
+            async move { UserRepository::public_account_by_email(self, tenant_id, email).await },
+        )
+    }
+
+    fn by_id(
+        &self,
+        tenant_id: nazo_identity::TenantId,
+        user_id: nazo_identity::UserId,
+    ) -> futures_util::future::BoxFuture<
+        '_,
+        Result<Option<nazo_identity::PublicAccount>, nazo_identity::ports::RepositoryError>,
+    > {
+        Box::pin(
+            async move { UserRepository::public_account_by_id(self, tenant_id, user_id).await },
+        )
+    }
+}
+
+impl nazo_persistence::Openid4vcSubjectStore for UserRepository {
+    fn is_active(
+        &self,
+        tenant_id: TenantId,
+        subject_id: UserId,
+    ) -> futures_util::future::BoxFuture<'_, Result<bool, RepositoryError>> {
+        Box::pin(async move {
+            UserRepository::is_active_by_tenant_id(self, tenant_id, subject_id).await
+        })
     }
 }
 

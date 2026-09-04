@@ -458,6 +458,54 @@ impl nazo_identity::ports::AccessRequestRepositoryPort for AccessRequestReposito
     }
 }
 
+impl nazo_persistence::AdminAccessRequestStore for AccessRequestRepository {
+    fn page<'a>(
+        &'a self,
+        tenant_id: TenantId,
+        limit: i64,
+        offset: i64,
+        search: Option<&'a str>,
+        status: Option<AccessRequestStatus>,
+    ) -> futures_util::future::BoxFuture<'a, Result<AccessRequestPage, RepositoryError>> {
+        Box::pin(async move {
+            AccessRequestRepository::page(self, tenant_id, limit, offset, search, status).await
+        })
+    }
+
+    fn by_id(
+        &self,
+        tenant_id: TenantId,
+        id: Uuid,
+    ) -> futures_util::future::BoxFuture<'_, Result<Option<AccessRequest>, RepositoryError>> {
+        Box::pin(async move { AccessRequestRepository::by_id(self, tenant_id, id).await })
+    }
+
+    fn approve<'a>(
+        &'a self,
+        tenant: nazo_identity::TenantContext,
+        request_id: Uuid,
+        actor_user_id: UserId,
+        client: &'a PreparedClientRegistration,
+    ) -> futures_util::future::BoxFuture<'a, Result<ApprovedClient, RepositoryError>> {
+        Box::pin(async move {
+            AccessRequestRepository::approve(self, tenant, request_id, actor_user_id, client).await
+        })
+    }
+
+    fn reject(
+        &self,
+        tenant_id: TenantId,
+        request_id: Uuid,
+        actor_user_id: UserId,
+        admin_note: String,
+    ) -> futures_util::future::BoxFuture<'_, Result<(), RepositoryError>> {
+        Box::pin(async move {
+            AccessRequestRepository::reject(self, tenant_id, request_id, actor_user_id, admin_note)
+                .await
+        })
+    }
+}
+
 pub(crate) async fn insert_client(
     connection: &mut diesel_async::AsyncPgConnection,
     tenant: nazo_identity::TenantContext,

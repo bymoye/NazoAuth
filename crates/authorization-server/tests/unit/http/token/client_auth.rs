@@ -26,7 +26,7 @@ pub(crate) async fn verify_confidential_client(
             state.diesel_db.clone(),
             crate::domain::tenancy::DEFAULT_TENANT_ID,
         ),
-        nazo_valkey::AuthorizationStateAdapter::new(&connection),
+        std::sync::Arc::new(nazo_valkey::AuthorizationStateAdapter::new(&connection)),
         state.keyset.clone(),
     );
     let result = authenticate_client_with_dependencies(
@@ -69,7 +69,7 @@ pub(crate) async fn consume_token_client_assertion(
             state.diesel_db.clone(),
             crate::domain::tenancy::DEFAULT_TENANT_ID,
         ),
-        nazo_valkey::AuthorizationStateAdapter::new(&connection),
+        std::sync::Arc::new(nazo_valkey::AuthorizationStateAdapter::new(&connection)),
         state.keyset.clone(),
     );
     consume_token_client_assertion_with_authorization_service(&service, client, Some(assertion))

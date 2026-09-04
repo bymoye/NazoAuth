@@ -115,6 +115,52 @@ pub trait FederationStatePort: Send + Sync {
     ) -> RepositoryFuture<'a, bool>;
 }
 
+impl<T> FederationStatePort for std::sync::Arc<T>
+where
+    T: FederationStatePort + ?Sized,
+{
+    fn store_oidc<'a>(
+        &'a self,
+        state: &'a str,
+        value: &'a crate::federation::OidcFederationState,
+        ttl_seconds: u64,
+    ) -> RepositoryFuture<'a, ()> {
+        self.as_ref().store_oidc(state, value, ttl_seconds)
+    }
+
+    fn take_oidc<'a>(
+        &'a self,
+        state: &'a str,
+    ) -> RepositoryFuture<'a, Option<crate::federation::OidcFederationState>> {
+        self.as_ref().take_oidc(state)
+    }
+
+    fn store_social<'a>(
+        &'a self,
+        state: &'a str,
+        value: &'a crate::federation::SocialFederationState,
+        ttl_seconds: u64,
+    ) -> RepositoryFuture<'a, ()> {
+        self.as_ref().store_social(state, value, ttl_seconds)
+    }
+
+    fn take_social<'a>(
+        &'a self,
+        state: &'a str,
+    ) -> RepositoryFuture<'a, Option<crate::federation::SocialFederationState>> {
+        self.as_ref().take_social(state)
+    }
+
+    fn reserve_saml_replay<'a>(
+        &'a self,
+        assertion_signature: &'a str,
+        ttl_seconds: u64,
+    ) -> RepositoryFuture<'a, bool> {
+        self.as_ref()
+            .reserve_saml_replay(assertion_signature, ttl_seconds)
+    }
+}
+
 pub trait FederationPasswordHasherPort: Send + Sync {
     fn hash_bootstrap_secret(&self) -> RepositoryFuture<'_, PasswordHashInput>;
 }

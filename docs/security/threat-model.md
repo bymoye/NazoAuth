@@ -21,7 +21,7 @@ token format, or expands discovery metadata.
 - Valkey transient security state
 - Discovery metadata
 - Audit logs
-- Signed Release manifests, artifact and OCI digests, and embedded build identity
+- Signed Release manifests and artifact/OCI content digests
 - Registered deployment Controller keys and the independent Recovery Secret
 - Signed ControlOperation requests, application journals, typed outcomes, and security audit events
 - Database backups and recovery metadata
@@ -37,8 +37,8 @@ token format, or expands discovery metadata.
 | App to PostgreSQL | Application process | Database network and operators outside least privilege | credentials, network isolation, backups, migration controls |
 | App to Valkey | Application process | Cache network and cache data loss | fail-closed replay/rate/session behavior |
 | AS to resource server | Resource server verifier | Token replay and wrong-audience use | issuer/audience/cnf validation, revocation or introspection fallback |
-| Host operator to target runtime | Root-owned `nazoauthctl` and registered deployment identity | Malicious local user, stale controller, wrong image/binary, replayed task | exact Release verification, actual OCI/binary digest, signed canonical ControlOperation on stdin, embedded identity check, exact operation-id/request-hash journal |
-| `nazoauthctl` to container engine | Reviewed typed lifecycle operations | Compromised daemon, mutable image name, over-broad mounts/network | signed image digest/revision check, operation-specific mount/network profile, non-root/read-only task container, no engine socket in task |
+| Host operator to target runtime | Root-owned `nazoauthctl` and registered deployment identity | Malicious local user, stale controller, wrong image/binary, replayed task | exact Release verification, actual OCI/binary digest, signed canonical ControlOperation on stdin, exact operation-id/request-hash journal |
+| `nazoauthctl` to container engine | Reviewed typed lifecycle operations | Compromised daemon, mutable image name, over-broad mounts/network | signed image digest check, operation-specific mount/network profile, non-root/read-only task container, no engine socket in task |
 | `nazoauthctl` to host runtime | Root-owned config and verified binary | Untrusted service account and ambient host filesystem/network | actual binary digest, `systemd-run` transient unit, fixed user, protected filesystem, explicit read/write paths and address families |
 | Controller identity to application task | Active Controller Registry slot for the deployment | Forged/expired/wrong-deployment/wrong-target envelope and retired key | fixed EdDSA/typ/kid/schema, deployment and target binding, closed claims, first-admission key validity, exact replay claim before mutation |
 | Secret input to dependency/application | stdin/FD or root-owned secret mount | argv, ordinary environment, inspect, journal, audit and persisted JWS | secret-file/provider adapters, opaque revision or keyed HMAC binding, sanitized child errors |
@@ -64,7 +64,7 @@ token format, or expands discovery metadata.
 | PostgreSQL outage | Durable state unavailable | Protocol endpoints return server errors | HA guidance, backup/restore tests, migration rollback plan |
 | Metadata overclaim | Clients rely on unsupported security behavior | Discovery generated from runtime state for signing algs | Profile-aware metadata tests and conformance records |
 | Operator task replay or response loss | A retry repeats a migration or key mutation | exact operation-id/request-hash claim, application journal, typed durable result recovery | A resumed exact request returns its existing result and cannot start different work |
-| Target substitution | Signed request reaches a different artifact than the controller approved | ctl/runtime measures OCI image ID or host binary digest; app independently checks the ControlOperation target and embedded Release/build identity; the durable ControlResult binds the exact operation ID and request hash | The application does not claim that it can prove its own OCI digest |
+| Target substitution | Signed request reaches a different artifact than the controller approved | ctl/runtime measures OCI image digest or host binary digest; app checks the same ControlOperation content target; the durable ControlResult binds the exact operation ID and request hash | The application receives the OCI digest from the runtime boundary rather than deriving it from inside the container |
 | Secret leakage through orchestration | Database, Valkey or private-key material appears in process metadata or logs | secret stdin/FD/mount/provider only, path-valued `*_FILE` environment, allowlisted audit schemas, sanitized process failures | Host root and a compromised engine remain able to inspect mounted secrets |
 | Unsafe automatic rollback | Old code resumes against incompatible or irreversible schema | signed Release recovery policy distinguishes artifact rollback, schema-compatible rollback, backup/PITR restore and irreversible barrier | Database rollback is never described as automatic; `update --plan` states the actual boundary |
 | Controller key loss or theft | Operations become unavailable or attacker signs tasks | mutations stop when signing fails; Recovery Secret challenge atomically replaces the active Controller slot and Recovery Root; old Controller requests are rejected | If wider host/dependency compromise is suspected, rotate those independent credentials too |

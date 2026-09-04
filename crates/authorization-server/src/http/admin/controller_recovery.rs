@@ -14,6 +14,7 @@ use actix_web::web::{Data, Json};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::Utc;
 use nazo_http_actix::{json_response, oauth_error};
+use nazo_persistence::control_plane::RecoveryRootError;
 
 /// POST /controller-recovery/challenges
 ///
@@ -43,10 +44,9 @@ pub(crate) async fn controller_recovery_challenge(
 fn challenge_error_response(error: crate::recovery_root::RecoveryRootServiceError) -> HttpResponse {
     use crate::recovery_root::RecoveryRootServiceError as Error;
     match error {
-        Error::Root(
-            nazo_postgres::RecoveryRootError::RootMissing
-            | nazo_postgres::RecoveryRootError::InvalidAllocationProof,
-        ) => invalid_allocation_proof_response(),
+        Error::Root(RecoveryRootError::RootMissing | RecoveryRootError::InvalidAllocationProof) => {
+            invalid_allocation_proof_response()
+        }
         other => service_error_response(other),
     }
 }
@@ -103,8 +103,8 @@ fn service_error_response(error: crate::recovery_root::RecoveryRootServiceError)
     }
 }
 
-pub(super) fn root_error_response(error: nazo_postgres::RecoveryRootError) -> HttpResponse {
-    use nazo_postgres::RecoveryRootError as Error;
+pub(super) fn root_error_response(error: RecoveryRootError) -> HttpResponse {
+    use nazo_persistence::control_plane::RecoveryRootError as Error;
     match error {
         Error::ControllersStillAdmitted(admitted) => {
             let items: Vec<serde_json::Value> = admitted

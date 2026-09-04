@@ -51,12 +51,12 @@ fn materialize_ciba_response(response: HttpResponse) -> SendCibaResponse {
 
 struct CibaPollIssueRequest<'a, 'issuance> {
     ciba_service: &'a ServerCibaService,
-    users: &'a nazo_postgres::UserRepository,
+    users: &'a dyn nazo_persistence::CibaAccountStore,
     token_service: &'a ServerTokenService,
     issuance: &'a TokenIssuanceContext<'issuance>,
     client: &'a ClientRow,
     auth_req_id: &'a str,
-    initial: nazo_auth::CibaStoredRequest<nazo_valkey::StoredCibaRequest>,
+    initial: nazo_auth::CibaStoredRequest<nazo_auth::CibaStateVersion>,
     ciba_grant_key: String,
     dpop_jkt: Option<String>,
     mtls_x5t_s256: Option<String>,
@@ -233,7 +233,7 @@ async fn poll_and_issue_ciba(request: CibaPollIssueRequest<'_, '_>) -> SendCibaR
         ));
     };
     let user = match users
-        .public_account_by_id(
+        .by_id(
             nazo_identity::TenantId::new(tenant_id).expect("configured CIBA tenant ID is non-nil"),
             nazo_identity::UserId::new(ciba.user_id).expect("persisted CIBA user ID is non-nil"),
         )

@@ -7,15 +7,17 @@ use nazo_auth::{
     CibaPingResponseAction, classify_ciba_ping_status, next_ciba_ping_retry_at,
     validate_ciba_notification_endpoint,
 };
-use nazo_valkey::{CibaPingDelivery, CibaPingFinishOutcome, CibaPingFinishResult, CibaStore};
 use reqwest::{StatusCode, header};
 use serde_json::json;
 
 use super::{ciba_ping_tls::apply_ciba_ping_tls_policy, sector_identifier::is_blocked_ip};
+use crate::bootstrap::{
+    CibaPingDelivery, CibaPingDeliveryPort, CibaPingFinishOutcome, CibaPingFinishResult,
+};
 
 const DELIVERY_CONCURRENCY: usize = 8;
 // One claim is processed in a single concurrency wave.  Keeping the batch at
-// the concurrency limit ensures the 15-second Valkey claim lease covers the
+// the concurrency limit ensures the 15-second transient-state claim lease covers the
 // worst case request timeout instead of allowing a later wave to outlive it.
 const DELIVERY_BATCH_SIZE: usize = DELIVERY_CONCURRENCY;
 const DELIVERY_LOCK_SECONDS: i64 = 15;
@@ -23,13 +25,13 @@ const LOOP_INTERVAL: Duration = Duration::from_millis(500);
 
 #[derive(Clone)]
 pub(crate) struct CibaPingDeliveryWorker {
-    store: CibaStore,
+    store: Arc<dyn CibaPingDeliveryPort>,
     private_network_origins: Arc<HashSet<String>>,
 }
 
 impl CibaPingDeliveryWorker {
     pub(crate) fn new(
-        store: CibaStore,
+        store: Arc<dyn CibaPingDeliveryPort>,
         private_network_origins: &[String],
     ) -> anyhow::Result<Self> {
         let mut origins = HashSet::new();
@@ -56,7 +58,7 @@ impl CibaPingDeliveryWorker {
         let now = Utc::now().timestamp();
         let deliveries = self
             .store
-            .claim_due_ping(
+            .claim_due(
                 now,
                 now.saturating_add(DELIVERY_LOCK_SECONDS),
                 DELIVERY_BATCH_SIZE,
@@ -105,7 +107,7 @@ impl CibaPingDeliveryWorker {
         };
         let finish_result = self
             .store
-            .finish_ping(&delivery, outcome)
+            .finish(&delivery, outcome)
             .await
             .context("failed to record CIBA ping delivery outcome")?;
         match finish_result {
@@ -187,7 +189,9 @@ enum PingPostOutcome {
     Terminal(StatusCode),
 }
 
-pub(crate) fn spawn_ciba_ping_delivery_worker(worker: CibaPingDeliveryWorker) {
+pub(crate) fn spawn_ciba_ping_delivery_worker(
+    worker: CibaPingDeliveryWorker,
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         loop {
             if let Err(error) = worker.process_due_batch().await {
@@ -195,5 +199,5 @@ pub(crate) fn spawn_ciba_ping_delivery_worker(worker: CibaPingDeliveryWorker) {
             }
             tokio::time::sleep(LOOP_INTERVAL).await;
         }
-    });
+    })
 }

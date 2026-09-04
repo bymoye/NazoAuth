@@ -56,9 +56,9 @@ use crate::wire::{
 use crate::{MAX_COMPACT_JWS_BYTES, MAX_TENANT_RESOURCE_IDENTITIES, ProtocolError};
 
 /// Wire schema tag for [`ControlOperation`].
-pub const CONTROL_OPERATION_SCHEMA: u32 = 1;
+pub const CONTROL_OPERATION_SCHEMA: u32 = 3;
 /// Wire schema tag for [`ControlResult`].
-pub const CONTROL_RESULT_SCHEMA: u32 = 1;
+pub const CONTROL_RESULT_SCHEMA: u32 = 2;
 /// Fixed JWS media type for signed control operations.  Not caller-chosen.
 pub const CONTROL_OPERATION_JWS_TYPE: &str = "nazoauth-control-operation+jwt";
 /// Maximum canonical [`ControlOperation`] payload size in bytes.
@@ -70,8 +70,8 @@ const CONTROLLER_KID_LENGTH: usize = 43;
 
 /// The single signed envelope for one top-level application-level operation
 /// (05 §2).  The field set is closed and exhaustive:
-/// `schema`, `operation_id`, `kid`, `deployment_id`, `target`,
-/// `config_revision`, `operation`.
+/// `schema`, `operation_id`, `kid`, `deployment_id`, `config_revision`,
+/// `operation`.
 ///
 /// `operation_id` is a UUIDv7 and doubles as the journal idempotency key:
 /// same id + same request hash resumes or returns the recorded outcome; same
@@ -86,11 +86,6 @@ pub struct ControlOperation {
     pub kid: String,
     /// Audience binding: exactly one target deployment.
     pub deployment_id: String,
-    /// Artifact identity the operation was authorized for (05 §2): the OCI or
-    /// host-binary artifact whose executing runtime must equal the embedded
-    /// build identity at admission.  This prevents "authorized for artifact A,
-    /// executed on runtime B" without duplicating a release attestation.
-    pub target: ControlTarget,
     /// Opaque configuration revision of the deployment state this operation
     /// was constructed against.  Carried verbatim into the operation journal;
     /// CAS comparison semantics land with F05 — until then the only consumer
@@ -100,103 +95,6 @@ pub struct ControlOperation {
     /// Closed operation set with typed payloads.  Unknown operations are a
     /// protocol change and must be rejected by older consumers.
     pub operation: ControlOperationPayload,
-}
-
-/// Artifact classes a control operation can be authorized against (05 §2).
-///
-/// Deserialization is hand-written like [`ControlOperationPayload`]: serde
-/// silently ignores `deny_unknown_fields` for internally tagged enums, so a
-/// derived implementation would accept unknown members inside either variant.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-#[serde(tag = "kind", rename_all = "kebab-case")]
-pub enum ControlTarget {
-    /// Immutable OCI artifact.  The manifest digest is the image identity;
-    /// mutable tags are never carried.
-    OciImage {
-        /// Immutable image/manifest identifier: `sha256:` + 64 lowercase hex.
-        image_digest: String,
-        /// Build identity embedded in the executing runtime (J1 semantics);
-        /// equality with the running binary is enforced at admission.
-        embedded: ControlBuildIdentity,
-    },
-    /// Host binary identified by content hash.
-    HostBinary {
-        /// SHA-256 of the binary bytes: 64 lowercase hex.
-        sha256: String,
-        /// Build identity embedded in the executing runtime (J1 semantics).
-        embedded: ControlBuildIdentity,
-    },
-}
-
-impl<'de> Deserialize<'de> for ControlTarget {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let mut members = match serde_json::Value::deserialize(deserializer)? {
-            serde_json::Value::Object(members) => members,
-            _ => return Err(serde::de::Error::custom("target must be a JSON object")),
-        };
-        let kind = take_string_member(&mut members, "kind").map_err(serde::de::Error::custom)?;
-        let target = match kind.as_str() {
-            "oci-image" => ControlTarget::OciImage {
-                image_digest: take_string_member(&mut members, "image_digest")
-                    .map_err(serde::de::Error::custom)?,
-                embedded: take_build_identity_member(&mut members)
-                    .map_err(serde::de::Error::custom)?,
-            },
-            "host-binary" => ControlTarget::HostBinary {
-                sha256: take_string_member(&mut members, "sha256")
-                    .map_err(serde::de::Error::custom)?,
-                embedded: take_build_identity_member(&mut members)
-                    .map_err(serde::de::Error::custom)?,
-            },
-            other => {
-                return Err(serde::de::Error::custom(format!(
-                    "unknown target kind '{other}'"
-                )));
-            }
-        };
-        if let Some(member) = members.keys().next() {
-            return Err(serde::de::Error::custom(format!(
-                "unknown target field '{member}'"
-            )));
-        }
-        Ok(target)
-    }
-}
-
-fn take_build_identity_member(
-    members: &mut serde_json::Map<String, serde_json::Value>,
-) -> Result<ControlBuildIdentity, String> {
-    let value = match members.remove("embedded") {
-        Some(value) => value,
-        None => return Err("target requires field 'embedded'".to_owned()),
-    };
-    let mut fields = match value {
-        serde_json::Value::Object(fields) => fields,
-        _ => return Err("target field 'embedded' must be an object".to_owned()),
-    };
-    let embedded = ControlBuildIdentity {
-        product: take_string_member(&mut fields, "product")?,
-        version: take_string_member(&mut fields, "version")?,
-        commit: take_string_member(&mut fields, "commit")?,
-    };
-    if let Some(member) = fields.keys().next() {
-        return Err(format!("unknown embedded field '{member}'"));
-    }
-    Ok(embedded)
-}
-
-/// Embedded build identity carried by every control operation (J1
-/// semantics).  The equality check against the executing binary belongs to
-/// the server-side verifier boundary; this type only freezes the wire shape.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct ControlBuildIdentity {
-    pub product: String,
-    pub version: String,
-    pub commit: String,
 }
 
 /// Closed operation names seeded from E05's naming, each carrying its typed
@@ -216,6 +114,11 @@ pub enum ControlOperationPayload {
     KeysList,
     KeysValidate,
     KeysGenerateLocal {
+        alg: String,
+        purposes: Vec<String>,
+    },
+    TenantKeysGenerateLocal {
+        tenant_id: String,
         alg: String,
         purposes: Vec<String>,
     },
@@ -250,6 +153,66 @@ pub enum ControlOperationPayload {
     RecoveryInvalidate {
         state_epoch: String,
     },
+    /// Provision one tenant boundary and its canonical routing binding at the
+    /// caller's expected directory revision. Identical replays are bounded
+    /// no-ops; the authoritative directory rejects conflicting inputs.
+    TenantDirectoryCreate {
+        expected_revision: u64,
+        tenant: ControlTenantBoundary,
+        realm: ControlTenantBoundary,
+        organization: ControlTenantBoundary,
+        issuer: String,
+        external_host: String,
+    },
+    /// Update the canonical issuer/host of one routed tenant.
+    TenantDirectoryUpdate {
+        expected_revision: u64,
+        tenant_id: String,
+        issuer: String,
+        external_host: String,
+    },
+    /// Suspend one routed tenant: new requests stop resolving while data and
+    /// audit history are preserved for recovery.
+    TenantDirectoryDisable {
+        expected_revision: u64,
+        tenant_id: String,
+    },
+    /// Rebuild one tenant from its deterministic local material paths.
+    TenantDirectoryReload {
+        expected_revision: u64,
+        tenant_id: String,
+    },
+    /// Remove one routed tenant's binding after dependency cleanup. Replays
+    /// after the tenant row is deleted are idempotent no-ops.
+    TenantDirectoryFinalize {
+        expected_revision: u64,
+        tenant_id: String,
+    },
+    /// Read the authoritative directory: the current revision and every
+    /// active binding. Read-only; the outcome ledger still records the
+    /// replay-safe result.
+    TenantDirectoryDescribe,
+}
+
+/// One identity boundary row of a directory create operation.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ControlTenantBoundary {
+    pub id: String,
+    pub slug: String,
+    pub display_name: String,
+}
+
+/// One active binding of a directory describe result.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ControlTenantDirectoryBinding {
+    pub tenant_id: String,
+    pub realm_id: String,
+    pub organization_id: String,
+    pub runtime_revision: u64,
+    pub issuer: String,
+    pub external_host: String,
 }
 
 impl<'de> Deserialize<'de> for ControlOperationPayload {
@@ -272,6 +235,19 @@ impl<'de> Deserialize<'de> for ControlOperationPayload {
                 let purposes = take_string_vec_member(&mut members, "purposes")
                     .map_err(serde::de::Error::custom)?;
                 ControlOperationPayload::KeysGenerateLocal { alg, purposes }
+            }
+            "tenant-keys-generate-local" => {
+                let tenant_id = take_string_member(&mut members, "tenant_id")
+                    .map_err(serde::de::Error::custom)?;
+                let alg =
+                    take_string_member(&mut members, "alg").map_err(serde::de::Error::custom)?;
+                let purposes = take_string_vec_member(&mut members, "purposes")
+                    .map_err(serde::de::Error::custom)?;
+                ControlOperationPayload::TenantKeysGenerateLocal {
+                    tenant_id,
+                    alg,
+                    purposes,
+                }
             }
             "keys-register-external" => {
                 let kid =
@@ -320,6 +296,63 @@ impl<'de> Deserialize<'de> for ControlOperationPayload {
                 state_epoch: take_string_member(&mut members, "state_epoch")
                     .map_err(serde::de::Error::custom)?,
             },
+            "tenant-directory-create" => {
+                let expected_revision = take_u64_member(&mut members, "expected_revision")
+                    .map_err(serde::de::Error::custom)?;
+                let tenant = take_boundary_member(&mut members, "tenant")
+                    .map_err(serde::de::Error::custom)?;
+                let realm = take_boundary_member(&mut members, "realm")
+                    .map_err(serde::de::Error::custom)?;
+                let organization = take_boundary_member(&mut members, "organization")
+                    .map_err(serde::de::Error::custom)?;
+                let issuer =
+                    take_string_member(&mut members, "issuer").map_err(serde::de::Error::custom)?;
+                let external_host = take_string_member(&mut members, "external_host")
+                    .map_err(serde::de::Error::custom)?;
+                ControlOperationPayload::TenantDirectoryCreate {
+                    expected_revision,
+                    tenant,
+                    realm,
+                    organization,
+                    issuer,
+                    external_host,
+                }
+            }
+            "tenant-directory-update" => {
+                let expected_revision = take_u64_member(&mut members, "expected_revision")
+                    .map_err(serde::de::Error::custom)?;
+                let tenant_id = take_string_member(&mut members, "tenant_id")
+                    .map_err(serde::de::Error::custom)?;
+                let issuer =
+                    take_string_member(&mut members, "issuer").map_err(serde::de::Error::custom)?;
+                let external_host = take_string_member(&mut members, "external_host")
+                    .map_err(serde::de::Error::custom)?;
+                ControlOperationPayload::TenantDirectoryUpdate {
+                    expected_revision,
+                    tenant_id,
+                    issuer,
+                    external_host,
+                }
+            }
+            "tenant-directory-disable" => ControlOperationPayload::TenantDirectoryDisable {
+                expected_revision: take_u64_member(&mut members, "expected_revision")
+                    .map_err(serde::de::Error::custom)?,
+                tenant_id: take_string_member(&mut members, "tenant_id")
+                    .map_err(serde::de::Error::custom)?,
+            },
+            "tenant-directory-reload" => ControlOperationPayload::TenantDirectoryReload {
+                expected_revision: take_u64_member(&mut members, "expected_revision")
+                    .map_err(serde::de::Error::custom)?,
+                tenant_id: take_string_member(&mut members, "tenant_id")
+                    .map_err(serde::de::Error::custom)?,
+            },
+            "tenant-directory-finalize" => ControlOperationPayload::TenantDirectoryFinalize {
+                expected_revision: take_u64_member(&mut members, "expected_revision")
+                    .map_err(serde::de::Error::custom)?,
+                tenant_id: take_string_member(&mut members, "tenant_id")
+                    .map_err(serde::de::Error::custom)?,
+            },
+            "tenant-directory-describe" => ControlOperationPayload::TenantDirectoryDescribe,
             other => {
                 return Err(serde::de::Error::custom(format!(
                     "unknown operation '{other}'"
@@ -342,6 +375,35 @@ fn take_string_member(
     match members.remove(key) {
         Some(serde_json::Value::String(text)) => Ok(text),
         Some(_) => Err(format!("operation field '{key}' must be a string")),
+        None => Err(format!("operation requires field '{key}'")),
+    }
+}
+
+fn take_u64_member(
+    members: &mut serde_json::Map<String, serde_json::Value>,
+    key: &'static str,
+) -> Result<u64, String> {
+    match members.remove(key) {
+        Some(serde_json::Value::Number(number)) => number.as_u64().ok_or(format!(
+            "operation field '{key}' must be an unsigned integer"
+        )),
+        Some(_) => Err(format!(
+            "operation field '{key}' must be an unsigned integer"
+        )),
+        None => Err(format!("operation requires field '{key}'")),
+    }
+}
+
+fn take_boundary_member(
+    members: &mut serde_json::Map<String, serde_json::Value>,
+    key: &'static str,
+) -> Result<ControlTenantBoundary, String> {
+    match members.remove(key) {
+        Some(value @ serde_json::Value::Object(_)) => {
+            serde_json::from_value::<ControlTenantBoundary>(value)
+                .map_err(|_| format!("operation field '{key}' is not a valid boundary"))
+        }
+        Some(_) => Err(format!("operation field '{key}' must be an object")),
         None => Err(format!("operation requires field '{key}'")),
     }
 }
@@ -494,6 +556,15 @@ pub struct ControlResult {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum ControlResultData {
+    /// Public receipt for a freshly generated tenant-local signing key. The
+    /// certificate bundle contains public material only; private key bytes
+    /// never leave the managed tenant key directory.
+    TenantKeyGenerated {
+        tenant_id: String,
+        kid: String,
+        keyset_revision: String,
+        certificate_chain_pem: String,
+    },
     /// Authoritative outcome of an applied tenant-resource change set.
     TenantResourceApply {
         revision: u64,
@@ -528,6 +599,20 @@ pub enum ControlResultData {
         /// omitted by request selectors.
         resource_manifest_sha256: String,
     },
+    /// Authoritative outcome of one tenant directory lifecycle mutation.
+    /// `revision` is the directory revision after the mutation; a replay that
+    /// matched an identical prior effect reports the unchanged revision.
+    TenantDirectoryMutation {
+        action: String,
+        tenant_id: String,
+        previous_revision: u64,
+        revision: u64,
+    },
+    /// Authoritative directory snapshot at the reported revision.
+    TenantDirectoryDescribe {
+        revision: u64,
+        tenants: Vec<ControlTenantDirectoryBinding>,
+    },
 }
 
 impl<'de> Deserialize<'de> for ControlResultData {
@@ -541,6 +626,15 @@ impl<'de> Deserialize<'de> for ControlResultData {
         };
         let kind = take_string_member(&mut members, "kind").map_err(serde::de::Error::custom)?;
         let data = match kind.as_str() {
+            "tenant-key-generated" => ControlResultData::TenantKeyGenerated {
+                tenant_id: take_string_member(&mut members, "tenant_id")
+                    .map_err(serde::de::Error::custom)?,
+                kid: take_string_member(&mut members, "kid").map_err(serde::de::Error::custom)?,
+                keyset_revision: take_string_member(&mut members, "keyset_revision")
+                    .map_err(serde::de::Error::custom)?,
+                certificate_chain_pem: take_string_member(&mut members, "certificate_chain_pem")
+                    .map_err(serde::de::Error::custom)?,
+            },
             "tenant-resource-apply" | "tenant-resource-revoke" | "tenant-resource-enumerate" => {
                 let revision = match members.remove("revision") {
                     Some(serde_json::Value::Number(number)) => {
@@ -627,6 +721,45 @@ impl<'de> Deserialize<'de> for ControlResultData {
                     revoked_refresh_tokens,
                 }
             }
+            "tenant-directory-mutation" => {
+                let action =
+                    take_string_member(&mut members, "action").map_err(serde::de::Error::custom)?;
+                let tenant_id = take_string_member(&mut members, "tenant_id")
+                    .map_err(serde::de::Error::custom)?;
+                let previous_revision = take_u64_member(&mut members, "previous_revision")
+                    .map_err(serde::de::Error::custom)?;
+                let revision =
+                    take_u64_member(&mut members, "revision").map_err(serde::de::Error::custom)?;
+                ControlResultData::TenantDirectoryMutation {
+                    action,
+                    tenant_id,
+                    previous_revision,
+                    revision,
+                }
+            }
+            "tenant-directory-describe" => {
+                let revision =
+                    take_u64_member(&mut members, "revision").map_err(serde::de::Error::custom)?;
+                let tenants = members.remove("tenants");
+                let tenants = match tenants {
+                    Some(serde_json::Value::Array(values)) => values
+                        .into_iter()
+                        .map(|value| {
+                            serde_json::from_value::<ControlTenantDirectoryBinding>(value).map_err(
+                                |_| {
+                                    serde::de::Error::custom(
+                                        "result field 'tenants' must contain bindings",
+                                    )
+                                },
+                            )
+                        })
+                        .collect::<Result<Vec<_>, _>>()?,
+                    _ => {
+                        return Err(serde::de::Error::custom("result requires field 'tenants'"));
+                    }
+                };
+                ControlResultData::TenantDirectoryDescribe { revision, tenants }
+            }
             other => {
                 return Err(serde::de::Error::custom(format!(
                     "unknown result kind '{other}'"
@@ -672,42 +805,8 @@ pub fn validate_control_operation(operation: &ControlOperation) -> Result<(), Pr
     validate_uuidv7(&operation.operation_id)?;
     validate_controller_kid(&operation.kid)?;
     validate_file_identifier(&operation.deployment_id)?;
-    validate_control_target(&operation.target)?;
     validate_identifier(&operation.config_revision)?;
     validate_control_payload(&operation.operation)
-}
-
-fn validate_control_target(target: &ControlTarget) -> Result<(), ProtocolError> {
-    match target {
-        ControlTarget::OciImage { image_digest, .. } => validate_oci_image_digest(image_digest)?,
-        ControlTarget::HostBinary { sha256, .. } => validate_lower_hex(sha256, 64)?,
-    }
-    let embedded = target.embedded();
-    for value in [&embedded.product, &embedded.version, &embedded.commit] {
-        validate_identifier(value)?;
-    }
-    Ok(())
-}
-
-/// Validate the immutable OCI artifact identity carried by a control target.
-/// Runtime admission uses this same protocol authority for the digest injected
-/// by the one-shot launcher before comparing the two exact values.
-pub fn validate_oci_image_digest(image_digest: &str) -> Result<(), ProtocolError> {
-    let digest = image_digest
-        .strip_prefix("sha256:")
-        .ok_or(ProtocolError::Policy("OCI target must use a sha256 digest"))?;
-    validate_lower_hex(digest, 64)
-}
-
-impl ControlTarget {
-    /// Build identity embedded in either artifact class; the admission
-    /// boundary compares it against the executing runtime.
-    pub fn embedded(&self) -> &ControlBuildIdentity {
-        match self {
-            ControlTarget::OciImage { embedded, .. }
-            | ControlTarget::HostBinary { embedded, .. } => embedded,
-        }
-    }
 }
 
 fn validate_control_payload(payload: &ControlOperationPayload) -> Result<(), ProtocolError> {
@@ -716,13 +815,15 @@ fn validate_control_payload(payload: &ControlOperationPayload) -> Result<(), Pro
         | ControlOperationPayload::KeysList
         | ControlOperationPayload::KeysValidate => {}
         ControlOperationPayload::KeysGenerateLocal { alg, purposes } => {
-            validate_identifier(alg)?;
-            if purposes.is_empty() || purposes.len() > 8 {
-                return Err(ProtocolError::Policy("invalid signing purposes"));
-            }
-            for purpose in purposes {
-                validate_identifier(purpose)?;
-            }
+            validate_generate_local_fields(alg, purposes)?;
+        }
+        ControlOperationPayload::TenantKeysGenerateLocal {
+            tenant_id,
+            alg,
+            purposes,
+        } => {
+            validate_uuid(tenant_id)?;
+            validate_generate_local_fields(alg, purposes)?;
         }
         ControlOperationPayload::KeysRegisterExternal {
             kid,
@@ -781,6 +882,101 @@ fn validate_control_payload(payload: &ControlOperationPayload) -> Result<(), Pro
         ControlOperationPayload::RecoveryInvalidate { state_epoch } => {
             validate_recovery_state_epoch(state_epoch)?;
         }
+        ControlOperationPayload::TenantDirectoryCreate {
+            expected_revision: _,
+            tenant,
+            realm,
+            organization,
+            issuer,
+            external_host,
+        } => {
+            let mut seen = std::collections::BTreeSet::new();
+            for boundary in [tenant, realm, organization] {
+                validate_uuid(&boundary.id)?;
+                validate_tenant_slug(&boundary.slug)?;
+                validate_tenant_display_name(&boundary.display_name)?;
+                if !seen.insert(boundary.id.as_str()) {
+                    return Err(ProtocolError::Policy(
+                        "tenant directory boundaries must reference distinct ids",
+                    ));
+                }
+            }
+            validate_tenant_issuer(issuer)?;
+            validate_tenant_host(external_host)?;
+        }
+        ControlOperationPayload::TenantDirectoryUpdate {
+            expected_revision: _,
+            tenant_id,
+            issuer,
+            external_host,
+        } => {
+            validate_uuid(tenant_id)?;
+            validate_tenant_issuer(issuer)?;
+            validate_tenant_host(external_host)?;
+        }
+        ControlOperationPayload::TenantDirectoryDisable {
+            expected_revision: _,
+            tenant_id,
+        }
+        | ControlOperationPayload::TenantDirectoryReload {
+            expected_revision: _,
+            tenant_id,
+        }
+        | ControlOperationPayload::TenantDirectoryFinalize {
+            expected_revision: _,
+            tenant_id,
+        } => validate_uuid(tenant_id)?,
+        ControlOperationPayload::TenantDirectoryDescribe => {}
+    }
+    Ok(())
+}
+
+fn validate_generate_local_fields(alg: &str, purposes: &[String]) -> Result<(), ProtocolError> {
+    validate_identifier(alg)?;
+    if purposes.is_empty() || purposes.len() > 8 {
+        return Err(ProtocolError::Policy("invalid signing purposes"));
+    }
+    for purpose in purposes {
+        validate_identifier(purpose)?;
+    }
+    Ok(())
+}
+
+/// Routing issuer bounds shared by every directory lifecycle payload. Exact
+/// URL/host consistency is enforced by the authoritative directory.
+fn validate_tenant_issuer(issuer: &str) -> Result<(), ProtocolError> {
+    if issuer.is_empty() || issuer.len() > 2048 || issuer != issuer.trim() {
+        return Err(ProtocolError::Policy("tenant issuer is out of bounds"));
+    }
+    Ok(())
+}
+
+/// Canonical routing host bounds shared by every directory lifecycle payload.
+fn validate_tenant_host(external_host: &str) -> Result<(), ProtocolError> {
+    if external_host.is_empty()
+        || external_host.len() > 255
+        || external_host != external_host.to_ascii_lowercase()
+        || external_host != external_host.trim()
+    {
+        return Err(ProtocolError::Policy(
+            "tenant external host must be a bounded lowercase host",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_tenant_slug(slug: &str) -> Result<(), ProtocolError> {
+    if slug.is_empty() || slug.len() > 120 || slug != slug.trim() {
+        return Err(ProtocolError::Policy("tenant slug is out of bounds"));
+    }
+    Ok(())
+}
+
+fn validate_tenant_display_name(display_name: &str) -> Result<(), ProtocolError> {
+    if display_name.is_empty() || display_name.len() > 200 || display_name != display_name.trim() {
+        return Err(ProtocolError::Policy(
+            "tenant display name is out of bounds",
+        ));
     }
     Ok(())
 }
@@ -1164,6 +1360,70 @@ fn validate_control_result_data(data: &ControlResultData) -> Result<(), Protocol
         return Ok(());
     }
     let (resources, resource_mappings, resource_manifest_sha256, is_apply) = match data {
+        ControlResultData::TenantKeyGenerated {
+            tenant_id,
+            kid,
+            keyset_revision,
+            certificate_chain_pem,
+        } => {
+            validate_uuid(tenant_id)?;
+            validate_file_identifier(kid)?;
+            validate_lower_hex(keyset_revision, 64)?;
+            if certificate_chain_pem.is_empty()
+                || certificate_chain_pem.len() > 32 * 1024
+                || !certificate_chain_pem.starts_with("-----BEGIN CERTIFICATE-----\n")
+                || !certificate_chain_pem.ends_with("-----END CERTIFICATE-----\n")
+            {
+                return Err(ProtocolError::Policy(
+                    "invalid tenant key certificate chain",
+                ));
+            }
+            return Ok(());
+        }
+        ControlResultData::TenantDirectoryMutation {
+            action,
+            tenant_id,
+            previous_revision: _,
+            revision: _,
+        } => {
+            if !matches!(
+                action.as_str(),
+                "create" | "update" | "disable" | "reload" | "finalize"
+            ) {
+                return Err(ProtocolError::Policy("invalid directory mutation action"));
+            }
+            validate_uuid(tenant_id)?;
+            return Ok(());
+        }
+        ControlResultData::TenantDirectoryDescribe {
+            revision: _,
+            tenants,
+        } => {
+            if tenants.len() > MAX_TENANT_RESOURCE_IDENTITIES {
+                return Err(ProtocolError::Policy(
+                    "tenant directory result sets are out of bounds",
+                ));
+            }
+            let mut seen = std::collections::BTreeSet::new();
+            for binding in tenants {
+                validate_uuid(&binding.tenant_id)?;
+                validate_uuid(&binding.realm_id)?;
+                validate_uuid(&binding.organization_id)?;
+                if binding.runtime_revision == 0 {
+                    return Err(ProtocolError::Policy(
+                        "tenant runtime revisions must be positive",
+                    ));
+                }
+                validate_tenant_issuer(&binding.issuer)?;
+                validate_tenant_host(&binding.external_host)?;
+                if !seen.insert(binding.tenant_id.as_str()) {
+                    return Err(ProtocolError::Policy(
+                        "tenant directory result bindings must be unique",
+                    ));
+                }
+            }
+            return Ok(());
+        }
         ControlResultData::TenantResourceApply {
             resources,
             resource_mappings,

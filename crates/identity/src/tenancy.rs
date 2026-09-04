@@ -1,4 +1,5 @@
 use serde::{Deserialize, Deserializer, Serialize, de};
+use url::Url;
 use uuid::Uuid;
 
 use crate::IdentityModelError;
@@ -65,6 +66,114 @@ pub struct TenantContext {
     pub organization_id: OrganizationId,
 }
 
+/// One active tenant's public routing identity and default placement.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct TenantDirectoryBinding {
+    pub tenant: TenantContext,
+    /// Monotonic tenant-local generation used to rebuild deterministic
+    /// key/trust/material state without changing the routing identity.
+    pub runtime_revision: u64,
+    pub issuer: String,
+    pub external_host: String,
+}
+
+/// Immutable, revisioned view of every active tenant.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct TenantDirectorySnapshot {
+    pub revision: u64,
+    pub tenants: Vec<TenantDirectoryBinding>,
+}
+
+/// One identity boundary row a provisioning request must place or bind.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TenantBoundaryDefinition<Id> {
+    pub id: Id,
+    pub slug: String,
+    pub display_name: String,
+}
+
+/// A complete tenant boundary plus its canonical routing binding. A
+/// provisioning transaction either creates every referenced row or proves that
+/// an existing row already satisfies the request; it never rewrites a
+/// provisioned binding.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TenantProvisioningRequest {
+    pub tenant: TenantBoundaryDefinition<TenantId>,
+    pub realm: TenantBoundaryDefinition<RealmId>,
+    pub organization: TenantBoundaryDefinition<OrganizationId>,
+    pub binding: TenantDirectoryBinding,
+}
+
+/// Runtime lifecycle status of one tenant row. The directory snapshot only
+/// routes tenants whose row is active.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TenantRuntimeStatus {
+    Active,
+    Suspended,
+    Deleted,
+}
+
+impl TenantRuntimeStatus {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Suspended => "suspended",
+            Self::Deleted => "deleted",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TenantHostError(&'static str);
+
+impl std::fmt::Display for TenantHostError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.0)
+    }
+}
+
+impl std::error::Error for TenantHostError {}
+
+/// Canonicalizes the host identity shared by routing and directory caches.
+pub fn canonical_tenant_host(host: &str) -> Result<String, TenantHostError> {
+    let host = host.trim();
+    if host.is_empty() {
+        return Err(TenantHostError("tenant host must not be empty"));
+    }
+    if host.starts_with('[') {
+        if !host.ends_with(']') {
+            return Err(TenantHostError("tenant host must be a host without a port"));
+        }
+    } else if host.contains(':') {
+        return Err(TenantHostError("tenant host must not include a port"));
+    }
+
+    let parsed = Url::parse(&format!("https://{host}/"))
+        .map_err(|_| TenantHostError("tenant host is invalid"))?;
+    if !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.port().is_some()
+        || parsed.path() != "/"
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+    {
+        return Err(TenantHostError(
+            "tenant host must be a host without userinfo, path, query, fragment, or port",
+        ));
+    }
+    let canonical = match parsed.host() {
+        Some(url::Host::Domain(domain)) => domain.trim_end_matches('.').to_ascii_lowercase(),
+        Some(url::Host::Ipv4(address)) => address.to_string(),
+        Some(url::Host::Ipv6(address)) => format!("[{address}]"),
+        None => return Err(TenantHostError("tenant host is invalid")),
+    };
+    if canonical.is_empty() {
+        return Err(TenantHostError("tenant host must not be empty"));
+    }
+    Ok(canonical)
+}
+
 impl TenantContext {
     #[must_use]
     pub fn default_system() -> Self {
@@ -105,3 +214,7 @@ impl Default for TenantContext {
         Self::default_system()
     }
 }
+
+#[cfg(test)]
+#[path = "../tests/unit/tenancy.rs"]
+mod tests;

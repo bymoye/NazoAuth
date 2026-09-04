@@ -950,7 +950,9 @@ async fn token_exchange_rejects_invalid_access_and_absent_actor_tokens() {
     let state = token_exchange_state();
     let service = ServerTokenService::new(
         crate::test_support::token_issuance_repository(state.diesel_db.clone()),
-        nazo_valkey::TokenIssuanceStateAdapter::new(&state.valkey_connection()),
+        std::sync::Arc::new(nazo_valkey::TokenIssuanceStateAdapter::new(
+            &state.valkey_connection(),
+        )),
         state.keyset.clone(),
     );
     let client = client();

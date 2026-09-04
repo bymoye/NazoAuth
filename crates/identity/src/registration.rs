@@ -71,8 +71,8 @@ pub enum RegisterLocalAccountError {
 }
 
 #[derive(Clone)]
-pub struct RegistrationService<A, V, H, E> {
-    accounts: A,
+pub struct RegistrationService<V, H, E> {
+    accounts: std::sync::Arc<dyn RegistrationAccountRepositoryPort>,
     verification: V,
     secret_hashes: H,
     email_delivery: E,
@@ -80,15 +80,35 @@ pub struct RegistrationService<A, V, H, E> {
     config: RegistrationServiceConfig,
 }
 
-impl<A, V, H, E> RegistrationService<A, V, H, E>
+impl<V, H, E> RegistrationService<V, H, E>
 where
-    A: RegistrationAccountRepositoryPort,
     V: EmailVerificationStorePort,
     H: SecretHashPort,
     E: VerificationEmailDeliveryPort,
 {
-    pub fn new(
+    pub fn new<A>(
         accounts: A,
+        verification: V,
+        secret_hashes: H,
+        email_delivery: E,
+        tenant: TenantContext,
+        config: RegistrationServiceConfig,
+    ) -> Self
+    where
+        A: RegistrationAccountRepositoryPort + 'static,
+    {
+        Self {
+            accounts: std::sync::Arc::new(accounts),
+            verification,
+            secret_hashes,
+            email_delivery,
+            tenant,
+            config,
+        }
+    }
+
+    pub fn from_port(
+        accounts: std::sync::Arc<dyn RegistrationAccountRepositoryPort>,
         verification: V,
         secret_hashes: H,
         email_delivery: E,

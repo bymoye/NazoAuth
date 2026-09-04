@@ -1,5 +1,8 @@
-//! 基于 Valkey 的固定窗口限流。
+//! 固定窗口请求限流策略。
 //! 限流主体默认取连接来源地址，不信任可伪造的转发头。
+use std::sync::Arc;
+
+use nazo_auth::{RequestRateLimitBucket, RequestRateLimitPort};
 use nazo_http_actix::{authorization_error_response, oauth_error};
 
 use actix_web::http::StatusCode;
@@ -16,11 +19,11 @@ pub(crate) struct AuthRateLimitConfig {
 
 /// Focused HTTP security dependency for authentication endpoint rate limits.
 ///
-/// It owns the storage adapter, threshold policy, and trusted-proxy client IP
-/// derivation so handlers cannot issue Valkey commands or reconstruct policy.
+/// It owns the semantic state port, threshold policy, and trusted-proxy client
+/// IP derivation so handlers cannot reconstruct storage or policy details.
 #[derive(Clone)]
 pub(crate) struct AuthRequestLimiter {
-    store: nazo_valkey::RateLimitStore,
+    store: Arc<dyn RequestRateLimitPort>,
     config: AuthRateLimitConfig,
     client_ip: ClientIpConfig,
 }
@@ -28,7 +31,7 @@ pub(crate) struct AuthRequestLimiter {
 /// Focused rate-limit adapter for token-management endpoints.
 #[derive(Clone)]
 pub(crate) struct TokenManagementRequestLimiter {
-    store: nazo_valkey::RateLimitStore,
+    store: Arc<dyn RequestRateLimitPort>,
     window_seconds: u64,
     max_requests: u64,
     client_ip: ClientIpConfig,
@@ -36,7 +39,7 @@ pub(crate) struct TokenManagementRequestLimiter {
 
 impl TokenManagementRequestLimiter {
     pub(crate) fn new(
-        store: nazo_valkey::RateLimitStore,
+        store: Arc<dyn RequestRateLimitPort>,
         window_seconds: u64,
         max_requests: u64,
         client_ip: ClientIpConfig,
@@ -53,7 +56,7 @@ impl TokenManagementRequestLimiter {
         let count = self
             .store
             .increment(
-                nazo_valkey::RateDimension::TokenManagement,
+                RequestRateLimitBucket::TokenManagement,
                 &client_ip_with_config(req, &self.client_ip),
                 self.window_seconds,
             )
@@ -75,7 +78,7 @@ impl TokenManagementRequestLimiter {
 
 impl AuthRequestLimiter {
     pub(crate) fn new(
-        store: nazo_valkey::RateLimitStore,
+        store: Arc<dyn RequestRateLimitPort>,
         window_seconds: u64,
         max_requests: u64,
         client_ip: ClientIpConfig,
@@ -88,7 +91,7 @@ impl AuthRequestLimiter {
     }
 
     pub(crate) async fn enforce(&self, req: &HttpRequest) -> Result<(), HttpResponse> {
-        enforce_auth_rate_limit(&self.store, req, self.config, &self.client_ip).await
+        enforce_auth_rate_limit(self.store.as_ref(), req, self.config, &self.client_ip).await
     }
 }
 
@@ -102,14 +105,14 @@ impl AuthRateLimitConfig {
 }
 
 pub(crate) async fn enforce_auth_rate_limit(
-    store: &nazo_valkey::RateLimitStore,
+    store: &dyn RequestRateLimitPort,
     req: &HttpRequest,
     config: AuthRateLimitConfig,
     client_ip: &ClientIpConfig,
 ) -> Result<(), HttpResponse> {
     let count = store
         .increment(
-            nazo_valkey::RateDimension::Auth,
+            RequestRateLimitBucket::Authentication,
             &client_ip_with_config(req, client_ip),
             config.window_seconds,
         )

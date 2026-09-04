@@ -48,6 +48,28 @@ impl Openid4vciRepository {
         Ok(())
     }
 }
+
+impl nazo_persistence::Openid4vciStore for Openid4vciRepository {
+    fn insert_offer<'a>(
+        &'a self,
+        offer: &'a StoredCredentialOffer,
+        issuer_state_hash: Option<&'a str>,
+        pre_authorized_code_hash: Option<&'a str>,
+        tx_code_hash: Option<&'a str>,
+    ) -> futures_util::future::BoxFuture<'a, Result<(), CredentialStoreError>> {
+        Box::pin(async move {
+            Openid4vciRepository::insert_offer(
+                self,
+                offer,
+                issuer_state_hash,
+                pre_authorized_code_hash,
+                tx_code_hash,
+            )
+            .await
+        })
+    }
+}
+
 impl AuthorizationOfferPort for Openid4vciRepository {
     fn resolve_authorization_offer<'a>(
         &'a self,

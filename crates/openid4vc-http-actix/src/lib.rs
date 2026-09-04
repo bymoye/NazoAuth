@@ -18,9 +18,6 @@ pub use vci::{
 pub use vp::{
     CreatePresentationRequest, CreatePresentationResponse, PresentationEndpoint,
     PresentationFuture, PresentationHttpError, PresentationOperations, PresentationResponseBody,
-    PresentationResponseInput, PresentationVerificationProjection,
-    PresentationVerificationResponse, attach_presentation_verification_evidence,
-    create_presentation, issue_presentation_verification_receipt, presentation_complete,
-    presentation_request, presentation_response, presentation_result,
-    presentation_verification_receipt,
+    PresentationResponseInput, create_presentation, presentation_complete, presentation_request,
+    presentation_response, presentation_result,
 };

@@ -185,6 +185,9 @@ CREATE TABLE openid4vp_transactions (
     ephemeral_private_key_ciphertext BYTEA,
     result_ciphertext BYTEA,
     completed_at TIMESTAMPTZ,
+    create_request_jti VARCHAR(36) NOT NULL,
+    create_request_sha256 VARCHAR(64) NOT NULL,
+    create_request_canonical_json TEXT NOT NULL,
     expires_at TIMESTAMPTZ NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT ck_openid4vp_client_id_prefix CHECK (
@@ -209,14 +212,49 @@ CREATE TABLE openid4vp_transactions (
     CONSTRAINT ck_openid4vp_result_shape CHECK (
         (completed_at IS NULL AND result_ciphertext IS NULL)
         OR (completed_at IS NOT NULL AND result_ciphertext IS NOT NULL)
+    ),
+    CONSTRAINT ck_openid4vp_create_request_shape CHECK (
+        create_request_jti ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
+        AND create_request_sha256 ~ '^[0-9a-f]{64}$'
+        AND create_request_canonical_json <> ''
+        AND octet_length(create_request_canonical_json) <= 65536
     )
 );
 
 CREATE INDEX ix_openid4vp_transaction_expiry ON openid4vp_transactions (expires_at);
+CREATE UNIQUE INDEX ux_openid4vp_create_request_jti
+    ON openid4vp_transactions (tenant_id, create_request_jti);
+
+CREATE FUNCTION nazo_openid4vp_cleanup_expired_transactions()
+RETURNS INTEGER
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    deleted_transactions INTEGER := 0;
+BEGIN
+    WITH expired AS (
+        SELECT id
+        FROM openid4vp_transactions
+        WHERE expires_at <= CURRENT_TIMESTAMP
+        ORDER BY expires_at, id
+        LIMIT 256
+        FOR UPDATE SKIP LOCKED
+    )
+    DELETE FROM openid4vp_transactions AS target
+    USING expired
+    WHERE target.id = expired.id;
+    GET DIAGNOSTICS deleted_transactions = ROW_COUNT;
+    RETURN deleted_transactions;
+END;
+$$;
 
 COMMENT ON COLUMN openid4vp_transactions.ephemeral_private_key_ciphertext IS
     'AEAD-encrypted per-request response-decryption key; plaintext is never persisted.';
 COMMENT ON COLUMN openid4vp_transactions.result_ciphertext IS
     'AEAD-encrypted disclosed presentation result with short retention.';
+COMMENT ON COLUMN openid4vp_transactions.create_request_jti IS
+    'Caller-generated, tenant-bound management idempotency key for exact OpenID4VP create response recovery.';
+COMMENT ON COLUMN openid4vp_transactions.create_request_canonical_json IS
+    'Canonical normalized management request compared with its SHA-256 digest to prevent JTI aliasing.';
 COMMENT ON COLUMN openid4vci_deferred_transactions.payload_ciphertext IS
     'AEAD-encrypted deferred credential dataset; plaintext claims are never persisted.';

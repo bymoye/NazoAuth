@@ -14,23 +14,11 @@ use crate::DbPool;
 /// credentials. A bounded payload keeps the in-process queue and the database
 /// outbox from becoming an unbounded memory/storage sink when a caller makes a
 /// programming mistake.
-pub const MAX_SECURITY_AUDIT_PAYLOAD_BYTES: usize = 64 * 1024;
-
-#[derive(Clone, Debug)]
-pub struct SecurityAuditEvent {
-    pub event_id: Uuid,
-    pub event_type: String,
-    pub event_category: String,
-    pub payload: Value,
-    pub occurred_at: DateTime<Utc>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct SecurityAuditReceipt {
-    pub event_id: Uuid,
-    pub sequence: i64,
-    pub event_hash: [u8; 32],
-}
+pub use nazo_persistence::{
+    MAX_SECURITY_AUDIT_PAYLOAD_BYTES, SecurityAuditAnchorHealth, SecurityAuditEvent,
+    SecurityAuditFreshness as SecurityAuditAnchorFreshness, SecurityAuditOutboxDelivery,
+    SecurityAuditReceipt,
+};
 
 /// A newly appended audit event together with the chain edge it extended.
 ///
@@ -45,40 +33,6 @@ pub struct FreshSecurityAuditReceipt {
     pub sequence: i64,
     pub previous_hash: [u8; 32],
     pub event_hash: [u8; 32],
-}
-
-#[derive(Clone, Debug)]
-pub struct SecurityAuditOutboxDelivery {
-    pub event_id: Uuid,
-    pub sequence: i64,
-    pub event_type: String,
-    pub event_category: String,
-    pub payload: Value,
-    pub occurred_at: DateTime<Utc>,
-    pub previous_hash: Vec<u8>,
-    pub event_hash: Vec<u8>,
-    pub attempts: i32,
-}
-
-/// The exporter-only health snapshot. It is returned by a SECURITY DEFINER
-/// function, so the exporter needs no table SELECT privilege.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct SecurityAuditAnchorHealth {
-    pub head_sequence: i64,
-    pub head_hash: Vec<u8>,
-    pub pending_count: i64,
-    pub oldest_pending_occurred_at: Option<DateTime<Utc>>,
-    pub last_exported_sequence: Option<i64>,
-    pub last_exported_hash: Option<Vec<u8>>,
-    pub last_exported_occurred_at: Option<DateTime<Utc>>,
-    pub last_exported_at: Option<DateTime<Utc>>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct SecurityAuditAnchorFreshness {
-    pub head_sequence: i64,
-    pub head_hash: Vec<u8>,
-    pub checked_at: DateTime<Utc>,
 }
 
 #[derive(Clone)]

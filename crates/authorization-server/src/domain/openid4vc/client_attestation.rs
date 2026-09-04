@@ -5,12 +5,13 @@ use std::sync::Arc;
 use jsonwebtoken::{Algorithm, Validation, decode};
 use nazo_digital_credentials::decode_compact_jwt;
 use nazo_operator_protocol::Openid4vcTrustPolicy;
+use nazo_persistence::{ClientTrustPolicy, Openid4vcTrustPolicyStore};
 use serde_json::Value;
 
 #[derive(Clone)]
 pub(crate) struct Openid4vcClientAttestationValidator {
     static_trust: Option<(Arc<str>, Arc<Value>)>,
-    trust_policies: Option<(nazo_postgres::TenantResourceRepository, uuid::Uuid)>,
+    trust_policies: Option<(Arc<dyn Openid4vcTrustPolicyStore>, uuid::Uuid)>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -58,7 +59,7 @@ impl Openid4vcClientAttestationValidator {
 
     pub(crate) fn with_trust_policies(
         static_trust: Option<(String, Value)>,
-        repository: nazo_postgres::TenantResourceRepository,
+        repository: Arc<dyn Openid4vcTrustPolicyStore>,
         tenant_id: uuid::Uuid,
     ) -> anyhow::Result<Self> {
         let mut validator = if let Some((issuer, jwks)) = static_trust {
@@ -195,22 +196,13 @@ impl Openid4vcClientAttestationValidator {
         let client_id = Self::unverified_client_id(attestation)
             .ok_or_else(|| anyhow::anyhow!("client attestation subject is missing"))?;
         if let Some((repository, tenant_id)) = &self.trust_policies {
-            let mut connection = repository.connection().await?;
-            match nazo_postgres::TenantResourceRepository::openid4vc_trust_policy_for_client_on_connection(
-                &mut connection,
-                *tenant_id,
-                &client_id,
-            )
-            .await?
-            {
-                nazo_postgres::Openid4vcTrustPolicyForClient::Unbound => {}
-                nazo_postgres::Openid4vcTrustPolicyForClient::BoundInactive => {
+            match repository.for_client(*tenant_id, &client_id).await? {
+                ClientTrustPolicy::Unbound => {}
+                ClientTrustPolicy::BoundInactive => {
                     anyhow::bail!("client OpenID4VC trust policy binding is inactive");
                 }
-                nazo_postgres::Openid4vcTrustPolicyForClient::Active(policy) => {
-                    let material: Openid4vcTrustPolicy =
-                        serde_json::from_value(policy.public_material)?;
-                    nazo_operator_protocol::validate_openid4vc_trust_policy(&material)?;
+                ClientTrustPolicy::Active(policy) => {
+                    let material: Openid4vcTrustPolicy = policy.material;
                     return Self::new(
                         material.client_attestation_issuer,
                         material.client_attestation_jwks,

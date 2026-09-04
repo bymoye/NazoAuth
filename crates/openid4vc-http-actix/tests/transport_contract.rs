@@ -8,11 +8,9 @@ use nazo_openid4vc_http_actix::{
     CredentialIssuerOperations, CredentialRequestBody, CredentialRequestContext,
     CredentialResponseBody, PreAuthorizedTokenRequest, PreAuthorizedTokenResponse,
     PresentationEndpoint, PresentationFuture, PresentationHttpError, PresentationOperations,
-    PresentationResponseBody, PresentationResponseInput, PresentationVerificationProjection,
-    PresentationVerificationResponse, attach_presentation_verification_evidence,
-    create_credential_offer, create_presentation, credential, credential_issuer_metadata,
-    deferred_credential, issue_presentation_verification_receipt, notification,
-    presentation_response, presentation_verification_receipt,
+    PresentationResponseBody, PresentationResponseInput, create_credential_offer,
+    create_presentation, credential, credential_issuer_metadata, deferred_credential, notification,
+    presentation_complete, presentation_response,
 };
 use nazo_openid4vci::{
     CredentialIssuerMetadata, CredentialOffer, CredentialRequest, CredentialResponse,
@@ -21,229 +19,6 @@ use nazo_openid4vci::{
 use nazo_openid4vp::{PresentationResult, PresentationTransaction};
 use serde_json::json;
 use uuid::Uuid;
-
-#[actix_web::test]
-async fn public_verification_receipt_requires_only_the_fixed_receipt_header() {
-    let app = test::init_service(
-        App::new()
-            .app_data(web::Data::new(PresentationEndpoint::new(
-                Arc::new(Verifier),
-                b"management-secret".to_vec(),
-            )))
-            .route(
-                "/openid4vp/verification-receipts",
-                web::get().to(presentation_verification_receipt),
-            ),
-    )
-    .await;
-
-    for authorization in [
-        None,
-        Some("Bearer management-secret"),
-        Some("Receipt short"),
-    ] {
-        let mut request = test::TestRequest::get().uri("/openid4vp/verification-receipts");
-        if let Some(value) = authorization {
-            request = request.insert_header(("Authorization", value));
-        }
-        let response = test::call_service(&app, request.to_request()).await;
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
-        assert_eq!(response.headers().get("Cache-Control").unwrap(), "no-store");
-        assert_eq!(
-            response.headers().get("Referrer-Policy").unwrap(),
-            "no-referrer"
-        );
-    }
-
-    let response = test::call_service(
-        &app,
-        test::TestRequest::get()
-            .uri("/openid4vp/verification-receipts")
-            .insert_header((
-                "Authorization",
-                "Receipt aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            ))
-            .to_request(),
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(response.headers().get("Cache-Control").unwrap(), "no-store");
-    assert_eq!(
-        response.headers().get("Referrer-Policy").unwrap(),
-        "no-referrer"
-    );
-    let body = test::read_body(response).await;
-    let body = std::str::from_utf8(&body).unwrap();
-    for forbidden in ["credential", "nonce", "receipt_jws", "capability", "ui_url"] {
-        assert!(
-            !body.contains(forbidden),
-            "public projection leaked {forbidden}"
-        );
-    }
-    assert!(body.contains("\"status\":\"verified\""));
-
-    let lower_scheme = test::call_service(
-        &app,
-        test::TestRequest::get()
-            .uri("/openid4vp/verification-receipts")
-            .insert_header((
-                "Authorization",
-                "receipt aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            ))
-            .to_request(),
-    )
-    .await;
-    assert_eq!(lower_scheme.status(), StatusCode::OK);
-
-    let duplicate = test::call_service(
-        &app,
-        test::TestRequest::get()
-            .uri("/openid4vp/verification-receipts")
-            .append_header((
-                "Authorization",
-                "Receipt aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            ))
-            .append_header((
-                "Authorization",
-                "Receipt aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            ))
-            .to_request(),
-    )
-    .await;
-    assert_eq!(duplicate.status(), StatusCode::NOT_FOUND);
-}
-
-#[actix_web::test]
-async fn management_verification_requires_bearer_and_returns_signed_projection() {
-    let transaction_id = Uuid::parse_str("019c8ca2-30a6-7000-8000-000000000002").unwrap();
-    let app = test::init_service(
-        App::new()
-            .app_data(web::Data::new(PresentationEndpoint::new(
-                Arc::new(Verifier),
-                b"management-secret".to_vec(),
-            )))
-            .route(
-                "/openid4vp/verification/{transaction_id}/receipt-capability",
-                web::post().to(issue_presentation_verification_receipt),
-            ),
-    )
-    .await;
-    let unauthorized = test::call_service(
-        &app,
-        test::TestRequest::post()
-            .uri(&format!(
-                "/openid4vp/verification/{transaction_id}/receipt-capability"
-            ))
-            .to_request(),
-    )
-    .await;
-    assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
-
-    let nonempty = test::call_service(
-        &app,
-        test::TestRequest::post()
-            .uri(&format!(
-                "/openid4vp/verification/{transaction_id}/receipt-capability"
-            ))
-            .insert_header(("Authorization", "Bearer management-secret"))
-            .set_payload("unexpected")
-            .to_request(),
-    )
-    .await;
-    assert_eq!(nonempty.status(), StatusCode::BAD_REQUEST);
-
-    let response = test::call_service(
-        &app,
-        test::TestRequest::post()
-            .uri(&format!(
-                "/openid4vp/verification/{transaction_id}/receipt-capability"
-            ))
-            .insert_header(("Authorization", "Bearer management-secret"))
-            .set_json(json!({
-                "schema": 1,
-                "issuance_request_jti": "019c8ca2-30a6-7000-8000-000000000006"
-            }))
-            .to_request(),
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::OK);
-    let body: serde_json::Value = test::read_body_json(response).await;
-    assert_eq!(body["transaction_id"], transaction_id.to_string());
-    assert_eq!(body["status"], "verified");
-    assert_eq!(body["receipt_jws"], "signed.receipt.value");
-    assert_eq!(
-        body["verification_ui_url"],
-        "https://auth.example/ui/verification-result#receipt=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-    );
-    assert_eq!(body["verification_ttl_seconds"], 300);
-}
-
-#[actix_web::test]
-async fn management_attach_returns_the_signed_non_secret_binding_projection() {
-    let transaction_id = Uuid::parse_str("019c8ca2-30a6-7000-8000-000000000002").unwrap();
-    let app = test::init_service(
-        App::new()
-            .app_data(web::Data::new(PresentationEndpoint::new(
-                Arc::new(Verifier),
-                b"management-secret".to_vec(),
-            )))
-            .route(
-                "/openid4vp/verification/{transaction_id}/evidence-context",
-                web::post().to(attach_presentation_verification_evidence),
-            ),
-    )
-    .await;
-    let response = test::call_service(
-        &app,
-        test::TestRequest::post()
-            .uri(&format!(
-                "/openid4vp/verification/{transaction_id}/evidence-context"
-            ))
-            .insert_header(("Authorization", "Bearer management-secret"))
-            .set_json(json!({
-                "schema": 1,
-                "evidence_context": {
-                    "run_jti": "run-jti-1",
-                    "artifact_sha256": "a".repeat(64),
-                    "matrix_sha256": "b".repeat(64),
-                    "suite_plan_id": "019c8ca2-30a6-7000-8000-000000000003",
-                    "suite_module_id": "019c8ca2-30a6-7000-8000-000000000004",
-                    "test_name": "openid4vp-test",
-                    "variant_sha256": "c".repeat(64)
-                }
-            }))
-            .to_request(),
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::OK);
-    let body: serde_json::Value = test::read_body_json(response).await;
-    assert_eq!(body["transaction_id"], transaction_id.to_string());
-    assert_eq!(body["status"], "attached");
-    assert_eq!(
-        body["presentation_binding"]["presentation_request_sha256"],
-        "e".repeat(64)
-    );
-    assert_eq!(body["intent_jws"], "signed.intent.value");
-    assert_eq!(body["intent_sha256"].as_str().unwrap().len(), 64);
-    assert_eq!(
-        body["presentation_binding_sha256"].as_str().unwrap().len(),
-        64
-    );
-
-    let duplicate_auth = test::call_service(
-        &app,
-        test::TestRequest::post()
-            .uri(&format!(
-                "/openid4vp/verification/{transaction_id}/evidence-context"
-            ))
-            .append_header(("Authorization", "Bearer management-secret"))
-            .append_header(("Authorization", "Bearer management-secret"))
-            .set_json(json!({"schema": 1, "evidence_context": {}}))
-            .to_request(),
-    )
-    .await;
-    assert_eq!(duplicate_auth.status(), StatusCode::UNAUTHORIZED);
-}
 
 #[test]
 async fn presentation_request_accepts_only_the_generic_trust_policy_fence() {
@@ -284,19 +59,11 @@ async fn presentation_request_accepts_only_the_generic_trust_policy_fence() {
         .is_err()
     );
 
-    let mut legacy = request_json();
-    legacy["conformance_lease_id"] = json!(Uuid::nil());
-    assert!(serde_json::from_value::<CreatePresentationRequest>(legacy).is_err());
-
-    let mut legacy = request_json();
-    legacy["conformance_task_jti"] = json!("request-deadbeef");
-    assert!(serde_json::from_value::<CreatePresentationRequest>(legacy).is_err());
-
-    let mut ambiguous = request_json();
-    ambiguous["evidence_context"] = json!({});
+    let mut unknown = request_json();
+    unknown["unexpected"] = json!({});
     assert!(
-        serde_json::from_value::<CreatePresentationRequest>(ambiguous).is_err(),
-        "evidence context must be attached to the selected pending transaction"
+        serde_json::from_value::<CreatePresentationRequest>(unknown).is_err(),
+        "unknown request members must be rejected"
     );
 }
 
@@ -376,42 +143,6 @@ impl CredentialIssuerOperations for Issuer {
 
 struct Verifier;
 
-fn verification_projection() -> PresentationVerificationProjection {
-    PresentationVerificationProjection {
-        schema: 1,
-        issuer: "https://auth.example".to_owned(),
-        deployment_id: "deployment-1".to_owned(),
-        runtime_instance_id: "runtime-1".to_owned(),
-        instance_key_id: "instance-key".to_owned(),
-        tenant_id: "019c8ca2-30a6-7000-8000-000000000005".to_owned(),
-        receipt_id: "019c8ca2-30a6-7000-8000-000000000001".to_owned(),
-        transaction_id: Uuid::parse_str("019c8ca2-30a6-7000-8000-000000000002").unwrap(),
-        issuance_request_jti: "019c8ca2-30a6-7000-8000-000000000006".to_owned(),
-        status: nazo_operator_protocol::Openid4vpVerificationStatus::Verified,
-        evidence_context: nazo_operator_protocol::Openid4vpEvidenceContext {
-            run_jti: "run-jti-1".to_owned(),
-            artifact_sha256: "a".repeat(64),
-            matrix_sha256: "b".repeat(64),
-            suite_plan_id: "019c8ca2-30a6-7000-8000-000000000003".to_owned(),
-            suite_module_id: "019c8ca2-30a6-7000-8000-000000000004".to_owned(),
-            test_name: "openid4vp-test".to_owned(),
-            variant_sha256: "c".repeat(64),
-        },
-        presentation_binding: nazo_operator_protocol::Openid4vpPresentationBinding {
-            presentation_request_sha256: "e".repeat(64),
-            trust_policy: nazo_operator_protocol::Openid4vpTrustPolicyBinding {
-                binding_id: None,
-                resource_id: None,
-                resource_digest: None,
-            },
-        },
-        intent_sha256: "f".repeat(64),
-        completed_at: "2026-08-22T03:00:00Z".to_owned(),
-        expires_at: "2026-08-22T03:05:00Z".to_owned(),
-        receipt_sha256: "d".repeat(64),
-    }
-}
-
 impl PresentationOperations for Verifier {
     fn create<'a>(
         &'a self,
@@ -429,6 +160,7 @@ impl PresentationOperations for Verifier {
             })
         })
     }
+
     fn request<'a>(
         &'a self,
         _: Uuid,
@@ -436,6 +168,7 @@ impl PresentationOperations for Verifier {
     ) -> PresentationFuture<'a, Result<PresentationResponseBody, PresentationHttpError>> {
         Box::pin(async { unreachable!() })
     }
+
     fn respond<'a>(
         &'a self,
         _: Uuid,
@@ -443,91 +176,72 @@ impl PresentationOperations for Verifier {
     ) -> PresentationFuture<'a, Result<Option<String>, PresentationHttpError>> {
         Box::pin(async { Ok(None) })
     }
+
     fn result<'a>(
         &'a self,
-        _: Uuid,
-    ) -> PresentationFuture<'a, Result<PresentationResult, PresentationHttpError>> {
-        Box::pin(async { unreachable!() })
-    }
-    fn issue_verification_receipt<'a>(
-        &'a self,
-        _: Uuid,
-        _: nazo_operator_protocol::Openid4vpIssueVerificationReceiptRequest,
-    ) -> PresentationFuture<
-        'a,
-        Result<nazo_openid4vc_http_actix::PresentationVerificationResponse, PresentationHttpError>,
-    > {
-        Box::pin(async {
-            Ok(PresentationVerificationResponse {
-                projection: verification_projection(),
-                receipt_jws: "signed.receipt.value".to_owned(),
-                receipt_api_url: "https://auth.example/openid4vp/verification-receipts".to_owned(),
-                verification_ui_url: "https://auth.example/ui/verification-result#receipt=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
-                verification_ttl_seconds: 300,
-            })
-        })
-    }
-    fn attach_verification_evidence<'a>(
-        &'a self,
         transaction_id: Uuid,
-        request: nazo_operator_protocol::Openid4vpAttachEvidenceRequest,
-    ) -> PresentationFuture<
-        'a,
-        Result<nazo_operator_protocol::Openid4vpAttachEvidenceResponse, PresentationHttpError>,
-    > {
+    ) -> PresentationFuture<'a, Result<PresentationResult, PresentationHttpError>> {
         Box::pin(async move {
-            let binding = nazo_operator_protocol::Openid4vpPresentationBinding {
-                presentation_request_sha256: "e".repeat(64),
-                trust_policy: nazo_operator_protocol::Openid4vpTrustPolicyBinding {
-                    binding_id: None,
-                    resource_id: None,
-                    resource_digest: None,
-                },
-            };
-            Ok(nazo_operator_protocol::Openid4vpAttachEvidenceResponse {
-                schema: 1,
-                transaction_id: transaction_id.to_string(),
-                status: nazo_operator_protocol::Openid4vpEvidenceAttachmentStatus::Attached,
-                evidence_context_sha256:
-                    nazo_operator_protocol::canonical_openid4vp_evidence_context_sha256(
-                        &request.evidence_context,
-                    )
-                    .unwrap(),
-                presentation_binding_sha256:
-                    nazo_operator_protocol::canonical_openid4vp_presentation_binding_sha256(
-                        &binding,
-                    )
-                    .unwrap(),
-                presentation_binding: binding,
-                intent_jws: "signed.intent.value".to_owned(),
-                intent_sha256: nazo_operator_protocol::compact_sha256("signed.intent.value"),
-            })
-        })
-    }
-    fn verification_receipt<'a>(
-        &'a self,
-        capability: &'a str,
-    ) -> PresentationFuture<
-        'a,
-        Result<
-            nazo_openid4vc_http_actix::PresentationVerificationProjection,
-            PresentationHttpError,
-        >,
-    > {
-        Box::pin(async move {
-            if capability == "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" {
-                Ok(verification_projection())
-            } else {
-                Err(PresentationHttpError {
+            if transaction_id.is_nil() {
+                return Err(PresentationHttpError {
                     status: 404,
                     error: "not_found",
-                    description: "Verification receipt is not available.",
-                })
+                    description: "Presentation transaction was not found.",
+                });
             }
+            Ok(PresentationResult {
+                transaction_id,
+                credentials: Vec::new(),
+                completed_at: chrono::Utc::now(),
+            })
         })
     }
 }
 
+#[test]
+async fn presentation_completion_page_reflects_a_verified_transaction() {
+    let endpoint = web::Data::new(PresentationEndpoint::new(Arc::new(Verifier), "secret"));
+    let app = test::init_service(App::new().app_data(endpoint).route(
+        "/openid4vp/complete/{transaction_id}",
+        web::get().to(presentation_complete),
+    ))
+    .await;
+    let response = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri(&format!("/openid4vp/complete/{}", Uuid::now_v7()))
+            .to_request(),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = test::read_body(response).await;
+    let body = std::str::from_utf8(&body).expect("completion page is UTF-8");
+    assert!(body.contains("data-testid=\"vp-verification-result\""));
+    assert!(body.contains("data-status=\"verified\""));
+    assert!(body.contains("Presentation verified"));
+}
+
+#[test]
+async fn presentation_completion_page_does_not_claim_an_unknown_transaction_succeeded() {
+    let endpoint = web::Data::new(PresentationEndpoint::new(Arc::new(Verifier), "secret"));
+    let app = test::init_service(App::new().app_data(endpoint).route(
+        "/openid4vp/complete/{transaction_id}",
+        web::get().to(presentation_complete),
+    ))
+    .await;
+    let response = test::call_service(
+        &app,
+        test::TestRequest::get()
+            .uri(&format!("/openid4vp/complete/{}", Uuid::nil()))
+            .to_request(),
+    )
+    .await;
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let body = test::read_body(response).await;
+    let body = std::str::from_utf8(&body).expect("error response is UTF-8");
+    assert!(!body.contains("data-status=\"verified\""));
+}
 struct CapturingVerifier {
     responses: Mutex<Vec<PresentationResponseInput>>,
 }
@@ -563,40 +277,7 @@ impl PresentationOperations for CapturingVerifier {
     ) -> PresentationFuture<'a, Result<PresentationResult, PresentationHttpError>> {
         Box::pin(async { unreachable!() })
     }
-    fn issue_verification_receipt<'a>(
-        &'a self,
-        _: Uuid,
-        _: nazo_operator_protocol::Openid4vpIssueVerificationReceiptRequest,
-    ) -> PresentationFuture<
-        'a,
-        Result<nazo_openid4vc_http_actix::PresentationVerificationResponse, PresentationHttpError>,
-    > {
-        Box::pin(async { unreachable!() })
-    }
-    fn attach_verification_evidence<'a>(
-        &'a self,
-        _: Uuid,
-        _: nazo_operator_protocol::Openid4vpAttachEvidenceRequest,
-    ) -> PresentationFuture<
-        'a,
-        Result<nazo_operator_protocol::Openid4vpAttachEvidenceResponse, PresentationHttpError>,
-    > {
-        Box::pin(async { unreachable!() })
-    }
-    fn verification_receipt<'a>(
-        &'a self,
-        _: &'a str,
-    ) -> PresentationFuture<
-        'a,
-        Result<
-            nazo_openid4vc_http_actix::PresentationVerificationProjection,
-            PresentationHttpError,
-        >,
-    > {
-        Box::pin(async { unreachable!() })
-    }
 }
-
 struct DpopNonceIssuer;
 
 impl CredentialIssuerOperations for DpopNonceIssuer {
@@ -1286,7 +967,7 @@ async fn notification_endpoint_accepts_extension_members_without_relaxing_authen
             .set_json(json!({
                 "notification_id": "notification-1",
                 "event": "credential_accepted",
-                "suite_extension": "ignored"
+                "unknown_extension": "ignored"
             }))
             .to_request(),
     )

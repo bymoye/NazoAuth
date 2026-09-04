@@ -53,11 +53,11 @@ References:
 
 | Profile | Status | Notes |
 | --- | --- | --- |
-| OIDC Basic OP | Implemented | External Suite coverage and retesting are owned by NazoAuthCtl; this server repository retains product-owned regression contracts only. |
-| OIDC Config | Implemented and OIDF-tested | Discovery metadata is generated from runtime profile/config. |
-| FAPI2 Security | Implemented and OIDF-tested | PAR, PKCE S256, confidential clients, sender-constrained tokens, and client auth policy are separated from Message Signing. |
-| FAPI2 Message Signing authz request | Implemented and OIDF-tested | Signed request objects at PAR with `aud`, `nbf`, and bounded `exp`. |
-| FAPI2 Message Signing JARM | Implemented and OIDF-tested where advertised | Signing failure must not fall back to plain query responses. |
+| OIDC Basic OP | Implemented | Third-party validation coverage and retesting are owned by NazoAuthCtl; this server repository retains product-owned regression contracts only. |
+| OIDC Config | Implemented and protocol-tested | Discovery metadata is generated from runtime profile/config. |
+| FAPI2 Security | Implemented and protocol-tested | PAR, PKCE S256, confidential clients, sender-constrained tokens, and client auth policy are separated from Message Signing. |
+| FAPI2 Message Signing authz request | Implemented and protocol-tested | Signed request objects at PAR with `aud`, `nbf`, and bounded `exp`. |
+| FAPI2 Message Signing JARM | Implemented and protocol-tested where advertised | Signing failure must not fall back to plain query responses. |
 | FAPI2 introspection JWT response option | Implemented/profile-scoped | Advertised only by `fapi2-message-signing-introspection`; signed JWT is always the base response, and JWE is used only when the authenticated caller has supported per-client encryption metadata. |
 
 ## Outside OAuth 2.1 Core
@@ -85,14 +85,6 @@ Implementation and workflow evidence:
   `.github/workflows/conformance-security.yml`: documentation-only commits do
   not run the expensive CI matrix, while code, dependency, migration, script,
   deploy, container, runtime config, and workflow changes still do.
-- Latest implementation-affecting local gates were run before the OIDF proof
-  update: `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D
-  warnings`, `cargo test --all-targets --all-features --locked`, and `git diff
-  --check`.
-
-The latest retained official OIDF full matrix passed on runtime implementation
-commit `be7ef9f6a9197520235a59d42866a0918a293014`, and the durable result index
-is owned by NazoAuthCtl as an external black-box artifact.
-Documentation-only commits can differ from the implementation commit under
-test; implementation-affecting commits must rerun the official matrix and add a
-fresh durable record.
+- Implementation-affecting changes run `cargo fmt --check`,
+  `cargo clippy --all-targets --all-features -- -D warnings`,
+  `cargo test --all-targets --all-features --locked`, and `git diff --check`.

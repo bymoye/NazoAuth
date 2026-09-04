@@ -12,12 +12,16 @@ use rcgen::{
 use rustls::pki_types::{CertificateDer, pem::PemObject};
 use url::{Host, Url};
 
-use crate::{config::ConfigSource, settings::key_settings_from_config};
+use crate::{
+    config::ConfigSource,
+    settings::{Settings, key_settings_from_config},
+};
 
 #[derive(Debug)]
 struct Openid4vcCertificatePaths {
     chain: PathBuf,
     anchors: PathBuf,
+    revocation_snapshot: Option<PathBuf>,
     hostname: String,
 }
 
@@ -61,6 +65,9 @@ fn key_task_config_from(
             Some(Openid4vcCertificatePaths {
                 chain,
                 anchors,
+                revocation_snapshot: config
+                    .optional_string("OPENID4VC_REVOCATION_SNAPSHOT_FILE")
+                    .map(PathBuf::from),
                 hostname: hostname.to_owned(),
             })
         }
@@ -96,6 +103,71 @@ pub(crate) async fn operator_generate_local(
     let options = parse_generate_local(algorithm, purposes)?;
     let (settings, certificate_paths) = load_key_task_config()?;
     generate_local_with_key_settings(&settings, certificate_paths.as_ref(), options).await
+}
+
+pub(crate) async fn operator_generate_local_for_tenant(
+    binding: &nazo_identity::TenantDirectoryBinding,
+    algorithm: &str,
+    purposes: &[String],
+) -> anyhow::Result<(String, String, String)> {
+    let options = parse_generate_local(algorithm, purposes)?;
+    let config = ConfigSource::load()?;
+    let settings = Settings::from_directory_binding(&config, binding)?;
+    let chain = settings
+        .openid4vc
+        .signing_certificate_chain_file
+        .clone()
+        .context("tenant-local certificate generation requires OpenID4VC to be enabled")?;
+    let anchors = settings
+        .openid4vc
+        .trust_anchors_file
+        .clone()
+        .context("tenant-local certificate generation requires OpenID4VC trust storage")?;
+    let issuer = Url::parse(&binding.issuer)?;
+    let Host::Domain(hostname) = issuer
+        .host()
+        .context("tenant issuer must include a DNS hostname")?
+    else {
+        bail!("tenant issuer must include a DNS hostname");
+    };
+    let certificate_paths = Openid4vcCertificatePaths {
+        chain: chain.clone(),
+        anchors,
+        revocation_snapshot: settings.openid4vc.revocation_snapshot_file.clone(),
+        hostname: hostname.to_owned(),
+    };
+    let key_settings = settings.key_settings();
+    nazo_key_management::KeyManager::load_or_create(key_settings.clone()).await?;
+    for record in nazo_key_management::KeyManager::list_keys(&key_settings).await? {
+        if record.status != nazo_key_management::KeyRecordStatus::PurposeScoped
+            || record.algorithm != "ES256"
+            || record.backend != "local-pem"
+            || record.locator.is_empty()
+        {
+            continue;
+        }
+        let private_key_pem =
+            tokio::fs::read_to_string(key_settings.keys_dir.join(&record.locator)).await?;
+        let private_key = KeyPair::from_pem(&private_key_pem)?;
+        if existing_openid4vc_bundle_matches(&certificate_paths, &private_key).await? {
+            ensure_openid4vc_revocation_snapshot(&certificate_paths).await?;
+            let certificate_chain = tokio::fs::read_to_string(&chain).await?;
+            return Ok((
+                record.kid,
+                keyset_revision_from(&key_settings).await?,
+                certificate_chain,
+            ));
+        }
+    }
+    let (kid, revision) =
+        generate_local_with_key_settings(&key_settings, Some(&certificate_paths), options).await?;
+    let certificate_chain = tokio::fs::read_to_string(&chain).await.with_context(|| {
+        format!(
+            "failed to read generated certificate chain {}",
+            chain.display()
+        )
+    })?;
+    Ok((kid, revision, certificate_chain))
 }
 
 async fn generate_local_with_key_settings(
@@ -153,6 +225,26 @@ pub(crate) async fn operator_register_external(
     keyset_revision_from(&settings).await
 }
 
+pub(crate) async fn remove_tenant_material(
+    tenant_id: nazo_identity::TenantId,
+) -> anyhow::Result<()> {
+    let config = ConfigSource::load_without_secret_values()?;
+    let data_dir = config.persistent_path("DATA_DIR", Some(crate::config::DEFAULT_DATA_DIR))?;
+    let tenants_dir = data_dir.join("tenants");
+    let tenant_dir = tenants_dir.join(tenant_id.as_uuid().to_string());
+    match tokio::fs::symlink_metadata(&tenant_dir).await {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+            bail!("tenant material path must be a real directory")
+        }
+        Ok(_) => tokio::fs::remove_dir_all(&tenant_dir)
+            .await
+            .with_context(|| format!("failed to remove tenant material {}", tenant_dir.display())),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error)
+            .with_context(|| format!("failed to inspect tenant material {}", tenant_dir.display())),
+    }
+}
+
 async fn ensure_openid4vc_certificates(
     settings: &nazo_key_management::KeySettings,
     kid: &str,
@@ -178,11 +270,62 @@ async fn ensure_openid4vc_certificates(
     let private_key = KeyPair::from_pem(&private_key_pem)
         .context("failed to parse credential signing key as PKCS#8 PEM")?;
     if existing_openid4vc_bundle_matches(paths, &private_key).await? {
+        ensure_openid4vc_revocation_snapshot(paths).await?;
         return Ok(());
     }
 
     let bundle = build_openid4vc_certificate_bundle(&private_key, &paths.hostname)?;
-    activate_openid4vc_certificate_bundle(paths, &bundle).await
+    activate_openid4vc_certificate_bundle(paths, &bundle).await?;
+    ensure_openid4vc_revocation_snapshot(paths).await
+}
+
+async fn ensure_openid4vc_revocation_snapshot(
+    paths: &Openid4vcCertificatePaths,
+) -> anyhow::Result<()> {
+    let Some(path) = paths.revocation_snapshot.as_ref() else {
+        return Ok(());
+    };
+    let now = chrono::Utc::now();
+    let snapshot = nazo_digital_credentials::CertificateRevocationSnapshot {
+        version: nazo_digital_credentials::CertificateRevocationSnapshot::VERSION,
+        this_update: now - chrono::Duration::minutes(1),
+        next_update: now + chrono::Duration::hours(24),
+        entries: Vec::new(),
+    };
+    let contents = serde_json::to_vec(&snapshot)?;
+    let parent = path
+        .parent()
+        .context("OpenID4VC revocation snapshot path has no parent")?;
+    tokio::fs::create_dir_all(parent).await?;
+    match tokio::fs::symlink_metadata(path).await {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+            bail!(
+                "OpenID4VC revocation snapshot must be a regular file: {}",
+                path.display()
+            );
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(error).with_context(|| format!("failed to inspect {}", path.display()));
+        }
+    }
+    let destination = path.clone();
+    tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+        use std::io::Write as _;
+
+        atomicwrites::AtomicFile::new(&destination, atomicwrites::AllowOverwrite)
+            .write(|file| file.write_all(&contents))
+            .map_err(std::io::Error::from)
+    })
+    .await
+    .context("OpenID4VC revocation snapshot writer task failed")?
+    .with_context(|| {
+        format!(
+            "failed to atomically activate OpenID4VC revocation snapshot {}",
+            path.display()
+        )
+    })
 }
 
 async fn existing_openid4vc_bundle_matches(

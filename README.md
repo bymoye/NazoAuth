@@ -24,39 +24,17 @@ tracked in the future roadmap rather than advertised as a current default
 capability. It uses PostgreSQL for durable state and Valkey for short-lived
 protocol state.
 
-## OpenAI Build Week 2026
-
-NazoAuth predates OpenAI Build Week. The hackathon submission covers only the
-work completed after the submission period opened at
-`2026-07-13T16:00:00Z`. The last pre-period commit is
-[`ef7df3e`](https://github.com/nazozero/NazoAuth/commit/ef7df3e4606953002bb768a66a1897a06b42a332),
-and the complete review range is
-[`ef7df3e..main`](https://github.com/nazozero/NazoAuth/compare/ef7df3e4606953002bb768a66a1897a06b42a332...main).
-
-During the submission period, Codex with GPT-5.6 helped turn the existing
-server into a modular Rust workspace, implement OpenID4VC Final issuer and
-verifier roles, add FAPI-CIBA mTLS/ping and RFC 9967 SCIM security-event
-delivery, and harden the browser client and onboarding flow. Codex
-accelerated repository audits, implementation, tests, specification
-cross-checks, CI diagnosis, and deployment verification. The maintainer chose
-the product and security boundaries, required standards-first behavior instead
-of suite-specific shortcuts, reviewed the changes, and controlled deployment
-and merge decisions.
-
-See the [Build Week engineering record](docs/project/openai-build-week-2026.md)
-for the before/after boundary, dated pull requests, measured change volume,
-Codex collaboration details, setup instructions, and a no-rebuild public test
-path. The live demo is available at <https://auth.nazo.run/ui/auth>.
-
 ## Status
 
 | Item | Value |
 | --- | --- |
-| Package | `nazo-oauth-server` |
+| Application package | `nazo-oauth-server` (database-neutral library) |
+| Default distribution package | `nazoauth` (PostgreSQL + Valkey) |
+| Storage adapters | `nazo-oauth-server-postgres`, `nazo-oauth-server-valkey` |
 | Workspace version | `0.2.3` |
 | License | AGPL-3.0-or-later |
 | Language | Rust 2024 |
-| Runtime services | PostgreSQL, Valkey |
+| Runtime services | PostgreSQL, plus Valkey |
 | Conformance test issuer | operator-provided public HTTPS origin |
 | Default deployment model | same-origin |
 
@@ -71,7 +49,7 @@ composite score:
 | Static security analysis | CodeQL Rust analysis with the `security-extended` query suite. |
 | Dependency policy | GitHub dependency review, `cargo audit`, and `cargo deny` over advisories, bans, licenses, and sources. |
 | Runtime security behavior | Real HTTP E2E, load/race gate, and Valkey outage injection in `conformance-security`. |
-| External protocol conformance | NazoAuthCtl owns signed Suite artifacts, external execution, evidence, and cleanup. The server is exercised only through its public protocol and tenant-resource interfaces. |
+| External protocol validation | Third-party clients exercise only public protocol and tenant-resource interfaces. |
 | Coverage trend | Codecov LCOV upload from the dedicated coverage workflow. |
 | Release provenance | CycloneDX SBOM, Trivy image scan, Sigstore signing, and GitHub artifact attestations. |
 
@@ -81,7 +59,7 @@ composite score:
 
 ## Certification
 
-🏅 External Suite conformance is orchestrated by NazoAuthCtl.
+🏅 External validators interact with NazoAuth exactly like any other client.
 
 ## Features
 
@@ -122,7 +100,7 @@ nazoauthctl install --host production-host --name production \
   --database-lifecycle-password-file ./database-lifecycle-password \
   --valkey-host valkey.internal --valkey-port 6379 \
   --valkey-password-file ./valkey-password
-nazoauthctl bootstrap-admin --instance production
+nazoauthctl admin create --instance production
 nazoauthctl bind --instance production --label operations \
   --output-secret-file ./production-recovery-secret
 nazoauthctl status --instance production
@@ -139,11 +117,11 @@ private boundary. Data, signing keys, generated application secrets, and
 avatars are persistent. See [managed installation, update, and recovery](docs/operations/one-click-update.md)
 for current-format import and backup policy.
 
-On a database without an administrator, `nazoauthctl bootstrap-admin` reads the
-runtime-owned one-time claim without printing it. Interactive use prompts on a
-TTY; automation supplies the closed credential document through stdin or a
-dedicated file descriptor. The token, credentials, and any token-bearing URL
-never enter argv, ordinary environment variables, logs, or audit records.
+On a database without an administrator, `nazoauthctl admin create` invokes
+the target runtime's local `nazoauth admin-provision` one-shot command. The
+closed credential document is supplied through the controller's protected
+credential path; it is never sent through an HTTP bootstrap route, argv,
+ordinary environment variables, logs, or audit records.
 
 For a public issuer, pass `--public-url https://auth.example.com`; see the
 [deployment guide](docs/operations/deployment.md) for TLS ingress requirements.
@@ -249,7 +227,6 @@ See [docs/project/roadmap.md](docs/project/roadmap.md) for the current scope rec
 | --- | --- |
 | Documentation index | [docs/README.md](docs/README.md) |
 | Workspace architecture | [docs/project/architecture.md](docs/project/architecture.md) |
-| OpenAI Build Week 2026 engineering record | [docs/project/openai-build-week-2026.md](docs/project/openai-build-week-2026.md) |
 | Configuration | [docs/operations/configuration.md](docs/operations/configuration.md) |
 | Deployment | [docs/operations/deployment.md](docs/operations/deployment.md) |
 | Chinese deployment guide | [docs/operations/deployment.zh-CN.md](docs/operations/deployment.zh-CN.md) |

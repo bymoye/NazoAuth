@@ -75,7 +75,7 @@ where
     /// Validate and prepare a registration for a caller that owns a wider transaction boundary.
     ///
     /// Access-request approval uses this path so the client row and approval state can still be
-    /// committed by the PostgreSQL adapter in one transaction.
+    /// committed by the persistence adapter in one transaction.
     pub async fn prepare_registration(
         &self,
         request: CreateClientRequest,

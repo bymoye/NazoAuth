@@ -17,6 +17,18 @@ use crate::domain::{DynamicRegistrationConfig, dynamic_registration_endpoint};
 
 struct ContractProfileOperations;
 
+struct ZeroDatabasePoolMetrics;
+
+impl nazo_persistence::DatabasePoolMetricsPort for ZeroDatabasePoolMetrics {
+    fn snapshot(&self) -> nazo_persistence::DatabasePoolMetrics {
+        nazo_persistence::DatabasePoolMetrics {
+            acquire_count: 0,
+            wait_nanos_total: 0,
+            wait_nanos_max: 0,
+        }
+    }
+}
+
 impl ProfileAccountOperations for ContractProfileOperations {
     fn me(&self, _session_id: SessionId) -> ProfileAccountFuture<'_, ProfileMe> {
         Box::pin(async { Ok(ProfileMe::Active(Box::new(contract_profile()))) })
@@ -92,6 +104,38 @@ fn assert_profile_security_headers(headers: &header::HeaderMap) {
         "frame-ancestors 'none'; base-uri 'none'; object-src 'none'"
     );
 }
+
+#[actix_web::test]
+async fn request_host_uses_the_directory_host_canonicalization() {
+    for (authority, expected) in [
+        ("Tenant-A.Example.:443", "tenant-a.example"),
+        ("[2001:0db8::1]:8443", "[2001:db8::1]"),
+    ] {
+        let request = test::TestRequest::default()
+            .insert_header((header::HOST, authority))
+            .to_srv_request();
+        assert_eq!(
+            canonical_request_host(request.head()).as_deref(),
+            Some(expected)
+        );
+    }
+
+    let http2 = test::TestRequest::default()
+        .version(actix_web::http::Version::HTTP_2)
+        .uri("https://Tenant-B.Example.:8443/token")
+        .insert_header((header::HOST, "ignored.example"))
+        .to_srv_request();
+    assert_eq!(
+        canonical_request_host(http2.head()).as_deref(),
+        Some("tenant-b.example")
+    );
+
+    let userinfo = test::TestRequest::default()
+        .insert_header((header::HOST, "ignored@tenant-a.example"))
+        .to_srv_request();
+    assert_eq!(canonical_request_host(userinfo.head()), None);
+}
+
 #[actix_web::test]
 async fn browser_token_management_cors_allows_post_dpop_without_credentials() {
     let settings = test_settings(vec!["https://app.example".to_owned()]);
@@ -253,8 +297,8 @@ async fn disabled_dynamic_client_registration_keeps_the_static_route_contract() 
     );
     let dynamic_registration_endpoint = web::Data::new(dynamic_registration_endpoint(
         DynamicRegistrationConfig::from(settings.as_ref()),
-        nazo_postgres::OAuthClientRepository::new(pool.clone()),
-        nazo_valkey::RateLimitStore::new(&valkey),
+        Arc::new(nazo_postgres::OAuthClientRepository::new(pool.clone())),
+        std::sync::Arc::new(nazo_valkey::RateLimitStore::new(&valkey)),
         crate::test_support::test_key_manager(),
         runtime_modules,
         remote_documents,
@@ -404,9 +448,21 @@ async fn perf_metrics_route_is_controlled_by_the_typed_startup_flag() {
     .await;
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 
-    let enabled =
-        test::init_service(App::new().configure(|cfg| routes::configure(cfg, &settings, true)))
-            .await;
+    let pool_metrics: web::Data<dyn nazo_persistence::DatabasePoolMetricsPort> = web::Data::from(
+        Arc::new(ZeroDatabasePoolMetrics) as Arc<dyn nazo_persistence::DatabasePoolMetricsPort>,
+    );
+    let enabled = test::init_service(
+        App::new()
+            .app_data(pool_metrics)
+            .app_data(web::Data::new(
+                nazo_identity::TenantContext::default_system(),
+            ))
+            .app_data(web::Data::new(routes::ControlTenantId::new(
+                nazo_identity::TenantContext::default_system().tenant_id,
+            )))
+            .configure(|cfg| routes::configure(cfg, &settings, true)),
+    )
+    .await;
     let response = test::call_service(
         &enabled,
         test::TestRequest::get().uri("/__perf/metrics").to_request(),

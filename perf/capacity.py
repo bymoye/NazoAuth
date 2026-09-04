@@ -32,7 +32,6 @@ DEFAULT_RATES: dict[str, list[int]] = {
     "authorize_par_session": [16, 32, 64, 128, 256],
     "revoke_refresh_token": [16, 32, 64, 128, 256],
     "metadata_jwks": [250, 500, 1000, 1500, 2000],
-    "ciba_private_key_jwt_dpop_poll": [16, 32, 64, 128, 256],
     "same_user_refresh_token_rotation": [8, 16, 32, 64, 128],
     "same_user_introspect_opaque_refresh_token": [8, 16, 32, 64, 128],
     "same_user_authorize_par_session": [8, 16, 32, 64, 128],

@@ -39,7 +39,9 @@ async fn issue_token_response_with_modules(
 ) -> HttpResponse {
     let service = ServerTokenService::new(
         crate::test_support::token_issuance_repository(state.diesel_db.clone()),
-        nazo_valkey::TokenIssuanceStateAdapter::new(&state.valkey_connection()),
+        std::sync::Arc::new(nazo_valkey::TokenIssuanceStateAdapter::new(
+            &state.valkey_connection(),
+        )),
         state.keyset.clone(),
     );
     let config = TokenIssuanceConfig::from(state.settings.as_ref());
@@ -65,7 +67,9 @@ async fn issue_token_response_with_grant_for_test(
 ) -> HttpResponse {
     let service = ServerTokenService::new(
         crate::test_support::token_issuance_repository(state.diesel_db.clone()),
-        nazo_valkey::TokenIssuanceStateAdapter::new(&state.valkey_connection()),
+        std::sync::Arc::new(nazo_valkey::TokenIssuanceStateAdapter::new(
+            &state.valkey_connection(),
+        )),
         state.keyset.clone(),
     );
     let config = TokenIssuanceConfig::from(state.settings.as_ref());
@@ -157,7 +161,9 @@ pub(crate) async fn persist_token_issuance_response_for_test(
 ) {
     let service = ServerTokenService::new(
         crate::test_support::token_issuance_repository(state.diesel_db.clone()),
-        nazo_valkey::TokenIssuanceStateAdapter::new(&state.valkey_connection()),
+        std::sync::Arc::new(nazo_valkey::TokenIssuanceStateAdapter::new(
+            &state.valkey_connection(),
+        )),
         state.keyset.clone(),
     );
     let issuance_id = Uuid::now_v7();
@@ -502,7 +508,9 @@ async fn delete_token_issuance_for_grant(
 ) {
     let service = ServerTokenService::new(
         crate::test_support::token_issuance_repository(state.diesel_db.clone()),
-        nazo_valkey::TokenIssuanceStateAdapter::new(&state.valkey_connection()),
+        std::sync::Arc::new(nazo_valkey::TokenIssuanceStateAdapter::new(
+            &state.valkey_connection(),
+        )),
         state.keyset.clone(),
     );
     if let Ok(Some(record)) = service
@@ -1426,7 +1434,9 @@ async fn terminal_issuance_owned_by_another_claim_is_busy() {
     let client = client_with_grants(&["client_credentials"]);
     let service = ServerTokenService::new(
         crate::test_support::token_issuance_repository(state.diesel_db.clone()),
-        nazo_valkey::TokenIssuanceStateAdapter::new(&state.valkey_connection()),
+        std::sync::Arc::new(nazo_valkey::TokenIssuanceStateAdapter::new(
+            &state.valkey_connection(),
+        )),
         state.keyset.clone(),
     );
     let issuance_id = Uuid::now_v7();
@@ -1521,7 +1531,9 @@ async fn concurrent_prepared_issuance_recovers_the_winning_response() {
 
     let service = ServerTokenService::new(
         crate::test_support::token_issuance_repository(state.diesel_db.clone()),
-        nazo_valkey::TokenIssuanceStateAdapter::new(&state.valkey_connection()),
+        std::sync::Arc::new(nazo_valkey::TokenIssuanceStateAdapter::new(
+            &state.valkey_connection(),
+        )),
         state.keyset.clone(),
     );
     let prepared = service
@@ -1583,7 +1595,9 @@ async fn prepared_issuance_rejects_a_different_request_digest_for_the_same_grant
     let request_digest = issuance_request_digest(&client, &first_issue, &grant_key);
     let service = ServerTokenService::new(
         crate::test_support::token_issuance_repository(state.diesel_db.clone()),
-        nazo_valkey::TokenIssuanceStateAdapter::new(&state.valkey_connection()),
+        std::sync::Arc::new(nazo_valkey::TokenIssuanceStateAdapter::new(
+            &state.valkey_connection(),
+        )),
         state.keyset.clone(),
     );
     let prepared = service
@@ -1851,7 +1865,9 @@ async fn busy_prepared_issuance_fails_closed_after_bounded_wait() {
     let issuance_id = Uuid::now_v7();
     let service = ServerTokenService::new(
         crate::test_support::token_issuance_repository(state.diesel_db.clone()),
-        nazo_valkey::TokenIssuanceStateAdapter::new(&state.valkey_connection()),
+        std::sync::Arc::new(nazo_valkey::TokenIssuanceStateAdapter::new(
+            &state.valkey_connection(),
+        )),
         state.keyset.clone(),
     );
     let prepared = service
@@ -1906,7 +1922,9 @@ async fn busy_prepared_issuance_recovers_a_response_persisted_by_the_owner() {
     let response_digest = blake3::hash(owner_response_body).to_hex().to_string();
     let service = ServerTokenService::new(
         crate::test_support::token_issuance_repository(state.diesel_db.clone()),
-        nazo_valkey::TokenIssuanceStateAdapter::new(&state.valkey_connection()),
+        std::sync::Arc::new(nazo_valkey::TokenIssuanceStateAdapter::new(
+            &state.valkey_connection(),
+        )),
         state.keyset.clone(),
     );
     let prepared = service
@@ -1932,7 +1950,9 @@ async fn busy_prepared_issuance_recovers_a_response_persisted_by_the_owner() {
 
     let writer_service = ServerTokenService::new(
         crate::test_support::token_issuance_repository(state.diesel_db.clone()),
-        nazo_valkey::TokenIssuanceStateAdapter::new(&state.valkey_connection()),
+        std::sync::Arc::new(nazo_valkey::TokenIssuanceStateAdapter::new(
+            &state.valkey_connection(),
+        )),
         state.keyset.clone(),
     );
     let writer = async {

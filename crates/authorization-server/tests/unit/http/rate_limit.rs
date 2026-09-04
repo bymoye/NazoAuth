@@ -1,202 +1,50 @@
-use crate::adapters::security::blake3_hex;
+use std::sync::{Arc, Mutex};
 
-use crate::{settings::RateLimitSettings, settings::Settings, test_support::TestInfrastructure};
-
-use nazo_http_actix::{ClientIpHeaderMode, IpCidr, client_ip_with_context};
-
-#[derive(Clone, Copy)]
-pub(crate) enum RateLimitPolicy {
-    Auth,
-    Token,
-    TokenManagement,
-}
-
-impl RateLimitPolicy {
-    fn name(self) -> &'static str {
-        match self {
-            Self::Auth => "auth",
-            Self::Token => "token",
-            Self::TokenManagement => "token_management",
-        }
-    }
-
-    fn dimension(self) -> nazo_valkey::RateDimension {
-        match self {
-            Self::Auth => nazo_valkey::RateDimension::Auth,
-            Self::Token => nazo_valkey::RateDimension::Token,
-            Self::TokenManagement => nazo_valkey::RateDimension::TokenManagement,
-        }
-    }
-
-    fn max_requests(self, settings: &RateLimitSettings) -> u64 {
-        match self {
-            Self::Auth => settings.auth_max_requests,
-            Self::Token => settings.token_max_requests,
-            Self::TokenManagement => settings.token_management_max_requests,
-        }
-    }
-}
-
-pub(crate) async fn enforce_rate_limit(
-    state: &TestInfrastructure,
-    req: &HttpRequest,
-    policy: RateLimitPolicy,
-) -> Result<(), HttpResponse> {
-    let settings = &state.settings.identity.rate_limit;
-    let endpoint = &state.settings.endpoint;
-    enforce_rate_limit_with_store(
-        &nazo_valkey::RateLimitStore::new(&state.valkey_connection()),
-        req,
-        policy,
-        settings.window_seconds,
-        policy.max_requests(settings),
-        endpoint.client_ip_header_mode,
-        &endpoint.trusted_proxy_cidrs,
-    )
-    .await
-}
-
-pub(crate) async fn enforce_rate_limit_with_store(
-    store: &nazo_valkey::RateLimitStore,
-    req: &HttpRequest,
-    policy: RateLimitPolicy,
-    window_seconds: u64,
-    max_requests: u64,
-    client_ip_header_mode: ClientIpHeaderMode,
-    trusted_proxy_cidrs: &[IpCidr],
-) -> Result<(), HttpResponse> {
-    let count = store
-        .increment(
-            policy.dimension(),
-            &client_ip_with_context(req, client_ip_header_mode, trusted_proxy_cidrs),
-            window_seconds,
-        )
-        .await
-        .map_err(|error| {
-            tracing::warn!(%error, "rate limit increment failed");
-            oauth_error(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "server_error",
-                "请求频率校验失败.",
-            )
-        })?;
-
-    if count > max_requests {
-        return Err(rate_limited_response(window_seconds));
-    }
-    Ok(())
-}
-
-fn rate_limit_subject(req: &HttpRequest, settings: &Settings) -> String {
-    client_ip_with_context(
-        req,
-        settings.endpoint.client_ip_header_mode,
-        &settings.endpoint.trusted_proxy_cidrs,
-    )
-}
-
-fn rate_limit_key(policy: RateLimitPolicy, subject: &str) -> String {
-    format!(
-        "oauth:rate:{}:{}",
-        policy.name(),
-        blake3_hex(subject.trim())
-    )
-}
+use actix_web::{
+    http::{StatusCode, header},
+    test::TestRequest,
+};
+use nazo_auth::{
+    RequestRateLimitBucket, RequestRateLimitError, RequestRateLimitFuture, RequestRateLimitPort,
+};
+use nazo_http_actix::{ClientIpConfig, ClientIpHeaderMode, OAuthJsonErrorFields};
 
 use super::*;
-use crate::test_support::valkey::valkey_del;
-use crate::test_support::valkey::valkey_eval_string;
-use crate::test_support::valkey::valkey_set_ex;
-use nazo_http_actix::OAuthJsonErrorFields;
-use std::sync::Arc;
 
-use crate::config::ConfigSource;
-use nazo_postgres::create_pool;
-
-use actix_web::test::TestRequest;
-use fred::interfaces::ClientLike;
-use fred::prelude::{
-    Builder as ValkeyBuilder, Config as ValkeyConfig, ConnectionConfig, PerformanceConfig,
-};
-use std::time::Duration as StdDuration;
-
-async fn live_rate_limit_state() -> Option<TestInfrastructure> {
-    let valkey_url = std::env::var("VALKEY_URL").ok()?;
-    let mut builder =
-        ValkeyBuilder::from_config(ValkeyConfig::from_url(&valkey_url).expect("VALKEY_URL"));
-    builder.with_performance_config(|performance: &mut PerformanceConfig| {
-        performance.default_command_timeout = StdDuration::from_millis(1000);
-    });
-    builder.with_connection_config(|connection: &mut ConnectionConfig| {
-        connection.connection_timeout = StdDuration::from_millis(1000);
-        connection.internal_command_timeout = StdDuration::from_millis(1000);
-        connection.max_command_attempts = 1;
-    });
-    let valkey = builder.build().expect("valkey client should build");
-    valkey.init().await.expect("valkey should connect");
-
-    Some(TestInfrastructure {
-        diesel_db: create_pool(
-            "postgres://nazo_rate_limit_test_invalid:nazo_rate_limit_test_invalid@127.0.0.1:1/nazo"
-                .to_owned(),
-            1,
-        )
-        .expect("pool construction should not connect"),
-        valkey,
-        settings: Arc::new(
-            Settings::from_config(&ConfigSource::default()).expect("default settings should load"),
-        ),
-        keyset: crate::test_support::test_key_manager(),
-    })
+#[derive(Clone)]
+struct FakeRateLimiter {
+    result: Result<u64, RequestRateLimitError>,
+    calls: Arc<Mutex<Vec<(RequestRateLimitBucket, String, u64)>>>,
 }
 
-async fn eval_rate_limit_key_ttl(state: &TestInfrastructure, key: &str) -> i64 {
-    valkey_eval_string(
-        &state.valkey,
-        "return tostring(redis.call('TTL', KEYS[1]))",
-        vec![nazo_valkey::test_support::state_storage_key(key)],
-        Vec::new(),
-    )
-    .await
-    .expect("rate limit key TTL should be readable")
-    .parse()
-    .expect("rate limit key TTL should be an integer")
+impl FakeRateLimiter {
+    fn returning(result: Result<u64, RequestRateLimitError>) -> Self {
+        Self {
+            result,
+            calls: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
 }
 
-async fn set_rate_limit_key_without_ttl(state: &TestInfrastructure, key: &str, value: &str) {
-    valkey_eval_string(
-        &state.valkey,
-        "redis.call('SET', KEYS[1], ARGV[1]); return 'OK'",
-        vec![nazo_valkey::test_support::state_storage_key(key)],
-        vec![value.to_owned()],
-    )
-    .await
-    .expect("rate limit key should be staged without TTL");
+impl RequestRateLimitPort for FakeRateLimiter {
+    fn increment<'a>(
+        &'a self,
+        bucket: RequestRateLimitBucket,
+        subject: &'a str,
+        window_seconds: u64,
+    ) -> RequestRateLimitFuture<'a> {
+        Box::pin(async move {
+            self.calls
+                .lock()
+                .unwrap()
+                .push((bucket, subject.to_owned(), window_seconds));
+            self.result
+        })
+    }
 }
 
-#[test]
-fn rate_limit_key_does_not_store_raw_peer_identity() {
-    let key = rate_limit_key(RateLimitPolicy::Auth, "203.0.113.9");
-
-    assert!(key.starts_with("oauth:rate:auth:"));
-    assert!(!key.contains("203.0.113.9"));
-    assert_ne!(key, "oauth:rate:auth:203.0.113.9");
-}
-
-#[test]
-fn rate_limit_keys_are_isolated_by_policy() {
-    let subject = "203.0.113.9";
-
-    let auth = rate_limit_key(RateLimitPolicy::Auth, subject);
-    let token = rate_limit_key(RateLimitPolicy::Token, subject);
-    let token_management = rate_limit_key(RateLimitPolicy::TokenManagement, subject);
-
-    assert!(auth.starts_with("oauth:rate:auth:"));
-    assert!(token.starts_with("oauth:rate:token:"));
-    assert!(token_management.starts_with("oauth:rate:token_management:"));
-    assert_ne!(auth, token);
-    assert_ne!(auth, token_management);
-    assert_ne!(token, token_management);
+fn direct_client_ip() -> ClientIpConfig {
+    ClientIpConfig::new(&[], ClientIpHeaderMode::None)
 }
 
 #[test]
@@ -226,29 +74,66 @@ fn rate_limited_response_is_exact_oauth_retryable_error() {
 }
 
 #[actix_web::test]
-async fn corrupt_rate_limit_counter_fails_closed_as_server_error() {
-    let Some(state) = live_rate_limit_state().await else {
-        return;
-    };
+async fn authentication_limit_uses_semantic_bucket_subject_and_window() {
+    let store = FakeRateLimiter::returning(Ok(2));
+    let calls = store.calls.clone();
     let req = TestRequest::default()
-        .peer_addr("127.0.0.10:12345".parse().unwrap())
+        .peer_addr("203.0.113.77:12345".parse().unwrap())
         .to_http_request();
-    let key = rate_limit_key(
-        RateLimitPolicy::Auth,
-        &rate_limit_subject(&req, &state.settings),
-    );
-    valkey_set_ex(
-        &state.valkey,
-        nazo_valkey::test_support::state_storage_key(key),
-        "not-an-integer".to_owned(),
-        state.settings.identity.rate_limit.window_seconds,
+
+    enforce_auth_rate_limit(
+        &store,
+        &req,
+        AuthRateLimitConfig::new(37, 2),
+        &direct_client_ip(),
     )
     .await
-    .expect("corrupt rate limit counter should be staged");
+    .unwrap();
 
-    let response = enforce_rate_limit(&state, &req, RateLimitPolicy::Auth)
-        .await
-        .expect_err("corrupt rate limit counter must fail closed");
+    assert_eq!(
+        calls.lock().unwrap().as_slice(),
+        &[(
+            RequestRateLimitBucket::Authentication,
+            "203.0.113.77".to_owned(),
+            37,
+        )]
+    );
+}
+
+#[actix_web::test]
+async fn authentication_limit_rejects_post_increment_count_above_threshold() {
+    let store = FakeRateLimiter::returning(Ok(3));
+    let req = TestRequest::default().to_http_request();
+
+    let response = enforce_auth_rate_limit(
+        &store,
+        &req,
+        AuthRateLimitConfig::new(41, 2),
+        &direct_client_ip(),
+    )
+    .await
+    .expect_err("count above the fixed-window threshold must be limited");
+
+    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(
+        response.headers().get(header::RETRY_AFTER).unwrap(),
+        HeaderValue::from_static("41")
+    );
+}
+
+#[actix_web::test]
+async fn dependency_failure_fails_closed_without_backend_details() {
+    let store = FakeRateLimiter::returning(Err(RequestRateLimitError));
+    let req = TestRequest::default().to_http_request();
+
+    let response = enforce_auth_rate_limit(
+        &store,
+        &req,
+        AuthRateLimitConfig::new(60, 10),
+        &direct_client_ip(),
+    )
+    .await
+    .expect_err("dependency failure must fail closed");
 
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(
@@ -262,61 +147,22 @@ async fn corrupt_rate_limit_counter_fails_closed_as_server_error() {
 }
 
 #[actix_web::test]
-async fn rate_limit_counter_is_created_with_window_ttl() {
-    let Some(state) = live_rate_limit_state().await else {
-        return;
-    };
-    let req = TestRequest::default().to_http_request();
-    let key = rate_limit_key(
-        RateLimitPolicy::Token,
-        &rate_limit_subject(&req, &state.settings),
-    );
-    valkey_del(
-        &state.valkey,
-        nazo_valkey::test_support::state_storage_key(&key),
-    )
-    .await
-    .expect("rate limit key cleanup should succeed");
-
-    enforce_rate_limit(&state, &req, RateLimitPolicy::Token)
-        .await
-        .expect("first request in a fresh window should pass");
-
-    let ttl = eval_rate_limit_key_ttl(&state, &key).await;
-    assert!(
-        ttl > 0 && ttl <= state.settings.identity.rate_limit.window_seconds as i64,
-        "rate limit counter must have a bounded TTL, got {ttl}"
-    );
-}
-
-#[actix_web::test]
-async fn rate_limit_counter_without_ttl_is_repaired() {
-    let Some(state) = live_rate_limit_state().await else {
-        return;
-    };
+async fn token_management_limiter_uses_distinct_bucket() {
+    let store = FakeRateLimiter::returning(Ok(1));
+    let calls = store.calls.clone();
+    let limiter = TokenManagementRequestLimiter::new(Arc::new(store), 29, 4, direct_client_ip());
     let req = TestRequest::default()
-        .peer_addr("127.0.0.11:12345".parse().unwrap())
+        .peer_addr("198.51.100.9:443".parse().unwrap())
         .to_http_request();
-    let key = rate_limit_key(
-        RateLimitPolicy::Token,
-        &rate_limit_subject(&req, &state.settings),
-    );
-    valkey_del(
-        &state.valkey,
-        nazo_valkey::test_support::state_storage_key(&key),
-    )
-    .await
-    .expect("rate limit key cleanup should succeed");
-    set_rate_limit_key_without_ttl(&state, &key, "0").await;
-    assert_eq!(eval_rate_limit_key_ttl(&state, &key).await, -1);
 
-    enforce_rate_limit(&state, &req, RateLimitPolicy::Token)
-        .await
-        .expect("valid legacy counter should be incremented");
+    limiter.enforce(&req).await.unwrap();
 
-    let ttl = eval_rate_limit_key_ttl(&state, &key).await;
-    assert!(
-        ttl > 0 && ttl <= state.settings.identity.rate_limit.window_seconds as i64,
-        "legacy rate limit counter must be given a bounded TTL, got {ttl}"
+    assert_eq!(
+        calls.lock().unwrap().as_slice(),
+        &[(
+            RequestRateLimitBucket::TokenManagement,
+            "198.51.100.9".to_owned(),
+            29,
+        )]
     );
 }

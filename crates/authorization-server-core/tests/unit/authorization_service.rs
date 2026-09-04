@@ -418,8 +418,15 @@ fn pushed() -> PushedAuthorizationRequest {
 fn service(
     repository: FakeRepository,
     store: FakeStore,
-) -> AuthorizationService<FakeRepository, FakeStore, FakeSigner> {
+) -> AuthorizationService<FakeStore, FakeSigner> {
     AuthorizationService::new(repository, store, FakeSigner)
+}
+
+#[test]
+fn arc_trait_object_is_an_authorization_state_store() {
+    fn assert_state_store<T: AuthorizationStateStorePort>() {}
+
+    assert_state_store::<Arc<dyn AuthorizationStateStorePort>>();
 }
 
 #[test]

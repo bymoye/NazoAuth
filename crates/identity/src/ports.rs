@@ -15,6 +15,7 @@ mod passkey;
 mod registration;
 mod scim;
 mod session;
+mod trust;
 
 pub use account::*;
 pub use authentication::*;
@@ -27,3 +28,4 @@ pub use passkey::*;
 pub use registration::*;
 pub use scim::*;
 pub use session::*;
+pub use trust::*;

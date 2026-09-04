@@ -62,7 +62,7 @@ pub(crate) fn token_endpoint_dpop_target_uris(issuer: &str, request_url: &str) -
 
 #[derive(Clone)]
 pub(super) struct Openid4vcDataset {
-    pub(super) store: nazo_postgres::Openid4vciDatasetRepository,
+    pub(super) store: std::sync::Arc<dyn nazo_persistence::Openid4vciDatasetStore>,
 }
 
 impl CredentialDatasetPort for Openid4vcDataset {

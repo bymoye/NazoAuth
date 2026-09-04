@@ -111,8 +111,8 @@ pub struct FederationServiceConfig {
     pub session_ttl_seconds: u64,
 }
 
-pub struct FederationService<R, T, H, S, A> {
-    accounts: R,
+pub struct FederationService<T, H, S, A> {
+    accounts: std::sync::Arc<dyn FederationLoginRepositoryPort>,
     states: T,
     password_hasher: H,
     sessions: S,
@@ -120,16 +120,36 @@ pub struct FederationService<R, T, H, S, A> {
     config: FederationServiceConfig,
 }
 
-impl<R, T, H, S, A> FederationService<R, T, H, S, A>
+impl<T, H, S, A> FederationService<T, H, S, A>
 where
-    R: FederationLoginRepositoryPort,
     T: FederationStatePort,
     H: FederationPasswordHasherPort,
     S: LoginSessionPort,
     A: FederationAuditPort,
 {
-    pub fn new(
+    pub fn new<R>(
         accounts: R,
+        states: T,
+        password_hasher: H,
+        sessions: S,
+        audit: A,
+        config: FederationServiceConfig,
+    ) -> Self
+    where
+        R: FederationLoginRepositoryPort + 'static,
+    {
+        Self {
+            accounts: std::sync::Arc::new(accounts),
+            states,
+            password_hasher,
+            sessions,
+            audit,
+            config,
+        }
+    }
+
+    pub fn from_port(
+        accounts: std::sync::Arc<dyn FederationLoginRepositoryPort>,
         states: T,
         password_hasher: H,
         sessions: S,

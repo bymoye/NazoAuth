@@ -7,17 +7,14 @@ use sha2::{Digest as _, Sha256};
 
 use crate::verification::{
     validate_deployment_statement, validate_discovery_statement, validate_file_identifier,
-    validate_identifier, validate_lower_hex, validate_openid4vp_verification_intent,
-    validate_openid4vp_verification_receipt,
+    validate_identifier, validate_lower_hex,
 };
 use crate::wire::{
-    DeploymentStatement, DiscoveryStatement, FixedAlgorithm, Openid4vpEvidenceContext,
-    Openid4vpNormalizedCreateRequest, Openid4vpPresentationBinding, Openid4vpVerificationIntent,
-    Openid4vpVerificationReceipt, ProtectedHeader, TenantResourceIdentity, TenantResourceKind,
+    DeploymentStatement, DiscoveryStatement, FixedAlgorithm, Openid4vpNormalizedCreateRequest,
+    ProtectedHeader, TenantResourceIdentity, TenantResourceKind,
 };
 use crate::{
-    CONTROL_DISCOVERY_JWS_TYPE, DEPLOYMENT_STATEMENT_JWS_TYPE, MAX_COMPACT_JWS_BYTES,
-    OPENID4VP_VERIFICATION_INTENT_JWS_TYPE, OPENID4VP_VERIFICATION_RECEIPT_JWS_TYPE, ProtocolError,
+    CONTROL_DISCOVERY_JWS_TYPE, DEPLOYMENT_STATEMENT_JWS_TYPE, MAX_COMPACT_JWS_BYTES, ProtocolError,
 };
 
 pub fn sign_discovery_statement(
@@ -67,47 +64,6 @@ pub fn instance_key_id(key: &VerifyingKey) -> String {
     format!("instance-{}", &hex_sha256(&key.to_bytes())[..32])
 }
 
-pub fn sign_openid4vp_verification_receipt(
-    receipt: &Openid4vpVerificationReceipt,
-    key_id: &str,
-    key: &SigningKey,
-) -> Result<String, ProtocolError> {
-    validate_openid4vp_verification_receipt(receipt)?;
-    if receipt.instance_key_id != key_id {
-        return Err(ProtocolError::Policy(
-            "OpenID4VP verification receipt key id does not match signer",
-        ));
-    }
-    sign_compact(
-        receipt,
-        key_id,
-        OPENID4VP_VERIFICATION_RECEIPT_JWS_TYPE,
-        key,
-    )
-}
-
-pub fn sign_openid4vp_verification_intent(
-    intent: &Openid4vpVerificationIntent,
-    key_id: &str,
-    key: &SigningKey,
-) -> Result<String, ProtocolError> {
-    validate_openid4vp_verification_intent(intent)?;
-    if intent.instance_key_id != key_id {
-        return Err(ProtocolError::Policy(
-            "OpenID4VP verification intent key id does not match signer",
-        ));
-    }
-    sign_compact(intent, key_id, OPENID4VP_VERIFICATION_INTENT_JWS_TYPE, key)
-}
-
-pub fn canonical_openid4vp_evidence_context_sha256(
-    context: &Openid4vpEvidenceContext,
-) -> Result<String, ProtocolError> {
-    crate::verification::validate_openid4vp_evidence_context(context)?;
-    let bytes = serde_json::to_vec(context).map_err(|_| ProtocolError::Json)?;
-    Ok(hex_sha256(&bytes))
-}
-
 /// Return the exact canonical JSON and lowercase SHA-256 used to bind an
 /// OpenID4VP create JTI to its complete, normalized request.
 pub fn canonical_openid4vp_normalized_create_request(
@@ -118,29 +74,6 @@ pub fn canonical_openid4vp_normalized_create_request(
         serde_json::to_string(&canonicalize_json(value)).map_err(|_| ProtocolError::Json)?;
     let sha256 = hex_sha256(canonical.as_bytes());
     Ok((canonical, sha256))
-}
-
-pub fn canonical_openid4vp_presentation_binding_sha256(
-    binding: &Openid4vpPresentationBinding,
-) -> Result<String, ProtocolError> {
-    crate::verification::validate_openid4vp_presentation_binding(binding)?;
-    let bytes = serde_json::to_vec(binding).map_err(|_| ProtocolError::Json)?;
-    Ok(hex_sha256(&bytes))
-}
-
-pub fn openid4vp_verification_capability_sha256(capability: &str) -> Result<String, ProtocolError> {
-    if capability.len() != 43
-        || !capability
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
-    {
-        return Err(ProtocolError::Policy(
-            "invalid OpenID4VP verification capability",
-        ));
-    }
-    let mut binding = b"nazoauth-openid4vp-verification-capability-v1\0".to_vec();
-    binding.extend_from_slice(capability.as_bytes());
-    Ok(hex_sha256(&binding))
 }
 
 /// Canonical digest of a current ControlOperation tenant-resource snapshot.

@@ -1,0 +1,25 @@
+[package]
+name = "nazo-persistence"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+base64.workspace = true
+chrono.workspace = true
+futures-util.workspace = true
+nazo-auth.workspace = true
+nazo-identity.workspace = true
+nazo-operator-protocol.workspace = true
+nazo-openid4vci.workspace = true
+nazo-openid4vp.workspace = true
+nazo-runtime-modules.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+sha2.workspace = true
+uuid.workspace = true
+
+[lints]
+workspace = true

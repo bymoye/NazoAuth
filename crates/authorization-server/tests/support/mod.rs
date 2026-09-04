@@ -138,7 +138,7 @@ pub(crate) fn token_issuance_repository(
     initialize_audit_dependencies(&pool);
     nazo_postgres::TokenIssuanceRepository::new_with_response_key_ring(
         pool,
-        nazo_postgres::TokenIssuanceResponseKeyRing::new("test-current", [0x11; 32], None)
+        nazo_persistence::TokenIssuanceResponseKeyRing::new("test-current", [0x11; 32], None)
             .expect("test response key ring is valid"),
     )
 }
@@ -171,7 +171,9 @@ pub(crate) fn initialize_audit_dependencies(_pool: &nazo_postgres::DbPool) {
     )
     .expect("test audit anchor preflight config is valid");
     crate::adapters::audit::install_persistent_audit_sink(
-        nazo_postgres::AuditLedgerRepository::new(audit_pool.clone()),
+        std::sync::Arc::new(nazo_postgres::AuditLedgerRepository::new(
+            audit_pool.clone(),
+        )),
         false,
         preflight,
     )
@@ -216,7 +218,7 @@ pub(crate) fn access_request_profiles(
 ) -> actix_web::web::Data<crate::bootstrap::ClientAccessProfileService> {
     actix_web::web::Data::new(crate::bootstrap::ClientAccessProfileService::new(
         nazo_postgres::AccessRequestRepository::new(state.diesel_db.clone()),
-        nazo_valkey::DeliveryStore::new(&state.valkey_connection()),
+        std::sync::Arc::new(nazo_valkey::DeliveryStore::new(&state.valkey_connection())),
         &state.settings.protocol.client_secret_pepper,
     ))
 }
@@ -233,7 +235,9 @@ pub(crate) fn registration_service(
     let identity = &state.settings.identity;
     actix_web::web::Data::new(crate::bootstrap::LocalRegistrationService::new(
         nazo_postgres::UserRepository::new(state.diesel_db.clone()),
-        nazo_valkey::AuthenticationStore::new(&state.valkey_connection()),
+        std::sync::Arc::new(nazo_valkey::AuthenticationStore::new(
+            &state.valkey_connection(),
+        )),
         crate::bootstrap::RegistrationSecretHasher,
         crate::adapters::email::SmtpVerificationEmailDelivery::from_delivery(
             &identity.email.delivery,
@@ -256,9 +260,11 @@ pub(crate) fn passkey_service(
     actix_web::web::Data::new(crate::bootstrap::LocalPasskeyService::new(
         nazo_postgres::UserRepository::new(state.diesel_db.clone()),
         nazo_postgres::PasskeyRepository::new(state.diesel_db.clone()),
-        nazo_valkey::AuthenticationStore::new(&state.valkey_connection()),
+        std::sync::Arc::new(nazo_valkey::AuthenticationStore::new(
+            &state.valkey_connection(),
+        )),
         nazo_postgres::MfaRepository::new(state.diesel_db.clone()),
-        nazo_valkey::SessionStore::new(&state.valkey_connection()),
+        std::sync::Arc::new(nazo_valkey::SessionStore::new(&state.valkey_connection())),
         crate::bootstrap::TracingPasskeyAudit,
         nazo_identity::PasskeyServiceConfig {
             tenant_id: state.settings.tenant.context.tenant_id,
@@ -279,9 +285,11 @@ pub(crate) fn federation_service(
 ) -> actix_web::web::Data<crate::bootstrap::LocalFederationService> {
     actix_web::web::Data::new(crate::bootstrap::LocalFederationService::new(
         nazo_postgres::FederationRepository::new(state.diesel_db.clone()),
-        nazo_valkey::AuthenticationStore::new(&state.valkey_connection()),
+        std::sync::Arc::new(nazo_valkey::AuthenticationStore::new(
+            &state.valkey_connection(),
+        )),
         crate::bootstrap::FederationBootstrapPasswordHasher,
-        nazo_valkey::SessionStore::new(&state.valkey_connection()),
+        std::sync::Arc::new(nazo_valkey::SessionStore::new(&state.valkey_connection())),
         crate::bootstrap::TracingFederationAudit,
         nazo_identity::FederationServiceConfig {
             tenant: state.settings.tenant.context,
@@ -312,7 +320,7 @@ pub(crate) fn auth_request_limiter(
 ) -> actix_web::web::Data<crate::http::rate_limit::AuthRequestLimiter> {
     let rate_limit = &state.settings.identity.rate_limit;
     actix_web::web::Data::new(crate::http::rate_limit::AuthRequestLimiter::new(
-        nazo_valkey::RateLimitStore::new(&state.valkey_connection()),
+        std::sync::Arc::new(nazo_valkey::RateLimitStore::new(&state.valkey_connection())),
         rate_limit.window_seconds,
         rate_limit.auth_max_requests,
         client_ip_config(state).get_ref().clone(),

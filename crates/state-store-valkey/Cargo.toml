@@ -20,7 +20,6 @@ uuid = { workspace = true, features = ["serde"] }
 [dev-dependencies]
 futures-util.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
-url.workspace = true
 uuid = { workspace = true, features = ["v7", "serde"] }
 
 [lints]

@@ -1,7 +1,6 @@
 pub(crate) mod admin;
 pub(crate) mod auth;
 pub(crate) mod authorization;
-pub(crate) mod bootstrap_admin;
 pub(crate) mod client_attestation;
 pub(crate) mod dpop;
 pub(crate) mod mtls;

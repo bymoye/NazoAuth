@@ -5,6 +5,7 @@ mod external;
 mod jwks;
 mod lifecycle;
 mod local;
+mod lock;
 mod model;
 mod mtls_trust;
 mod request_object_encryption;

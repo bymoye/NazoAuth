@@ -64,7 +64,7 @@ pub struct IssuedAccessToken {
 }
 
 /// Durable state for one logical token grant.  A grant may cross several
-/// storage systems (signer, PostgreSQL and Valkey), so the token endpoint
+/// storage systems (signer, durable persistence and Valkey), so the token endpoint
 /// records this state before it can return credentials.  The response body is
 /// opaque to the core crate and is encrypted by the persistence adapter.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -300,6 +300,10 @@ pub struct RecordTokenIssuanceSigned<'a> {
 }
 
 pub trait TokenRepositoryPort: Send + Sync {
+    /// Verify that every configured encrypted-response key id is present in
+    /// durable state before token traffic is admitted.
+    fn validate_response_key_ring(&self) -> TokenFuture<'_, ()>;
+
     fn prepare_token_issuance<'a>(
         &'a self,
         input: PrepareTokenIssuance,
@@ -436,6 +440,78 @@ pub trait TokenStateStorePort: Send + Sync {
     fn load_native_sso<'a>(&'a self, secret: &'a str) -> TokenFuture<'a, Option<Value>>;
 }
 
+impl<T> TokenStateStorePort for std::sync::Arc<T>
+where
+    T: TokenStateStorePort + ?Sized,
+{
+    fn load_authorization_code<'a>(
+        &'a self,
+        code_hash: &'a str,
+    ) -> TokenFuture<'a, Option<AuthorizationCodeState>> {
+        self.as_ref().load_authorization_code(code_hash)
+    }
+
+    fn begin_authorization_code<'a>(
+        &'a self,
+        code_hash: &'a str,
+        consuming_at: DateTime<Utc>,
+    ) -> TokenFuture<'a, AuthorizationCodeBeginResult> {
+        self.as_ref()
+            .begin_authorization_code(code_hash, consuming_at)
+    }
+
+    fn mark_authorization_code<'a>(
+        &'a self,
+        code_hash: &'a str,
+        replacement: &'a AuthorizationCodeState,
+        ttl_seconds: u64,
+    ) -> TokenFuture<'a, AuthorizationCodeTransitionResult> {
+        self.as_ref()
+            .mark_authorization_code(code_hash, replacement, ttl_seconds)
+    }
+
+    fn store_access_token_subject<'a>(
+        &'a self,
+        tenant_id: Uuid,
+        jti: &'a str,
+        user_id: Uuid,
+        ttl_seconds: u64,
+    ) -> TokenFuture<'a, ()> {
+        self.as_ref()
+            .store_access_token_subject(tenant_id, jti, user_id, ttl_seconds)
+    }
+
+    fn load_access_token_subject<'a>(
+        &'a self,
+        tenant_id: Uuid,
+        jti: &'a str,
+    ) -> TokenFuture<'a, Option<Uuid>> {
+        self.as_ref().load_access_token_subject(tenant_id, jti)
+    }
+
+    fn increment_token_management_rate<'a>(
+        &'a self,
+        subject: &'a str,
+        window_seconds: u64,
+    ) -> TokenFuture<'a, u64> {
+        self.as_ref()
+            .increment_token_management_rate(subject, window_seconds)
+    }
+
+    fn store_native_sso<'a>(
+        &'a self,
+        secret: &'a str,
+        value: &'a Value,
+        ttl_seconds: u64,
+    ) -> TokenFuture<'a, ()> {
+        self.as_ref().store_native_sso(secret, value, ttl_seconds)
+    }
+
+    fn load_native_sso<'a>(&'a self, secret: &'a str) -> TokenFuture<'a, Option<Value>> {
+        self.as_ref().load_native_sso(secret)
+    }
+}
+
 pub trait TokenSignerPort: Send + Sync {
     fn sign_access_token<'a>(
         &'a self,
@@ -462,19 +538,33 @@ pub trait TokenSignerPort: Send + Sync {
     ) -> TokenFuture<'a, String>;
 }
 
-pub struct TokenService<R, S, K> {
-    repository: R,
+pub struct TokenService<S, K> {
+    repository: std::sync::Arc<dyn TokenRepositoryPort>,
     state: S,
     signer: K,
 }
 
-impl<R, S, K> TokenService<R, S, K>
+impl<S, K> TokenService<S, K>
 where
-    R: TokenRepositoryPort,
     S: TokenStateStorePort,
     K: TokenSignerPort,
 {
-    pub const fn new(repository: R, state: S, signer: K) -> Self {
+    pub fn new<R>(repository: R, state: S, signer: K) -> Self
+    where
+        R: TokenRepositoryPort + 'static,
+    {
+        Self {
+            repository: std::sync::Arc::new(repository),
+            state,
+            signer,
+        }
+    }
+
+    pub fn from_port(
+        repository: std::sync::Arc<dyn TokenRepositoryPort>,
+        state: S,
+        signer: K,
+    ) -> Self {
         Self {
             repository,
             state,

@@ -7,6 +7,7 @@ use crate::verification::*;
 // This module is included by lib.rs so private protocol invariants remain testable.
 
 mod control_operation_tests;
+mod directory_control_tests;
 mod recovery_tests;
 
 fn discovery_statement() -> DiscoveryStatement {
@@ -17,8 +18,6 @@ fn discovery_statement() -> DiscoveryStatement {
         runtime_instance_id: "runtime-1".to_owned(),
         issuer: "https://auth.example".to_owned(),
         release: "v0.2.0".to_owned(),
-        revision: "a".repeat(40),
-        build_id: "github:123".to_owned(),
         control_protocol_versions: vec![CONTROL_DISCOVERY_SCHEMA],
         operator_protocol_versions: vec![PROTOCOL_VERSION],
         instance_key_id: "instance-1".to_owned(),
@@ -37,8 +36,6 @@ fn deployment_statement() -> DeploymentStatement {
         runtime_instance_id: online.runtime_instance_id,
         issuer: online.issuer,
         release: online.release,
-        revision: online.revision,
-        build_id: online.build_id,
         control_protocol_versions: online.control_protocol_versions,
         operator_protocol_versions: online.operator_protocol_versions,
         instance_key_id: online.instance_key_id,
@@ -52,7 +49,7 @@ fn golden_control_discovery_vector_is_stable_and_nonce_bound() {
     let compact = sign_discovery_statement(&discovery_statement(), "instance-1", &key).unwrap();
     assert_eq!(
         compact,
-        "eyJhbGciOiJFZERTQSIsImtpZCI6Imluc3RhbmNlLTEiLCJ0eXAiOiJuYXpvYXV0aC1jb250cm9sLWRpc2NvdmVyeStqd3QifQ.eyJzY2hlbWEiOjEsInByb2R1Y3QiOiJuYXpvYXV0aCIsImRlcGxveW1lbnRfaWQiOiJkZXBsb3ltZW50LTEiLCJydW50aW1lX2luc3RhbmNlX2lkIjoicnVudGltZS0xIiwiaXNzdWVyIjoiaHR0cHM6Ly9hdXRoLmV4YW1wbGUiLCJyZWxlYXNlIjoidjAuMi4wIiwicmV2aXNpb24iOiJhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhIiwiYnVpbGRfaWQiOiJnaXRodWI6MTIzIiwiY29udHJvbF9wcm90b2NvbF92ZXJzaW9ucyI6WzFdLCJvcGVyYXRvcl9wcm90b2NvbF92ZXJzaW9ucyI6WzJdLCJpbnN0YW5jZV9rZXlfaWQiOiJpbnN0YW5jZS0xIiwibm9uY2UiOiJBQUVDQXdRRkJnY0lDUW9MREEwT0R4QVJFaE1VRlJZWEdCa2FHeHdkSGg4IiwiaXNzdWVkX2F0IjoxMDAwLCJleHBpcmVzX2F0IjoxMDYwfQ.dBwSPMlQi8ay79aKXwhJiXFRRiRQdLDu-yQTtKMSRJDPy0B3tRoLE5q8pvYy4_OUxpWtFnQJvx1EcjOeLor4Dg"
+        "eyJhbGciOiJFZERTQSIsImtpZCI6Imluc3RhbmNlLTEiLCJ0eXAiOiJuYXpvYXV0aC1jb250cm9sLWRpc2NvdmVyeStqd3QifQ.eyJzY2hlbWEiOjEsInByb2R1Y3QiOiJuYXpvYXV0aCIsImRlcGxveW1lbnRfaWQiOiJkZXBsb3ltZW50LTEiLCJydW50aW1lX2luc3RhbmNlX2lkIjoicnVudGltZS0xIiwiaXNzdWVyIjoiaHR0cHM6Ly9hdXRoLmV4YW1wbGUiLCJyZWxlYXNlIjoidjAuMi4wIiwiY29udHJvbF9wcm90b2NvbF92ZXJzaW9ucyI6WzFdLCJvcGVyYXRvcl9wcm90b2NvbF92ZXJzaW9ucyI6WzNdLCJpbnN0YW5jZV9rZXlfaWQiOiJpbnN0YW5jZS0xIiwibm9uY2UiOiJBQUVDQXdRRkJnY0lDUW9MREEwT0R4QVJFaE1VRlJZWEdCa2FHeHdkSGg4IiwiaXNzdWVkX2F0IjoxMDAwLCJleHBpcmVzX2F0IjoxMDYwfQ.u7a6Zn89VAuWukazjCsMLGct5k1yXV7UzHM-QWb_kpuZAK3XMvPWXvn5vduXgtpUnutSeRYJEOIZKDRvYQWXCg"
     );
     assert_eq!(
         verify_discovery_statement(
@@ -573,59 +570,6 @@ fn trust_policy_parser_rejects_multi_authority_and_inter_certificate_junk() {
     assert!(validate_openid4vc_trust_policy(&junk_between_certificates).is_err());
 }
 
-fn openid4vp_verification_receipt() -> Openid4vpVerificationReceipt {
-    Openid4vpVerificationReceipt {
-        schema: 1,
-        iss: "https://auth.example".to_owned(),
-        aud: "https://auth.example/openid4vp/verification-receipts".to_owned(),
-        jti: "019c8ca2-30a6-7000-8000-000000000001".to_owned(),
-        iat: 1_787_367_660,
-        exp: 1_787_367_960,
-        deployment_id: "deployment-1".to_owned(),
-        runtime_instance_id: "runtime-1".to_owned(),
-        instance_key_id: "instance-key".to_owned(),
-        tenant_id: "019c8ca2-30a6-7000-8000-000000000005".to_owned(),
-        transaction_id: "019c8ca2-30a6-7000-8000-000000000002".to_owned(),
-        issuance_request_jti: "019c8ca2-30a6-7000-8000-000000000006".to_owned(),
-        status: Openid4vpVerificationStatus::Verified,
-        evidence_context: Openid4vpEvidenceContext {
-            run_jti: "run-jti-1".to_owned(),
-            artifact_sha256: "a".repeat(64),
-            matrix_sha256: "b".repeat(64),
-            suite_plan_id: "Ab3dEf5gHi7Jk".to_owned(),
-            suite_module_id: "Ab3dEf5gHi7JkLm".to_owned(),
-            test_name: "openid4vp-test".to_owned(),
-            variant_sha256: "c".repeat(64),
-        },
-        presentation_binding: Openid4vpPresentationBinding {
-            presentation_request_sha256: "e".repeat(64),
-            trust_policy: Openid4vpTrustPolicyBinding {
-                binding_id: Some("019c8ca2-30a6-7000-8000-000000000007".to_owned()),
-                resource_id: Some("vp-policy-1".to_owned()),
-                resource_digest: Some("f".repeat(64)),
-            },
-        },
-        intent_sha256: "1".repeat(64),
-        completed_at: "2026-08-22T03:00:00Z".to_owned(),
-        capability_sha256: "d".repeat(64),
-    }
-}
-
-#[test]
-fn openid4vp_evidence_context_accepts_opaque_suite_identifiers_with_safe_bounds() {
-    let context = openid4vp_verification_receipt().evidence_context;
-    canonical_openid4vp_evidence_context_sha256(&context)
-        .expect("official-length opaque suite identifiers must be accepted");
-
-    let mut invalid = context.clone();
-    invalid.suite_plan_id = "unsafe/plan".to_owned();
-    assert!(canonical_openid4vp_evidence_context_sha256(&invalid).is_err());
-
-    let mut oversized = context;
-    oversized.suite_module_id = "a".repeat(129);
-    assert!(canonical_openid4vp_evidence_context_sha256(&oversized).is_err());
-}
-
 fn openid4vp_normalized_create_request() -> Openid4vpNormalizedCreateRequest {
     Openid4vpNormalizedCreateRequest {
         wallet_authorization_endpoint: "https://wallet.example/authorize".to_owned(),
@@ -731,171 +675,4 @@ fn openid4vp_create_request_jti_requires_canonical_versioned_uuid() {
     ] {
         assert!(validate_openid4vp_create_request_jti(malformed).is_err());
     }
-}
-
-#[test]
-fn openid4vp_verification_receipt_is_server_bound_and_time_bounded() {
-    let key = SigningKey::from_bytes(&[47; 32]);
-    let key_id = instance_key_id(&key.verifying_key());
-    let mut receipt = openid4vp_verification_receipt();
-    receipt.instance_key_id.clone_from(&key_id);
-    let compact = sign_openid4vp_verification_receipt(&receipt, &key_id, &key)
-        .expect("valid verification receipt should sign");
-    let context_sha256 =
-        canonical_openid4vp_evidence_context_sha256(&receipt.evidence_context).unwrap();
-    let presentation_binding_sha256 =
-        canonical_openid4vp_presentation_binding_sha256(&receipt.presentation_binding).unwrap();
-    let expected = Openid4vpVerificationReceiptExpectations {
-        issuer: &receipt.iss,
-        audience: &receipt.aud,
-        deployment_id: &receipt.deployment_id,
-        runtime_instance_id: &receipt.runtime_instance_id,
-        instance_key_id: &key_id,
-        tenant_id: &receipt.tenant_id,
-        transaction_id: &receipt.transaction_id,
-        receipt_id: &receipt.jti,
-        issuance_request_jti: &receipt.issuance_request_jti,
-        evidence_context_sha256: &context_sha256,
-        presentation_binding_sha256: &presentation_binding_sha256,
-        intent_sha256: &receipt.intent_sha256,
-        capability_sha256: &receipt.capability_sha256,
-    };
-    assert_eq!(
-        verify_openid4vp_verification_receipt(
-            &compact,
-            &expected,
-            &key.verifying_key(),
-            receipt.iat + 60,
-        )
-        .expect("valid verification receipt should verify"),
-        receipt
-    );
-    assert!(
-        verify_openid4vp_verification_receipt(
-            &compact,
-            &expected,
-            &key.verifying_key(),
-            receipt.exp,
-        )
-        .is_err(),
-        "receipt must expire at the exclusive expiry boundary"
-    );
-}
-
-#[test]
-fn openid4vp_verification_receipt_rejects_context_or_signer_drift() {
-    let key = SigningKey::from_bytes(&[48; 32]);
-    let key_id = instance_key_id(&key.verifying_key());
-    let mut receipt = openid4vp_verification_receipt();
-    receipt.instance_key_id.clone_from(&key_id);
-    receipt.evidence_context.matrix_sha256 = "A".repeat(64);
-    assert!(sign_openid4vp_verification_receipt(&receipt, &key_id, &key).is_err());
-
-    let mut receipt = openid4vp_verification_receipt();
-    receipt.instance_key_id = "instance-other".to_owned();
-    assert!(sign_openid4vp_verification_receipt(&receipt, &key_id, &key).is_err());
-
-    let mut receipt = openid4vp_verification_receipt();
-    receipt.instance_key_id.clone_from(&key_id);
-    receipt.exp = receipt.iat - 1;
-    assert!(sign_openid4vp_verification_receipt(&receipt, &key_id, &key).is_err());
-}
-
-#[test]
-fn openid4vp_verification_receipt_rejects_signed_substitution() {
-    let key = SigningKey::from_bytes(&[49; 32]);
-    let key_id = instance_key_id(&key.verifying_key());
-    let mut receipt = openid4vp_verification_receipt();
-    receipt.instance_key_id.clone_from(&key_id);
-    let compact = sign_openid4vp_verification_receipt(&receipt, &key_id, &key).unwrap();
-    let context_sha256 =
-        canonical_openid4vp_evidence_context_sha256(&receipt.evidence_context).unwrap();
-    let presentation_binding_sha256 =
-        canonical_openid4vp_presentation_binding_sha256(&receipt.presentation_binding).unwrap();
-    let expected = Openid4vpVerificationReceiptExpectations {
-        issuer: &receipt.iss,
-        audience: &receipt.aud,
-        deployment_id: &receipt.deployment_id,
-        runtime_instance_id: &receipt.runtime_instance_id,
-        instance_key_id: &key_id,
-        tenant_id: &receipt.tenant_id,
-        transaction_id: "019c8ca2-30a6-7000-8000-000000000099",
-        receipt_id: &receipt.jti,
-        issuance_request_jti: &receipt.issuance_request_jti,
-        evidence_context_sha256: &context_sha256,
-        presentation_binding_sha256: &presentation_binding_sha256,
-        intent_sha256: &receipt.intent_sha256,
-        capability_sha256: &receipt.capability_sha256,
-    };
-    assert!(
-        verify_openid4vp_verification_receipt(
-            &compact,
-            &expected,
-            &key.verifying_key(),
-            receipt.iat,
-        )
-        .is_err(),
-        "a valid receipt for another transaction must not substitute"
-    );
-}
-
-#[test]
-fn openid4vp_verification_intent_is_immutable_and_typed() {
-    let key = SigningKey::from_bytes(&[50; 32]);
-    let key_id = instance_key_id(&key.verifying_key());
-    let receipt = openid4vp_verification_receipt();
-    let transaction_id = receipt.transaction_id.clone();
-    let context_sha256 =
-        canonical_openid4vp_evidence_context_sha256(&receipt.evidence_context).unwrap();
-    let presentation_binding_sha256 =
-        canonical_openid4vp_presentation_binding_sha256(&receipt.presentation_binding).unwrap();
-    let intent = Openid4vpVerificationIntent {
-        schema: 1,
-        iss: receipt.iss.clone(),
-        aud: "https://auth.example/openid4vp/verification-intents".to_owned(),
-        jti: transaction_id.clone(),
-        iat: receipt.iat - 60,
-        exp: receipt.exp,
-        deployment_id: receipt.deployment_id.clone(),
-        runtime_instance_id: receipt.runtime_instance_id.clone(),
-        instance_key_id: key_id.clone(),
-        tenant_id: "019c8ca2-30a6-7000-8000-000000000005".to_owned(),
-        transaction_id: transaction_id.clone(),
-        evidence_context: receipt.evidence_context,
-        presentation_binding: receipt.presentation_binding,
-    };
-    let compact = sign_openid4vp_verification_intent(&intent, &key_id, &key).unwrap();
-    let expected = Openid4vpVerificationIntentExpectations {
-        issuer: &intent.iss,
-        audience: &intent.aud,
-        deployment_id: &intent.deployment_id,
-        runtime_instance_id: &intent.runtime_instance_id,
-        instance_key_id: &key_id,
-        tenant_id: &intent.tenant_id,
-        transaction_id: &transaction_id,
-        evidence_context_sha256: &context_sha256,
-        presentation_binding_sha256: &presentation_binding_sha256,
-    };
-    assert_eq!(
-        verify_openid4vp_verification_intent(
-            &compact,
-            &expected,
-            &key.verifying_key(),
-            intent.iat,
-        )
-        .unwrap(),
-        intent
-    );
-    let wrong_context = "f".repeat(64);
-    let wrong = Openid4vpVerificationIntentExpectations {
-        evidence_context_sha256: &wrong_context,
-        ..expected
-    };
-    assert!(
-        verify_openid4vp_verification_intent(&compact, &wrong, &key.verifying_key(), intent.iat,)
-            .is_err()
-    );
-    let mut reversed = intent;
-    reversed.exp = reversed.iat - 1;
-    assert!(sign_openid4vp_verification_intent(&reversed, &key_id, &key).is_err());
 }

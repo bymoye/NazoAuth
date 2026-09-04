@@ -4,7 +4,7 @@
 
 NazoAuth implements a bounded, experimental resource profile against the
 OpenID FAPI 2.0 HTTP Signatures working draft built on 2026-06-26. It is not an
-OIDF Final Specification and is distinct from FAPI 2.0 Message Signing Final.
+the FAPI 2.0 Security Profile Final Specification and is distinct from FAPI 2.0 Message Signing Final.
 The implementation uses RFC 9421 HTTP Message Signatures and RFC 9530
 `Content-Digest` primitives. A newer working draft, Implementer's Draft, or
 Final Specification requires a normative delta audit before changing this
@@ -80,8 +80,7 @@ The executable registry contains 19 exact HTTP-signature cases. Test
 keys are generated in memory. No credential is accepted through command-line
 arguments or printed in output.
 
-The inspected OIDF conformance suite has no dedicated FAPI HTTP Signatures
-plan. These local tests are implementation evidence, not OIDF certification.
+These local tests are bounded implementation evidence, not certification.
 
 ## M8-03: isolation and future delta audit
 
@@ -91,6 +90,6 @@ this bounded candidate. It does not change the status of any other M8 item.
 
 For every newer publication, compare covered components, structured-field
 rules, time and replay requirements, key discovery, algorithm requirements,
-response/request binding, error signing, metadata, and conformance plans. Any
+response/request binding, error signing, and metadata. Any
 normative delta requires new failing tests, updated operational ownership, and
 fresh real-HTTP evidence before adoption.

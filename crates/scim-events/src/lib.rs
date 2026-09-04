@@ -368,6 +368,19 @@ pub trait EventStorePort: Send + Sync {
     ) -> EventFuture<'a, Result<EventPage, EventStoreError>>;
 }
 
+impl<T> EventStorePort for std::sync::Arc<T>
+where
+    T: EventStorePort + ?Sized,
+{
+    fn apply_dispositions_and_poll<'a>(
+        &'a self,
+        receiver: &'a EventReceiver,
+        request: &'a ValidatedPollRequest,
+    ) -> EventFuture<'a, Result<EventPage, EventStoreError>> {
+        (**self).apply_dispositions_and_poll(receiver, request)
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum EventSigningError {
     #[error("SCIM SET signing is unavailable")]
@@ -442,6 +455,20 @@ where
             sets,
             more_available: page.more_available,
         })
+    }
+}
+
+impl<K> EventPublisher<std::sync::Arc<dyn EventStorePort>, K>
+where
+    K: EventSignerPort,
+{
+    #[must_use]
+    pub fn from_port(store: std::sync::Arc<dyn EventStorePort>, signer: K, issuer: String) -> Self {
+        Self {
+            store,
+            signer,
+            issuer,
+        }
     }
 }
 

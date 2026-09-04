@@ -83,7 +83,7 @@ pub struct ClientPresentationMetadata {
 ///
 /// Tenant placement, credential digests, issued plaintext credentials, and
 /// database command shape belong to the coordinating service and adapters.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize)]
 pub struct ValidatedClientRegistration {
     pub client_id: String,
     pub client_name: String,

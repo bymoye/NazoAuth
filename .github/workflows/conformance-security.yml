@@ -84,7 +84,7 @@ jobs:
       - name: Install native dependencies
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends pkg-config libpq-dev
       - name: Install pinned Rust supply-chain tools
-        uses: taiki-e/install-action@a2a5f6e99e1a31540baa0468acfa302cff0f359f # v2.86.4
+        uses: taiki-e/install-action@fcf5432d9f50d67e37ee6e29bdb7a224ff67b4a7 # v2.86.8
         with:
           tool: |
             cargo-audit@0.22.2
@@ -96,9 +96,9 @@ jobs:
         run: cargo deny check advisories bans licenses sources
       - name: Generate Rust SBOM
         run: |
-          cargo cyclonedx --manifest-path crates/authorization-server/Cargo.toml --format json --override-filename nazo-oauth-server.cdx
+          cargo cyclonedx --manifest-path crates/nazoauth/Cargo.toml --format json --override-filename nazoauth.cdx
           mkdir -p target
-          mv crates/authorization-server/nazo-oauth-server.cdx.json target/nazo-oauth-server.cdx.json
+          mv crates/nazoauth/nazoauth.cdx.json target/nazoauth.cdx.json
       - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
       - name: Build service image
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
@@ -138,8 +138,8 @@ jobs:
       - name: Upload SBOM
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: nazo-oauth-rust-sbom
-          path: target/nazo-oauth-server.cdx.json
+          name: nazoauth-rust-sbom
+          path: target/nazoauth.cdx.json
           if-no-files-found: error
 
   real-http-security-matrix:
@@ -229,8 +229,6 @@ jobs:
           EMAIL_SMTP_PASSWORD: ""
           EMAIL_FROM: "Nazo OAuth <no-reply@example.com>"
           EMAIL_CODE_DEV_RESPONSE_ENABLED: false
-          AVATAR_STORAGE_DIR: "/var/lib/nazo_oauth/avatars"
-          JWK_KEYS_DIR: "/var/lib/nazo_oauth/keys"
           RUST_LOG: "info"
           YAML
           mfa_totp_key="$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=')"
@@ -267,11 +265,20 @@ jobs:
           REVOKE CREATE ON SCHEMA public FROM PUBLIC;
           SQL
           docker run --rm --name nazo-oauth-e2e-migrate --network nazo-oauth-e2e-net \
+            --user "$(id -u):$(id -g)" \
             --cap-drop ALL --security-opt no-new-privileges --read-only \
             --tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m \
             -e NAZOAUTH_MIGRATION_RUNTIME_ROLE=nazoauth_e2e_app \
             -v "$PWD/runtime/e2e/.env.yaml:/app/.env.yaml:ro" \
+            -v "$PWD/runtime/e2e/secrets:/var/lib/nazo_oauth/secrets" \
             nazo-oauth-e2e:latest nazoauth migrate
+          docker run --rm --name nazo-oauth-e2e-tenant-bootstrap --network nazo-oauth-e2e-net \
+            --user "$(id -u):$(id -g)" \
+            --cap-drop ALL --security-opt no-new-privileges --read-only \
+            --tmpfs /tmp:rw,noexec,nosuid,nodev,size=16m \
+            -v "$PWD/runtime/e2e/.env.yaml:/app/.env.yaml:ro" \
+            -v "$PWD/runtime/e2e/secrets:/var/lib/nazo_oauth/secrets" \
+            nazo-oauth-e2e:latest nazoauth tenant-bootstrap
           docker exec -i nazo-oauth-e2e-postgres psql -U postgres -d oauth -v ON_ERROR_STOP=1 <<'SQL'
           WITH changed AS (
               UPDATE runtime_module_desired_states
@@ -279,16 +286,17 @@ jobs:
                   revision = revision + 1,
                   reason = 'RFC 9967 CI fixture',
                   updated_at = CURRENT_TIMESTAMP
-              WHERE module_id = 'scim_security_events'
+              WHERE tenant_id = '00000000-0000-0000-0000-000000000001'
+                AND module_id = 'scim_security_events'
                 AND desired_mode = 'disabled'
-              RETURNING module_id, revision, actor_id, reason, updated_at
+              RETURNING tenant_id, module_id, revision, actor_id, reason, updated_at
           )
           INSERT INTO runtime_module_state_events (
-              event_id, module_id, event_type, revision, instance_id, actor_id,
+              event_id, tenant_id, module_id, event_type, revision, instance_id, actor_id,
               reason, before_state, after_state, outcome_code, occurred_at
           )
           SELECT
-              uuidv7(), module_id, 'desired_state_changed', revision, NULL, actor_id,
+              uuidv7(), tenant_id, module_id, 'desired_state_changed', revision, NULL, actor_id,
               reason, 'disabled', 'enabled', NULL, updated_at
           FROM changed;
           SQL
@@ -306,8 +314,8 @@ jobs:
             -v "$PWD/runtime/e2e/.env.yaml:/app/.env.yaml:ro" \
             -v "$PWD/runtime/e2e/secrets:/var/lib/nazo_oauth/secrets" \
             -v "$PWD/runtime/e2e/bootstrap:/var/lib/nazo_oauth/bootstrap" \
-            -v "$PWD/runtime/e2e/keys:/var/lib/nazo_oauth/keys" \
-            -v "$PWD/runtime/e2e/avatars:/var/lib/nazo_oauth/avatars" \
+            -v "$PWD/runtime/e2e/keys:/var/lib/nazo_oauth/tenants/00000000-0000-0000-0000-000000000001/keys" \
+            -v "$PWD/runtime/e2e/avatars:/var/lib/nazo_oauth/tenants/00000000-0000-0000-0000-000000000001/avatars" \
             -v "$PWD/runtime/e2e/ui-releases:/var/lib/nazo_oauth/ui-releases" \
             -v "$PWD/runtime/e2e/instance:/var/lib/nazo_oauth/instance" \
             -v "$PWD/runtime/e2e/runtime-primary:/var/lib/nazo_oauth/runtime-instance" \
@@ -318,8 +326,8 @@ jobs:
             -v "$PWD/runtime/e2e/.env-signed.yaml:/app/.env.yaml:ro" \
             -v "$PWD/runtime/e2e/secrets:/var/lib/nazo_oauth/secrets" \
             -v "$PWD/runtime/e2e/bootstrap:/var/lib/nazo_oauth/bootstrap" \
-            -v "$PWD/runtime/e2e/keys:/var/lib/nazo_oauth/keys" \
-            -v "$PWD/runtime/e2e/avatars:/var/lib/nazo_oauth/avatars" \
+            -v "$PWD/runtime/e2e/keys:/var/lib/nazo_oauth/tenants/00000000-0000-0000-0000-000000000001/keys" \
+            -v "$PWD/runtime/e2e/avatars:/var/lib/nazo_oauth/tenants/00000000-0000-0000-0000-000000000001/avatars" \
             -v "$PWD/runtime/e2e/ui-releases:/var/lib/nazo_oauth/ui-releases" \
             -v "$PWD/runtime/e2e/instance:/var/lib/nazo_oauth/instance" \
             -v "$PWD/runtime/e2e/runtime-signed:/var/lib/nazo_oauth/runtime-instance" \
@@ -330,7 +338,7 @@ jobs:
           for _ in $(seq 1 60); do
             if docker run --rm --network nazo-oauth-e2e-net \
               nazo-oauth-e2e-runner:latest python -c \
-              'import urllib.request; urllib.request.urlopen("http://nazo-oauth-e2e-server:8000/health", timeout=2).read(); urllib.request.urlopen("http://nazo-oauth-e2e-server-signed:8000/health", timeout=2).read()'
+              'import urllib.request; headers={"Host":"127.0.0.1:8000"}; urllib.request.urlopen(urllib.request.Request("http://nazo-oauth-e2e-server:8000/health", headers=headers), timeout=2).read(); urllib.request.urlopen(urllib.request.Request("http://nazo-oauth-e2e-server-signed:8000/health", headers=headers), timeout=2).read()'
             then
               ready=true
               break
@@ -349,6 +357,7 @@ jobs:
             -v "$PWD:/app" -w /app \
             -e E2E_BASE_URL=http://nazo-oauth-e2e-server:8000 \
             -e E2E_ISSUER_URL=http://127.0.0.1:8000 \
+            -e E2E_TENANT_HOST=127.0.0.1:8000 \
             -e E2E_DATABASE_URL=postgresql://postgres:postgres@nazo-oauth-e2e-postgres:5432/oauth \
             nazo-oauth-e2e-runner:latest python scripts/rfc9967_scim_set_e2e.py
       - name: Run load and race gate
@@ -356,6 +365,7 @@ jobs:
           docker run --rm --name nazo-oauth-e2e-runner --network nazo-oauth-e2e-net \
             -v "$PWD:/app" -w /app \
             -e E2E_BASE_URL=http://nazo-oauth-e2e-server:8000 \
+            -e E2E_TENANT_HOST=127.0.0.1:8000 \
             -e LOAD_REQUESTS=400 \
             -e LOAD_CONCURRENCY=32 \
             nazo-oauth-e2e-runner:latest python scripts/full_real_request_load.py
@@ -365,6 +375,7 @@ jobs:
           docker run --rm --name nazo-oauth-e2e-runner --network nazo-oauth-e2e-net \
             -v "$PWD:/app" -w /app \
             -e E2E_BASE_URL=http://nazo-oauth-e2e-server:8000 \
+            -e E2E_TENANT_HOST=127.0.0.1:8000 \
             nazo-oauth-e2e-runner:latest python scripts/valkey_failure_injection.py
       - name: Cleanup
         if: always()

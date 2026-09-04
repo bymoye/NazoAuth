@@ -25,7 +25,7 @@ pub(super) async fn read_desired(
 ) -> Result<Option<DesiredStateRecord>, RepositoryError> {
     let mut connection = repository.connection().await?;
     runtime_module_desired_states::table
-        .find(module_id(requested_module_id))
+        .find((repository.tenant_id(), module_id(requested_module_id)))
         .select(DesiredStateRow::as_select())
         .first::<DesiredStateRow>(&mut connection)
         .await
@@ -40,6 +40,7 @@ pub(super) async fn read_all_desired(
 ) -> Result<Vec<DesiredStateRecord>, RepositoryError> {
     let mut connection = repository.connection().await?;
     runtime_module_desired_states::table
+        .filter(runtime_module_desired_states::tenant_id.eq(repository.tenant_id()))
         .select(DesiredStateRow::as_select())
         .load::<DesiredStateRow>(&mut connection)
         .await
@@ -67,10 +68,11 @@ pub(super) async fn compare_and_set_desired(
         .transaction::<CasOutcome<DesiredStateRecord>, RuntimeTransactionError, _>(
             async |connection| {
                 for locked_module in &locked_modules {
-                    lock_key(connection, module_id(*locked_module)).await?;
+                    let lock = format!("{}:{}", repository.tenant_id(), module_id(*locked_module));
+                    lock_key(connection, &lock).await?;
                 }
                 let current = runtime_module_desired_states::table
-                    .find(module_id(change.next.module_id))
+                    .find((repository.tenant_id(), module_id(change.next.module_id)))
                     .select(DesiredStateRow::as_select())
                     .for_update()
                     .first::<DesiredStateRow>(connection)
@@ -91,7 +93,7 @@ pub(super) async fn compare_and_set_desired(
                 }
                 for guard in &required_revisions {
                     let guarded_revision = runtime_module_desired_states::table
-                        .find(module_id(guard.module_id))
+                        .find((repository.tenant_id(), module_id(guard.module_id)))
                         .select(runtime_module_desired_states::revision)
                         .first::<i64>(connection)
                         .await
@@ -116,7 +118,7 @@ pub(super) async fn compare_and_set_desired(
                         current.revision,
                         Some("noop".to_owned()),
                     );
-                    append_runtime_event(connection, &event)
+                    append_runtime_event(connection, repository.tenant_id(), &event)
                         .await
                         .map_err(RuntimeTransactionError::Repository)?;
                     return Ok(CasOutcome::Applied(current));
@@ -132,7 +134,8 @@ pub(super) async fn compare_and_set_desired(
                 let actor_id = parse_optional_uuid(change.next.actor_id.as_deref(), "actor")?;
                 let updated_at = DateTime::<Utc>::from(change.next.updated_at);
                 diesel::update(
-                    runtime_module_desired_states::table.find(module_id(change.next.module_id)),
+                    runtime_module_desired_states::table
+                        .find((repository.tenant_id(), module_id(change.next.module_id))),
                 )
                 .set((
                     runtime_module_desired_states::desired_mode.eq(desired_mode(change.next.mode)),
@@ -153,7 +156,7 @@ pub(super) async fn compare_and_set_desired(
                     change.next.revision,
                     None,
                 );
-                append_runtime_event(connection, &event)
+                append_runtime_event(connection, repository.tenant_id(), &event)
                     .await
                     .map_err(RuntimeTransactionError::Repository)?;
                 Ok(CasOutcome::Applied(change.next))

@@ -2,10 +2,7 @@ use std::time::Duration;
 
 use anyhow::Context as _;
 use chrono::{Duration as ChronoDuration, Utc};
-use nazo_identity::ports::RepositoryFuture;
-use nazo_postgres::{
-    AuditLedgerRepository, SecurityAuditAnchorHealth, SecurityAuditOutboxDelivery,
-};
+use nazo_persistence::{SecurityAuditExporter, SecurityAuditOutboxDelivery};
 
 use super::{
     AuditAnchorWorkerConfig,
@@ -15,78 +12,7 @@ use super::{
 
 const MAX_RETRY_DELAY: Duration = Duration::from_secs(300);
 
-/// The exporter-facing repository boundary. Keeping this port private to the
-/// adapter lets the worker state machine be exercised without a live database,
-/// while the production command still uses the concrete repository below.
-pub(super) trait AuditAnchorRepository: Send + Sync {
-    fn anchor_health(&self) -> RepositoryFuture<'_, SecurityAuditAnchorHealth>;
-
-    fn claim_due(
-        &self,
-        limit: i64,
-        lock_timeout_seconds: i32,
-    ) -> RepositoryFuture<'_, Vec<SecurityAuditOutboxDelivery>>;
-
-    fn mark_exported(
-        &self,
-        event_id: uuid::Uuid,
-        expected_attempts: i32,
-    ) -> RepositoryFuture<'_, ()>;
-
-    fn reschedule(
-        &self,
-        event_id: uuid::Uuid,
-        expected_attempts: i32,
-        available_at: chrono::DateTime<Utc>,
-        last_error: &str,
-    ) -> RepositoryFuture<'_, ()>;
-}
-
-impl AuditAnchorRepository for AuditLedgerRepository {
-    fn anchor_health(&self) -> RepositoryFuture<'_, SecurityAuditAnchorHealth> {
-        Box::pin(async move { AuditLedgerRepository::anchor_health(self).await })
-    }
-
-    fn claim_due(
-        &self,
-        limit: i64,
-        lock_timeout_seconds: i32,
-    ) -> RepositoryFuture<'_, Vec<SecurityAuditOutboxDelivery>> {
-        Box::pin(async move {
-            AuditLedgerRepository::claim_due(self, limit, lock_timeout_seconds).await
-        })
-    }
-
-    fn mark_exported(
-        &self,
-        event_id: uuid::Uuid,
-        expected_attempts: i32,
-    ) -> RepositoryFuture<'_, ()> {
-        Box::pin(async move {
-            AuditLedgerRepository::mark_exported(self, event_id, expected_attempts).await
-        })
-    }
-
-    fn reschedule(
-        &self,
-        event_id: uuid::Uuid,
-        expected_attempts: i32,
-        available_at: chrono::DateTime<Utc>,
-        last_error: &str,
-    ) -> RepositoryFuture<'_, ()> {
-        let last_error = last_error.to_owned();
-        Box::pin(async move {
-            AuditLedgerRepository::reschedule(
-                self,
-                event_id,
-                expected_attempts,
-                available_at,
-                &last_error,
-            )
-            .await
-        })
-    }
-}
+pub(super) use nazo_persistence::SecurityAuditExporter as AuditAnchorRepository;
 
 #[derive(Debug, Eq, PartialEq)]
 pub(super) enum IterationOutcome {
@@ -97,13 +23,16 @@ pub(super) enum IterationOutcome {
 
 /// Run the exporter until cancellation. The repository must use the
 /// independent exporter database role and the config must be worker-only.
-pub(crate) async fn run_worker(
-    repository: AuditLedgerRepository,
+pub(crate) async fn run_worker<R>(
+    repository: R,
     config: AuditAnchorWorkerConfig,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<()>
+where
+    R: SecurityAuditExporter,
+{
     config.validate()?;
     repository
-        .check_exporter_available()
+        .check_available()
         .await
         .map_err(|_| anyhow::anyhow!("audit anchor exporter capability preflight failed"))?;
     let client = reqwest::Client::builder()

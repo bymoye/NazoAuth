@@ -3,7 +3,7 @@
 //! NazoAuth is the single authority for Controller Public Keys, their fixed
 //! 30-day lifetime, the three-slot bound, and the fresh-2FA approvals that
 //! authorize every identity change.  This module is the typed surface between
-//! the admin HTTP plane and the PostgreSQL registry repository; it owns
+//! the admin HTTP plane and the selected persistence adapter; it owns
 //!
 //! * request-shape validation (identifier formats, key material decoding,
 //!   `kid`/key binding) before anything reaches storage;
@@ -26,15 +26,14 @@ use serde::Deserialize;
 use sha2::{Digest as _, Sha256};
 use uuid::Uuid;
 
-pub use nazo_postgres::{
+pub use nazo_persistence::control_plane::{
     CONTROLLER_KEY_TTL_SECONDS, IDENTITY_APPROVAL_TTL_SECONDS, MAX_ACTIVE_CONTROLLER_SLOTS,
 };
 
-use nazo_postgres::{
+use nazo_persistence::control_plane::{
     AdmittedController, CommitWithApprovalError, ControllerIdentityAction, ControllerRegistryError,
-    ControllerRegistryRepository, ControllerSlotSummary, IdentityApprovalError,
-    IssuedIdentityApproval, NewControllerSlot, NewRecoveryRoot, RotateControllerKey,
-    StoredControllerSlot,
+    ControllerRegistryPort, ControllerSlotSummary, IdentityApprovalError, IssuedIdentityApproval,
+    NewControllerSlot, NewRecoveryRoot, RotateControllerKey, StoredControllerSlot,
 };
 
 /// Fixed 7-day pre-expiry warning threshold (04 §2).
@@ -371,13 +370,36 @@ pub struct IssuedApprovalView {
 /// Service facade over the registry repository.  Cheap to clone.
 #[derive(Clone)]
 pub struct ControllerRegistryService {
-    repository: Arc<ControllerRegistryRepository>,
+    repository: Arc<dyn ControllerRegistryPort>,
+    deployment_id: String,
+}
+
+fn ensure_local_deployment(
+    local_deployment_id: &str,
+    caller_deployment_id: &str,
+) -> Result<(), ControllerRegistryServiceError> {
+    if caller_deployment_id != local_deployment_id {
+        return Err(ControllerRegistryServiceError::Invalid(
+            "deployment_id 与当前部署不匹配.",
+        ));
+    }
+    Ok(())
 }
 
 impl ControllerRegistryService {
     #[must_use]
-    pub fn new(repository: Arc<ControllerRegistryRepository>) -> Self {
-        Self { repository }
+    pub fn new(repository: Arc<dyn ControllerRegistryPort>, deployment_id: &str) -> Self {
+        Self {
+            repository,
+            deployment_id: deployment_id.to_owned(),
+        }
+    }
+
+    fn ensure_local_deployment(
+        &self,
+        deployment_id: &str,
+    ) -> Result<(), ControllerRegistryServiceError> {
+        ensure_local_deployment(&self.deployment_id, deployment_id)
     }
 
     /// Issue a single-use approval for one exact identity change.  The
@@ -390,6 +412,7 @@ impl ControllerRegistryService {
         change: &IdentityChange,
         now: DateTime<Utc>,
     ) -> Result<IssuedApprovalView, ControllerRegistryServiceError> {
+        self.ensure_local_deployment(change.deployment_id())?;
         change.validate()?;
         let issued: IssuedIdentityApproval = self
             .repository
@@ -419,6 +442,7 @@ impl ControllerRegistryService {
         request: &SlotChangeRequest,
         now: DateTime<Utc>,
     ) -> Result<StoredControllerSlot, ControllerRegistryServiceError> {
+        self.ensure_local_deployment(&request.deployment_id)?;
         if !matches!(
             action,
             ControllerIdentityAction::Bind | ControllerIdentityAction::Add
@@ -477,6 +501,7 @@ impl ControllerRegistryService {
         request: &RotateRequest,
         now: DateTime<Utc>,
     ) -> Result<StoredControllerSlot, ControllerRegistryServiceError> {
+        self.ensure_local_deployment(&request.deployment_id)?;
         let change = IdentityChange::Rotate(request.clone());
         change.validate()?;
         let rotation = RotateControllerKey {
@@ -506,6 +531,7 @@ impl ControllerRegistryService {
         request: &RevokeRequest,
         now: DateTime<Utc>,
     ) -> Result<StoredControllerSlot, ControllerRegistryServiceError> {
+        self.ensure_local_deployment(&request.deployment_id)?;
         let change = IdentityChange::Revoke(request.clone());
         change.validate()?;
         let committed = self
@@ -527,6 +553,7 @@ impl ControllerRegistryService {
         &self,
         deployment_id: &str,
     ) -> Result<Vec<StoredControllerSlot>, ControllerRegistryServiceError> {
+        self.ensure_local_deployment(deployment_id)?;
         Ok(self.repository.list_slots(deployment_id).await?)
     }
 
@@ -537,6 +564,7 @@ impl ControllerRegistryService {
         deployment_id: &str,
         now: DateTime<Utc>,
     ) -> Result<Vec<AdmittedController>, ControllerRegistryServiceError> {
+        self.ensure_local_deployment(deployment_id)?;
         Ok(self
             .repository
             .admitted_controllers(deployment_id, now)
@@ -550,6 +578,7 @@ impl ControllerRegistryService {
         kid: &str,
         now: DateTime<Utc>,
     ) -> Result<Option<AdmittedController>, ControllerRegistryServiceError> {
+        self.ensure_local_deployment(deployment_id)?;
         Ok(self
             .repository
             .admitted_controller_by_kid(deployment_id, kid, now)

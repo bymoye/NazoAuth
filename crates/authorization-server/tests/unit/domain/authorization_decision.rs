@@ -50,7 +50,7 @@ fn authorization_decision_endpoint(
     let connection = state.valkey_connection();
     let service = Arc::new(ServerAuthorizationService::new(
         nazo_postgres::AuthorizationFlowRepository::new(state.diesel_db.clone(), DEFAULT_TENANT_ID),
-        nazo_valkey::AuthorizationStateAdapter::new(&connection),
+        Arc::new(nazo_valkey::AuthorizationStateAdapter::new(&connection)),
         state.keyset.clone(),
     ));
     let sessions = nazo_identity::SessionService::new(

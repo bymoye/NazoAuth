@@ -11,8 +11,7 @@
 //! 3. verify the Ed25519 signature over the canonical bytes
 //! 4. key expiry/revocation at first admission (the registry lookup only
 //!    returns active, unexpired slots)
-//! 5. deployment binding, embedded build identity (J1), and config_revision
-//!    fencing
+//! 5. deployment binding and config_revision fencing
 //! 6. enter the operation journal accept checkpoint (E03)
 //! 7. execute strictly per journal checkpoints; internal steps never
 //!    re-authenticate
@@ -35,8 +34,11 @@
 use std::{
     env,
     fs::{self, OpenOptions},
+    future::Future,
     io::{Read as _, Write as _},
     path::{Path, PathBuf},
+    pin::Pin,
+    sync::Arc,
     time::Duration,
 };
 
@@ -53,16 +55,64 @@ mod control_journal;
 mod execution;
 mod identity;
 
-pub(crate) use identity::embedded_identity;
+pub(crate) use identity::release_identity;
 
 const CONFIG_REVISION_PATH: &str = "/run/nazauth-operator/config-revision";
 const STATE_DIRECTORY: &str = "/var/lib/nazauth/operator-state";
 const TASK_LOCK_TIMEOUT: Duration = Duration::from_secs(25);
 const TASK_LOCK_RETRY_INTERVAL: Duration = Duration::from_millis(100);
-/// One-shot processes need at most two concurrent registry/state queries.
-const OPERATOR_DATABASE_MAX_CONNECTIONS: usize = 2;
+pub type OperatorBackendFuture<'a, T> =
+    Pin<Box<dyn Future<Output = anyhow::Result<T>> + Send + 'a>>;
 
-pub async fn run() -> anyhow::Result<()> {
+/// Backend capabilities required by the one-shot operator workflow.
+///
+/// The application owns operation admission and journaling; each database
+/// adapter owns its connection lifecycle and the atomic persistence commands.
+pub trait OperatorPersistence: Send + Sync {
+    fn controller_registry(&self) -> Arc<dyn nazo_persistence::ControllerRegistryPort>;
+
+    fn recovery_invalidations(&self) -> Arc<dyn nazo_persistence::RecoveryInvalidationStore>;
+
+    fn admin_clients(&self) -> Arc<dyn nazo_auth::AdminClientRepositoryPort>;
+
+    fn tenant_resource_executor(
+        &self,
+        tenant: nazo_identity::TenantContext,
+        data_encryption_key: Option<[u8; 32]>,
+        preparation: Arc<dyn nazo_persistence::tenant_resources::TenantResourcePreparation>,
+    ) -> Arc<dyn nazo_persistence::tenant_resources::TenantResourceExecutorPort>;
+
+    fn tenant_directory_executor(
+        &self,
+    ) -> Arc<dyn nazo_persistence::directory_control::TenantDirectoryControlPort>;
+
+    fn tenant_directory(&self) -> Arc<dyn nazo_persistence::TenantDirectoryStore>;
+
+    fn run_migrations(&self) -> OperatorBackendFuture<'_, bool>;
+
+    fn initialize_tenant_directory(
+        &self,
+        binding: nazo_identity::TenantDirectoryBinding,
+    ) -> OperatorBackendFuture<'_, bool>;
+}
+
+/// Apply the schema and establish the initial authoritative tenant binding as
+/// one idempotent persistence transition. A runtime must never be startable in
+/// the half-migrated state where the directory tables exist but contain no
+/// system tenant.
+pub(crate) async fn migrate_and_initialize_tenant_directory(
+    persistence: &dyn OperatorPersistence,
+) -> anyhow::Result<bool> {
+    let config = crate::config::ConfigSource::load_for_migrations()?;
+    let initial_binding = crate::settings::Settings::initial_tenant_directory_binding(&config)?;
+    let migrated = persistence.run_migrations().await?;
+    let initialized = persistence
+        .initialize_tenant_directory(initial_binding)
+        .await?;
+    Ok(migrated || initialized)
+}
+
+pub async fn run(persistence: Arc<dyn OperatorPersistence>) -> anyhow::Result<()> {
     let mut compact = String::new();
     std::io::stdin()
         .take((MAX_COMPACT_JWS_BYTES + 1) as u64)
@@ -90,7 +140,7 @@ pub async fn run() -> anyhow::Result<()> {
     // outcome: ctl preserves intent and retries.
     let _task_lock = acquire_task_lock(lock).await?;
 
-    let outcome = execute_compact(&state_directory, compact).await;
+    let outcome = execute_compact(&state_directory, compact, persistence.as_ref()).await;
 
     // Bounded retention cleanup rides at the tail of the one-shot entry (E03
     // note): terminal results stay recoverable for thirty days, after which
@@ -107,7 +157,11 @@ pub async fn run() -> anyhow::Result<()> {
 
 /// Full E04 pipeline for one presented compact JWS.  Prints the durable
 /// [`nazo_operator_protocol::ControlResult`] on success.
-async fn execute_compact(state_directory: &Path, compact: &str) -> anyhow::Result<()> {
+async fn execute_compact(
+    state_directory: &Path,
+    compact: &str,
+    persistence: &dyn OperatorPersistence,
+) -> anyhow::Result<()> {
     // (1) Parse schema/size/closed enum before any authority is consulted.
     let presented = reject(admission::present(compact), RejectionClass::Request)?;
     let request_hash = reject(
@@ -125,14 +179,21 @@ async fn execute_compact(state_directory: &Path, compact: &str) -> anyhow::Resul
         control_journal::accepted_snapshot(state_directory, &presented.operation_id, &request_hash)
             .map_err(map_journal_error)?;
     if let Some(snapshot) = snapshot {
-        return journaled_execution(state_directory, &presented, &request_hash, &snapshot).await;
+        return journaled_execution(
+            state_directory,
+            &presented,
+            &request_hash,
+            &snapshot,
+            persistence,
+        )
+        .await;
     }
 
     // (2)+(4) Registry authority: find the controller key for this deployment
     // and admit it only while it is active and unexpired at admission time.
-    let repository = connect_controller_registry().await?;
+    let repository = persistence.controller_registry();
     let admitted = match admission::admit_controller(
-        &repository,
+        repository.as_ref(),
         &presented.deployment_id,
         &presented.kid,
         Utc::now(),
@@ -140,12 +201,9 @@ async fn execute_compact(state_directory: &Path, compact: &str) -> anyhow::Resul
     .await
     {
         Ok(admitted) => admitted,
-        Err(admission::AdmissionError::Rejected(failure)) => {
-            rejection_line(match failure {
-                admission::KeyAdmissionFailure::Expired => RejectionClass::Expired,
-                admission::KeyAdmissionFailure::Untrusted => RejectionClass::Authorization,
-            });
-            bail!("controller key admission failed: {failure:?}");
+        Err(admission::AdmissionError::Unauthorized) => {
+            rejection_line(RejectionClass::Authorization);
+            bail!("controller key admission rejected");
         }
         Err(admission::AdmissionError::Transport(error)) => {
             rejection_line(RejectionClass::Unavailable);
@@ -163,13 +221,8 @@ async fn execute_compact(state_directory: &Path, compact: &str) -> anyhow::Resul
         RejectionClass::Authorization,
     )?;
 
-    // (5) Fencing: this binary is the authorized target artifact (J1), the
-    // operation names this local deployment, and its config_revision matches
-    // the local revision marker.
-    reject(
-        identity::validate_embedded_target_identity(&verified.target),
-        RejectionClass::Target,
-    )?;
+    // (5) Fencing: the operation names this local deployment and its
+    // config_revision matches the local revision marker.
     let local_deployment_id = reject(
         identity::validate_local_operation_identity(&verified.operation),
         RejectionClass::Deployment,
@@ -195,7 +248,14 @@ async fn execute_compact(state_directory: &Path, compact: &str) -> anyhow::Resul
         kid: admitted.kid.clone(),
         accepted_at: Utc::now().timestamp(),
     };
-    journaled_execution(state_directory, &verified, &request_hash, &snapshot).await
+    journaled_execution(
+        state_directory,
+        &verified,
+        &request_hash,
+        &snapshot,
+        persistence,
+    )
+    .await
 }
 
 /// Run one operation under journal discipline and print its durable result.
@@ -204,6 +264,7 @@ async fn journaled_execution(
     operation: &ControlOperation,
     request_hash: &str,
     snapshot: &control_journal::AuthorizationSnapshot,
+    persistence: &dyn OperatorPersistence,
 ) -> anyhow::Result<()> {
     let resume_allowed = execution::resume_allowed(&operation.operation);
     let context = execution::ExecutionContext {
@@ -222,7 +283,7 @@ async fn journaled_execution(
         &|name| {
             let _ = pause_at_test_failpoint(name);
         },
-        || execution::execute(&operation.operation, &context),
+        || execution::execute_with_persistence(&operation.operation, &context, persistence),
     )
     .await
     .map_err(map_journal_error)?;
@@ -246,29 +307,11 @@ fn map_journal_error(error: control_journal::JournalFlowError) -> anyhow::Error 
     }
 }
 
-async fn connect_controller_registry() -> anyhow::Result<nazo_postgres::ControllerRegistryRepository>
-{
-    Ok(nazo_postgres::ControllerRegistryRepository::new(
-        operator_database().await?,
-    ))
-}
-
-/// Least-privilege database handle for one-shot work: only the migration-grade
-/// configuration source (DATABASE_URL / DATABASE_URL_FILE) is consulted.
-pub(super) async fn operator_database() -> anyhow::Result<nazo_postgres::DbPool> {
-    let config = crate::config::ConfigSource::load_for_migrations()?;
-    let database_url = crate::config::database_url(&config);
-    nazo_postgres::create_pool(&database_url, OPERATOR_DATABASE_MAX_CONNECTIONS)
-        .context("failed to create the operator database pool")
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RejectionClass {
     Request,
     Authorization,
-    Expired,
     Deployment,
-    Target,
     Revision,
     Conflict,
     Unavailable,
@@ -279,9 +322,7 @@ impl RejectionClass {
         match self {
             Self::Request => "request",
             Self::Authorization => "authorization",
-            Self::Expired => "expired",
             Self::Deployment => "deployment",
-            Self::Target => "target",
             Self::Revision => "revision",
             Self::Conflict => "conflict",
             Self::Unavailable => "unavailable",

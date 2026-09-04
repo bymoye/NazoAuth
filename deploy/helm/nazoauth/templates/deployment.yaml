@@ -38,10 +38,16 @@ spec:
             - name: http
               containerPort: 8000
           env:
-            - name: DATABASE_URL_FILE
-              value: /run/nazoauth-connections/database-url
-            - name: VALKEY_URL_FILE
-              value: /run/nazoauth-connections/valkey-url
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ required "connections.existingSecret is required" .Values.connections.existingSecret }}
+                  key: {{ .Values.connections.databaseUrlKey }}
+            - name: VALKEY_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ required "connections.existingSecret is required" .Values.connections.existingSecret }}
+                  key: {{ .Values.connections.valkeyUrlKey }}
             {{- if .Values.appSecrets.existingSecret }}
             - name: CLIENT_SECRET_PEPPER_FILE
               value: /run/nazoauth-app-secrets/client-secret-pepper
@@ -57,9 +63,6 @@ spec:
             - name: config
               mountPath: /app/.env.yaml
               subPath: .env.yaml
-              readOnly: true
-            - name: connections
-              mountPath: /run/nazoauth-connections
               readOnly: true
             {{- if .Values.appSecrets.existingSecret }}
             - name: app-secrets
@@ -99,14 +102,6 @@ spec:
         - name: config
           configMap:
             name: {{ include "nazoauth.fullname" . }}
-        - name: connections
-          secret:
-            secretName: {{ required "connections.existingSecret is required" .Values.connections.existingSecret }}
-            items:
-              - key: {{ .Values.connections.databaseUrlKey }}
-                path: database-url
-              - key: {{ .Values.connections.valkeyUrlKey }}
-                path: valkey-url
         {{- if .Values.appSecrets.existingSecret }}
         - name: app-secrets
           secret:

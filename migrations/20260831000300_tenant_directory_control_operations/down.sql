@@ -1,0 +1,4 @@
+DROP TRIGGER trg_tenant_directory_control_operations_append_only
+ON tenant_directory_control_operations;
+DROP FUNCTION nazo_tenant_directory_control_operations_append_only();
+DROP TABLE tenant_directory_control_operations;

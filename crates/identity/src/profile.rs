@@ -211,19 +211,31 @@ pub enum UpdateProfileError {
 }
 
 #[derive(Clone)]
-pub struct AccountProfileService<P, G, A> {
-    profiles: P,
-    grants: G,
-    applications: A,
+pub struct AccountProfileService {
+    profiles: std::sync::Arc<dyn ProfileRepositoryPort>,
+    grants: std::sync::Arc<dyn GrantSummaryRepositoryPort>,
+    applications: std::sync::Arc<dyn AuthorizedApplicationRepositoryPort>,
 }
 
-impl<P, G, A> AccountProfileService<P, G, A>
-where
-    P: ProfileRepositoryPort,
-    G: GrantSummaryRepositoryPort,
-    A: AuthorizedApplicationRepositoryPort,
-{
-    pub fn new(profiles: P, grants: G, applications: A) -> Self {
+impl AccountProfileService {
+    pub fn new<P, G, A>(profiles: P, grants: G, applications: A) -> Self
+    where
+        P: ProfileRepositoryPort + 'static,
+        G: GrantSummaryRepositoryPort + 'static,
+        A: AuthorizedApplicationRepositoryPort + 'static,
+    {
+        Self {
+            profiles: std::sync::Arc::new(profiles),
+            grants: std::sync::Arc::new(grants),
+            applications: std::sync::Arc::new(applications),
+        }
+    }
+
+    pub fn from_ports(
+        profiles: std::sync::Arc<dyn ProfileRepositoryPort>,
+        grants: std::sync::Arc<dyn GrantSummaryRepositoryPort>,
+        applications: std::sync::Arc<dyn AuthorizedApplicationRepositoryPort>,
+    ) -> Self {
         Self {
             profiles,
             grants,
@@ -453,18 +465,32 @@ pub enum DeliveryReadError {
 }
 
 #[derive(Clone)]
-pub struct ClientAccessService<R, D> {
-    requests: R,
+pub struct ClientAccessService<D> {
+    requests: std::sync::Arc<dyn AccessRequestRepositoryPort>,
     deliveries: D,
     client_secret_pepper: Box<str>,
 }
 
-impl<R, D> ClientAccessService<R, D>
+impl<D> ClientAccessService<D>
 where
-    R: AccessRequestRepositoryPort,
     D: DeliveryStorePort,
 {
-    pub fn new(requests: R, deliveries: D, client_secret_pepper: &str) -> Self {
+    pub fn new<R>(requests: R, deliveries: D, client_secret_pepper: &str) -> Self
+    where
+        R: AccessRequestRepositoryPort + 'static,
+    {
+        Self {
+            requests: std::sync::Arc::new(requests),
+            deliveries,
+            client_secret_pepper: client_secret_pepper.into(),
+        }
+    }
+
+    pub fn from_port(
+        requests: std::sync::Arc<dyn AccessRequestRepositoryPort>,
+        deliveries: D,
+        client_secret_pepper: &str,
+    ) -> Self {
         Self {
             requests,
             deliveries,
@@ -641,15 +667,21 @@ pub fn access_delivery_token(secret: &str, user_id: Uuid, request_id: Uuid) -> S
 }
 
 #[derive(Clone)]
-pub struct FederationLinksService<F> {
-    links: F,
+pub struct FederationLinksService {
+    links: std::sync::Arc<dyn FederationLinkRepositoryPort>,
 }
 
-impl<F> FederationLinksService<F>
-where
-    F: FederationLinkRepositoryPort,
-{
-    pub fn new(links: F) -> Self {
+impl FederationLinksService {
+    pub fn new<F>(links: F) -> Self
+    where
+        F: FederationLinkRepositoryPort + 'static,
+    {
+        Self {
+            links: std::sync::Arc::new(links),
+        }
+    }
+
+    pub fn from_port(links: std::sync::Arc<dyn FederationLinkRepositoryPort>) -> Self {
         Self { links }
     }
 

@@ -19,7 +19,7 @@ use actix_web::web::{Data, Json, Query};
 use actix_web::{HttpRequest, HttpResponse};
 use chrono::Utc;
 use nazo_http_actix::{csrf_error, has_valid_csrf_token_for_cookies, json_response, oauth_error};
-use nazo_postgres::IdentityApprovalError;
+use nazo_persistence::control_plane::{IdentityApprovalError, RecoveryRotationError};
 use std::collections::HashMap;
 
 fn ensure_csrf(
@@ -223,9 +223,9 @@ fn service_error_response(error: crate::recovery_root::RecoveryRootServiceError)
     }
 }
 
-fn rotation_error_response(error: nazo_postgres::RecoveryRotationError) -> HttpResponse {
+fn rotation_error_response(error: RecoveryRotationError) -> HttpResponse {
     match error {
-        nazo_postgres::RecoveryRotationError::Approval(rejection) => {
+        RecoveryRotationError::Approval(rejection) => {
             let (status, description) = match rejection {
                 IdentityApprovalError::UnknownToken => (StatusCode::BAD_REQUEST, "审批令牌不存在."),
                 IdentityApprovalError::Replayed => (
@@ -251,10 +251,10 @@ fn rotation_error_response(error: nazo_postgres::RecoveryRotationError) -> HttpR
             };
             oauth_error(status, "invalid_request", description)
         }
-        nazo_postgres::RecoveryRotationError::Mutation(recovery_error) => {
+        RecoveryRotationError::Mutation(recovery_error) => {
             super::controller_recovery::root_error_response(recovery_error)
         }
-        nazo_postgres::RecoveryRotationError::Transport(inner) => {
+        RecoveryRotationError::Transport(inner) => {
             tracing::warn!(%inner, "recovery root rotation storage failure");
             oauth_error(
                 StatusCode::SERVICE_UNAVAILABLE,

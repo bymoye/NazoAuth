@@ -29,7 +29,9 @@ pub(crate) async fn token_refresh(
 ) -> HttpResponse {
     let service = ServerTokenService::new(
         crate::test_support::token_issuance_repository(state.diesel_db.clone()),
-        nazo_valkey::TokenIssuanceStateAdapter::new(&state.valkey_connection()),
+        std::sync::Arc::new(nazo_valkey::TokenIssuanceStateAdapter::new(
+            &state.valkey_connection(),
+        )),
         state.keyset.clone(),
     );
     let config = TokenIssuanceConfig::from(state.settings.as_ref());

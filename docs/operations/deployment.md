@@ -14,15 +14,26 @@ Requirements:
 From the repository root:
 
 ```sh
+export NAZOAUTH_POSTGRES_PASSWORD='replace-with-a-unique-runtime-password'
+export NAZOAUTH_POSTGRES_LIFECYCLE_PASSWORD='replace-with-a-different-lifecycle-password'
+export NAZOAUTH_VALKEY_PASSWORD='replace-with-a-unique-valkey-password'
+export NAZOAUTH_VALKEY_STATE_EPOCH='replace-with-a-new-uuid'
 docker compose up -d --build
 docker compose ps
 ```
 
-Compose bakes the secret initializer and safe default configuration into images
-through the build context, so the Docker daemon does not need direct access to
-the CLI host's absolute source paths. Do not add a manual secret initialization
-step when using a remote Docker context or a containerized Web IDE. To change
-both the host port and the public origin seen by browsers, run:
+Replace every placeholder before starting Compose. Passwords are embedded in
+connection URLs, so restrict them to RFC 3986 unreserved characters
+(`A-Z`, `a-z`, `0-9`, `-`, `.`, `_`, and `~`). Use a distinct lifecycle
+password: the lifecycle role owns migrations, while the server connects as the
+non-superuser runtime role. Compose passes `DATABASE_URL` and `VALKEY_URL`
+directly to NazoAuth; it does not create application-specific URL or password
+files. The PostgreSQL image creates the runtime role only when initializing a
+new `postgres_data` volume, so changing these variables does not rotate an
+existing database's credentials.
+
+To change both the host port and the public origin seen by browsers, keep the
+four variables above exported and run:
 
 ```sh
 NAZOAUTH_PORT=443 \
@@ -31,8 +42,6 @@ NAZOAUTH_PUBLIC_BASE_URL=https://auth.example.com \
 NAZOAUTH_TRANSPORT_MODE=trusted-proxy \
 NAZOAUTH_TRUSTED_PROXY_CIDRS=<exact-ingress-peer-cidr> \
 NAZOAUTH_MTLS_CERTIFICATE_SOURCE=disabled \
-NAZOAUTH_BUILD_REVISION="$(git rev-parse HEAD)" \
-NAZOAUTH_BUILD_ID="source:$(git rev-parse HEAD)" \
 docker compose up -d --build
 ```
 
@@ -45,17 +54,23 @@ interface. Keep the default `127.0.0.1` when a reverse proxy on the same host
 terminates TLS. Do not bind all interfaces unless the platform or firewall
 controls direct access to the plaintext port.
 
+Compose maps `${NAZOAUTH_BIND_ADDRESS}:${NAZOAUTH_PORT}` on the host to the
+server's container port `8000`. For example, `NAZOAUTH_BIND_ADDRESS=0.0.0.0
+NAZOAUTH_PORT=6987` publishes host port `6987` to container port `8000`. A host
+port of `443` in this example is only a port mapping: with
+`TRANSPORT_MODE=trusted-proxy`, TLS is still terminated by the reverse proxy,
+not by NazoAuth. The long-running Compose server runs as the unprivileged
+container user `10001:10001`; the root `runtime-init` service only prepares
+volume ownership and must not be used as the server process.
+
 Replace `<exact-ingress-peer-cidr>` with the address NazoAuth observes for the
 TLS terminator. The Compose path is a trusted-proxy deployment; it does not
 mount the server certificate and client-CA files required by direct TLS.
 
-Compose generates private PostgreSQL and Valkey credentials in a named volume,
-starts both services, and uses a short-lived development operator identity to
-run the same signed `nazoauth operator-task` migration entry point before the
-server accepts traffic. This identity is deliberately not a production trust
-root. The task identifies its local automation actor as `docker-compose` and
-binds the expected embedded release, revision, and build ID to the same values
-used to compile the image; it does not contact or impersonate GitHub Actions.
+Compose starts PostgreSQL and Valkey with the explicitly supplied credentials,
+runs migrations through the lifecycle PostgreSQL role, and then starts the
+server with the separate runtime role. Migration startup depends only on
+PostgreSQL; Valkey readiness is required only by the server.
 Open:
 
 - `http://127.0.0.1:8000/health` for dependency readiness
@@ -66,17 +81,54 @@ The first source build requires network access to download Rust dependencies.
 Later builds reuse the local container cache.
 
 The default is a loopback-only evaluation deployment. PostgreSQL, Valkey, and
-application state—including signing keys, avatars, generated secrets,
-bootstrap state, and the UI release cache—use named volumes and survive
+application state—including signing keys, avatars, generated application secrets,
+administrator-provisioning receipts, and the UI release cache—use named volumes and survive
 `docker compose down`. Do not use `docker compose down -v` unless deleting all
 local data is intentional.
 
-When the database has no administrator, the server creates a deployment-bound,
-single-use token in its private bootstrap state. It remains valid until the
-first administrator is created. The server never prints the token or a
-token-bearing URL. The formal managed flow reads that private runtime-owned state through
-`nazoauthctl bootstrap-admin`; the authorization server exposes only the JSON
-`POST /auth/bootstrap-admin` API and does not serve an embedded setup page.
+When the database has no administrator, the managed flow invokes the target's
+local `nazoauth admin-provision` one-shot command through
+`nazoauthctl admin create`. Credentials are delivered through the
+controller's protected credential path; the authorization server exposes no
+HTTP bootstrap route or embedded setup page.
+
+## Standalone Direct TLS
+
+For a standalone deployment without a reverse proxy, write the following to
+`.env.yaml` in the server working directory and run `nazoauth server` as a
+dedicated unprivileged service account. Replace the database and Valkey
+placeholders and the example UUIDv7 with deployment values. The certificate
+must cover `auth.example.com`; the private key must be readable by the service
+account and have no group or other permission bits.
+
+```yaml
+BIND: "0.0.0.0:8443"
+TLS_BIND: "0.0.0.0:9443"
+PUBLIC_BASE_URL: "https://auth.example.com:8443"
+MTLS_ENDPOINT_BASE_URL: "https://auth.example.com:9443"
+TRANSPORT_MODE: "direct-tls"
+MTLS_CERTIFICATE_SOURCE: "direct-tls"
+TLS_CERTIFICATE_FILE: "/etc/nazoauth/tls/server-chain.pem"
+TLS_PRIVATE_KEY_FILE: "/etc/nazoauth/tls/server-key.pem"
+TLS_CLIENT_CA_FILE: "/etc/nazoauth/tls/client-ca.pem"
+TLS_RELOAD_INTERVAL_SECONDS: 5
+DATABASE_URL: "postgresql://nazo_runtime:<password>@db.internal:5432/oauth"
+VALKEY_URL: "redis://default:<password>@valkey.internal:6379/0"
+VALKEY_STATE_EPOCH: "019c8ca2-30a6-7000-8000-00000000e102"
+DATA_DIR: "/var/lib/nazoauth"
+RUST_LOG: "info"
+```
+
+`BIND` and `TLS_BIND` use ports above 1024 so the long-running process does
+not need root or `CAP_NET_BIND_SERVICE`; the root account is only needed to
+provision files and directories. If clients must reach direct TLS on public
+port 443, use an external port forward to these high ports or choose the
+trusted-proxy deployment instead. Do not run the server as root just to bind a
+privileged port. In `direct-tls`, NazoAuth terminates both HTTPS listeners and
+gets the mTLS identity from the TLS session. In `trusted-proxy`, the proxy
+terminates public TLS and NazoAuth receives only sanitized, authenticated
+certificate evidence over the internal HTTP hop; the two modes are mutually
+exclusive.
 
 ## Public deployment
 
@@ -95,7 +147,7 @@ nazoauthctl install \
   --database-lifecycle-password-file ./database-lifecycle-password \
   --valkey-host valkey.internal --valkey-port 6379 \
   --valkey-password-file ./valkey-password
-nazoauthctl bootstrap-admin --instance production
+nazoauthctl admin create --instance production
 ```
 
 Select exactly one runtime: `podman`, `docker`, or `host`. The two PostgreSQL
@@ -118,7 +170,7 @@ HTTPS address seen by clients.
 
 ### Reverse proxy and mTLS
 
-When RFC 8705 or the full OIDF profile is enabled, the TLS terminator must
+When RFC 8705 client authentication is enabled, the TLS terminator must
 request a client certificate and forward it with the RFC 9440 `Client-Cert`
 header. NazoAuth authenticates the certificate against the client registration;
 the proxy must not accept a `Client-Cert` or `Client-Cert-Chain` value supplied
@@ -126,11 +178,7 @@ by the Internet client. Configure `MTLS_CERTIFICATE_SOURCE=rfc9440` and set
 `TRUSTED_PROXY_CIDRS` to the exact address NazoAuth observes for that proxy. Do
 not trust a whole container subnet when one host address is sufficient.
 
-NazoAuthCtl conformance clients use a fresh CA and leaf certificate for every
-run. A proxy in front of a conformance deployment therefore cannot advertise a
-stale, fixed client-CA list. Install the public CA bundle generated for that run
-before starting Suite modules and restore the previous bundle in the same run's
-cleanup path. Use the reviewed HAProxy 3.2 boundary in
+Use the reviewed HAProxy 3.2 boundary in
 [`deploy/proxy/haproxy-rfc9440.cfg`](../../deploy/proxy/haproxy-rfc9440.cfg): it
 separates ordinary HTTPS from a dedicated `verify required` mTLS listener,
 strips all inbound forwarding and certificate headers, and adds only the
@@ -151,25 +199,13 @@ following must remain true:
   against the registered certificate identity;
 - TLS 1.2 and TLS 1.3 are restricted separately to the approved AES-GCM suites.
 
-Build the run bundle only from the public `mtls_trust_anchor_pem` values bound to
-the active lease. Write it atomically, validate the entire bundle, reload the
-proxy, and confirm its digest before creating Suite modules. Cleanup restores
-the previous bundle and reloads the proxy even after interruption. A shared
-proxy must serialize this install/restore lifecycle unless each run has its own
-listener and CA bundle. Never use `ca-ignore-err all` or `crt-ignore-err all` as
-a production substitute for installing the run CA: that delegates all chain
-trust to the application and can weaken RFC 8705 clients registered only by a
-standard subject selector.
-
 For ordinary production clients issued by a stable CA, install that CA in
-HAProxy and use `verify required` on a dedicated mTLS listener. Do not combine
-that listener with run-scoped conformance certificates unless the control plane
-can atomically install and restore their CA.
+HAProxy and use `verify required` on a dedicated mTLS listener.
 
 Before reloading HAProxy, validate the candidate with the same HAProxy image or
 binary (`haproxy -c -f /path/to/candidate.cfg`) and retain a root-only copy of
-the previous configuration. After reload, verify `/health`, Discovery, the
-unauthenticated Suite boundary, an allowed AES-GCM handshake, and rejection of
+the previous configuration. After reload, verify `/health`, Discovery,
+anonymous rejection on the mTLS listener, an allowed AES-GCM handshake, and rejection of
 CBC and CHACHA20. Roll back the saved configuration and reload immediately if
 any check fails.
 
@@ -177,7 +213,7 @@ any check fails.
 
 Activation requires all of these checks:
 
-1. `nazoauthctl status` reports the signed Release and both target identities;
+1. `nazoauthctl status` reports the signed Release and content-addressed target;
 2. `nazoauthctl doctor` verifies audit, readiness, target digest, and the runtime DDL boundary;
 3. `/health` returns HTTP 200;
 4. `/.well-known/openid-configuration` returns the configured issuer;
@@ -196,7 +232,7 @@ nazoauthctl operation --instance production --limit 20
 For a released standalone installation, the normal upgrade is:
 
 ```sh
-nazoauthctl update --instance production --yes
+nazoauthctl update --instance production
 ```
 
 This verifies the tag-specific Sigstore identity and immutable artifact
@@ -223,7 +259,9 @@ migrations may be forward-only.
 The bundled topology is a single-node deployment. Before relying on it for
 production:
 
-- back up Compose-generated database, Valkey, and application secrets or use an external secret manager;
+- back up the Compose database, Valkey state, and generated application secrets;
+- retain the explicitly configured PostgreSQL and Valkey credentials in an
+  appropriate secret manager;
 - define backup and restore procedures;
 - monitor PostgreSQL, Valkey, disk usage, and `/health`; use `/live` only for
   process restart decisions;
@@ -233,6 +271,6 @@ production:
 - require the exact-commit security and conformance gates described in
   [release-security.md](release-security.md).
 
-For an intentional clean-data replacement with OIDF-gated activation, use
+For an intentional clean-data replacement, use
 [Fresh Deployment and Production Activation](fresh-production-activation.md).
 Advanced settings are documented in [configuration.md](configuration.md).

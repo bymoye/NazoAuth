@@ -30,7 +30,7 @@ use crate::test_support::{DatabaseUserFixture, TestInfrastructure};
 use chrono::Utc;
 use diesel::prelude::*;
 use nazo_identity::AccessRequestStatus;
-use nazo_postgres::{create_pool, get_conn};
+use nazo_postgres::{AccessRequestRepository, create_pool, get_conn};
 
 async fn profile_access_requests_from_state(
     state: Data<TestInfrastructure>,
@@ -116,8 +116,8 @@ fn test_state() -> TestInfrastructure {
 
 struct TestAdminAccessRequestDependencies {
     admin_sessions: Data<AdminSessionHandles>,
-    repository: Data<AccessRequestRepository>,
-    delivery_store: Data<DeliveryStore>,
+    repository: Data<dyn nazo_persistence::AdminAccessRequestStore>,
+    delivery_store: Data<dyn nazo_identity::ports::DeliveryStorePort>,
     client_service: Data<ServerAdminClientService>,
     config: Data<AdminAccessRequestConfig>,
     client_ip_config: Data<ClientIpConfig>,
@@ -131,9 +131,9 @@ fn admin_access_request_dependencies(
     let storage = &state.settings.storage;
     let endpoint = &state.settings.endpoint;
     TestAdminAccessRequestDependencies {
-        admin_sessions: Data::new(AdminSessionHandles::new(
-            nazo_valkey::SessionStore::new(&state.valkey_connection()),
-            nazo_postgres::UserRepository::new(state.diesel_db.clone()),
+        admin_sessions: Data::new(AdminSessionHandles::from_port(
+            Arc::new(nazo_valkey::SessionStore::new(&state.valkey_connection())),
+            Arc::new(nazo_postgres::UserRepository::new(state.diesel_db.clone())),
             state.settings.tenant.context.tenant_id,
             SessionHttpConfig::new(
                 &session.session_cookie_name,
@@ -141,10 +141,18 @@ fn admin_access_request_dependencies(
                 session.cookie_secure,
             ),
         )),
-        repository: Data::new(AccessRequestRepository::new(state.diesel_db.clone())),
-        delivery_store: Data::new(DeliveryStore::new(&state.valkey_connection())),
+        repository: Data::from(
+            Arc::new(AccessRequestRepository::new(state.diesel_db.clone()))
+                as Arc<dyn nazo_persistence::AdminAccessRequestStore>,
+        ),
+        delivery_store: Data::from(Arc::new(nazo_valkey::DeliveryStore::new(
+            &state.valkey_connection(),
+        ))
+            as Arc<dyn nazo_identity::ports::DeliveryStorePort>),
         client_service: Data::new(ServerAdminClientService::new(
-            nazo_postgres::OAuthClientRepository::new(state.diesel_db.clone()),
+            Arc::new(nazo_postgres::OAuthClientRepository::new(
+                state.diesel_db.clone(),
+            )) as Arc<dyn nazo_auth::AdminClientRepositoryPort>,
             ServerSectorIdentifierResolver,
             ServerAdminClientCrypto::new(state.keyset.clone()),
             admin_client_policy(&state.settings),

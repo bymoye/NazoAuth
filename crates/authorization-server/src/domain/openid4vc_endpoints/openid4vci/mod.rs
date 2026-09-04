@@ -29,6 +29,7 @@ use nazo_openid4vci::{
     IssuanceNotification, NonceRecord, NotificationRequest, PreAuthorizedCodeGrant,
     TxCodeDescription,
 };
+use nazo_persistence::{Openid4vcSubjectStore, Openid4vciDatasetStore, Openid4vciStore};
 use nazo_runtime_modules::ModuleId;
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -55,7 +56,7 @@ pub(crate) use dataset::{
 };
 
 type VciService = CredentialIssuerService<
-    nazo_postgres::Openid4vciRepository,
+    Arc<dyn Openid4vciStore>,
     Openid4vcProofValidator,
     Openid4vcDataset,
     Openid4vcCredentialCrypto,
@@ -83,7 +84,7 @@ pub(crate) struct CredentialDatasetResponse {
 }
 
 pub(crate) struct ServerCredentialIssuerOperations {
-    store: nazo_postgres::Openid4vciRepository,
+    store: Arc<dyn Openid4vciStore>,
     service: VciService,
     token_service: Arc<ServerTokenService>,
     authorization: Arc<ServerAuthorizationService>,
@@ -95,15 +96,17 @@ pub(crate) struct ServerCredentialIssuerOperations {
     deferred_configurations: Arc<BTreeSet<String>>,
     dpop_nonce_policy: DpopNoncePolicy,
     client_attestation: Option<Arc<Openid4vcClientAttestationValidator>>,
-    pub(super) users: nazo_postgres::UserRepository,
-    pub(super) datasets: nazo_postgres::Openid4vciDatasetRepository,
+    pub(super) users: Arc<dyn Openid4vcSubjectStore>,
+    pub(super) datasets: Arc<dyn Openid4vciDatasetStore>,
     pub(super) tenant_id: Uuid,
 }
 
 #[allow(clippy::too_many_arguments)]
 impl ServerCredentialIssuerOperations {
     pub(crate) fn new(
-        pool: nazo_postgres::DbPool,
+        store: Arc<dyn Openid4vciStore>,
+        users: Arc<dyn Openid4vcSubjectStore>,
+        datasets: Arc<dyn Openid4vciDatasetStore>,
         tenant_id: Uuid,
         data_key: [u8; 32],
         token_service: Arc<ServerTokenService>,
@@ -118,9 +121,6 @@ impl ServerCredentialIssuerOperations {
         dpop_nonce_policy: DpopNoncePolicy,
     ) -> anyhow::Result<Self> {
         let configurations = Arc::new(configurations);
-        let store = nazo_postgres::Openid4vciRepository::new(pool.clone(), data_key);
-        let users = nazo_postgres::UserRepository::new(pool.clone());
-        let datasets = nazo_postgres::Openid4vciDatasetRepository::new(pool.clone(), data_key);
         let service = CredentialIssuerService::new(
             store.clone(),
             proof_validator,

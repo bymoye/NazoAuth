@@ -1,0 +1,18 @@
+[package]
+name = "nazo-oauth-server-valkey"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+anyhow.workspace = true
+nazo-auth.workspace = true
+nazo-identity.workspace = true
+nazo-oauth-server.workspace = true
+nazo-resource-server.workspace = true
+nazo-valkey.workspace = true
+
+[lints]
+workspace = true

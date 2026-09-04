@@ -345,6 +345,48 @@ impl BackchannelLogoutOutboxPort for AuditRepository {
     }
 }
 
+impl nazo_persistence::BackchannelLogoutDeliveryStore for AuditRepository {
+    fn claim_due(
+        &self,
+        limit: i64,
+        lock_timeout_seconds: i32,
+    ) -> futures_util::future::BoxFuture<'_, Result<Vec<BackchannelLogoutDelivery>, RepositoryError>>
+    {
+        Box::pin(async move {
+            AuditRepository::claim_due_backchannel_logout(self, limit, lock_timeout_seconds).await
+        })
+    }
+
+    fn complete(
+        &self,
+        delivery_id: Uuid,
+        expected_attempts: i32,
+    ) -> futures_util::future::BoxFuture<'_, Result<(), RepositoryError>> {
+        Box::pin(async move {
+            AuditRepository::complete_backchannel_logout(self, delivery_id, expected_attempts).await
+        })
+    }
+
+    fn fail<'a>(
+        &'a self,
+        delivery_id: Uuid,
+        expected_attempts: i32,
+        next_attempt_at: Option<DateTime<Utc>>,
+        last_error: &'a str,
+    ) -> futures_util::future::BoxFuture<'a, Result<(), RepositoryError>> {
+        Box::pin(async move {
+            AuditRepository::fail_backchannel_logout(
+                self,
+                delivery_id,
+                expected_attempts,
+                next_attempt_at,
+                last_error,
+            )
+            .await
+        })
+    }
+}
+
 impl ScimCredentialAuditPort for AuditRepository {
     fn active_credential<'a>(
         &'a self,
@@ -411,30 +453,6 @@ pub(super) async fn insert_identity_security_event(
     Ok(())
 }
 
-pub(super) async fn insert_initial_admin_created_event(
-    connection: &mut AsyncPgConnection,
-    request_id: &str,
-    user_id: Uuid,
-    tenant_id: Uuid,
-    occurred_at: DateTime<Utc>,
-) -> diesel::QueryResult<()> {
-    diesel::insert_into(identity_security_events::table)
-        .values((
-            identity_security_events::tenant_id.eq(tenant_id),
-            identity_security_events::category.eq("admin"),
-            identity_security_events::event_type.eq("initial_admin_bootstrap"),
-            identity_security_events::outcome.eq("success"),
-            identity_security_events::actor_id.eq::<Option<Uuid>>(None),
-            identity_security_events::target_user_id.eq(Some(user_id)),
-            identity_security_events::reason_code.eq("initial_admin_created"),
-            identity_security_events::occurred_at.eq(occurred_at),
-            identity_security_events::request_id.eq(Some(request_id)),
-        ))
-        .execute(connection)
-        .await?;
-    Ok(())
-}
-
 const fn security_category(event_type: IdentitySecurityEventType) -> &'static str {
     match event_type {
         IdentitySecurityEventType::MfaTotpAttempt
@@ -495,6 +513,7 @@ fn require_current_logout_claim(updated: usize) -> Result<(), RepositoryError> {
 
 pub(super) async fn append_runtime_event(
     connection: &mut AsyncPgConnection,
+    tenant_id: Uuid,
     event: &ModuleEventRecord,
 ) -> Result<(), RepositoryError> {
     let event_id = Uuid::parse_str(&event.event_id).map_err(|error| {
@@ -511,6 +530,7 @@ pub(super) async fn append_runtime_event(
     diesel::insert_into(runtime_module_state_events::table)
         .values((
             runtime_module_state_events::event_id.eq(event_id),
+            runtime_module_state_events::tenant_id.eq(tenant_id),
             runtime_module_state_events::module_id.eq(module_id(event.module_id)),
             runtime_module_state_events::event_type.eq(event_type(event.event_type)),
             runtime_module_state_events::revision.eq(revision(event.revision)?),

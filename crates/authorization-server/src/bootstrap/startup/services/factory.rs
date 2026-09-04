@@ -1,12 +1,15 @@
-use super::{ServiceAssembly, *};
-use actix_web::body::MessageBody;
-use actix_web::dev::Service;
-use actix_web::dev::{ServiceRequest, ServiceResponse};
+use super::super::tenant_runtime::{ProcessRuntime, TenantHostIndex, TenantRuntimeRegistry};
+use super::*;
+use actix_web::body::{EitherBody, MessageBody};
+use actix_web::dev::{Extensions, Service, ServiceRequest, ServiceResponse};
 use actix_web::error::ErrorRequestTimeout;
-use actix_web::middleware::Next;
-use actix_web::middleware::from_fn;
-use actix_web::{App, Error, HttpServer, web};
+use actix_web::middleware::{Next, from_fn};
+use actix_web::{App, Error, HttpResponse, HttpServer, web};
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::rc::Rc;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::timeout;
 use tracing::Instrument;
@@ -22,6 +25,73 @@ const HTTP_CLIENT_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 /// `max_connections` is per worker in Actix. Four thousand is below the
 /// framework default (25,000) while retaining headroom for normal API use.
 const HTTP_MAX_CONNECTIONS_PER_WORKER: usize = 4_096;
+
+#[derive(Default)]
+struct WorkerTenantDataCache {
+    index: Option<Arc<TenantHostIndex>>,
+    by_host: HashMap<String, Rc<Extensions>>,
+}
+
+impl WorkerTenantDataCache {
+    fn resolve(&mut self, index: Arc<TenantHostIndex>, host: &str) -> Option<Rc<Extensions>> {
+        let changed = match &self.index {
+            Some(current) => !Arc::ptr_eq(current, &index),
+            None => true,
+        };
+        if changed {
+            self.index = Some(Arc::clone(&index));
+            self.by_host.clear();
+        }
+
+        let runtime = index.by_host.get(host)?;
+        Some(
+            self.by_host
+                .entry(host.to_owned())
+                .or_insert_with(|| runtime.assembly().app_data_container())
+                .clone(),
+        )
+    }
+}
+
+fn direct_tls_host_matches(server_name: Option<&str>, host: &str) -> bool {
+    server_name.is_none_or(|server_name| server_name == host)
+}
+
+async fn bind_tenant_app_data<B>(
+    registry: TenantRuntimeRegistry,
+    cache: Rc<RefCell<WorkerTenantDataCache>>,
+    mut request: ServiceRequest,
+    next: Next<B>,
+) -> Result<ServiceResponse<EitherBody<B>>, Error>
+where
+    B: MessageBody + 'static,
+{
+    let Some(host) = crate::bootstrap::cors::canonical_request_host(request.head()) else {
+        return Ok(request
+            .into_response(HttpResponse::NotFound().finish())
+            .map_into_right_body());
+    };
+    if !direct_tls_host_matches(
+        request
+            .request()
+            .conn_data::<crate::http::mtls::DirectTlsServerName>()
+            .map(crate::http::mtls::DirectTlsServerName::as_str),
+        &host,
+    ) {
+        return Ok(request
+            .into_response(HttpResponse::MisdirectedRequest().finish())
+            .map_into_right_body());
+    }
+    let container = cache.borrow_mut().resolve(registry.load(), &host);
+    let Some(container) = container else {
+        return Ok(request
+            .into_response(HttpResponse::NotFound().finish())
+            .map_into_right_body());
+    };
+
+    request.add_data_container(container);
+    Ok(next.call(request).await?.map_into_left_body())
+}
 
 async fn request_timeout<B>(
     request: ServiceRequest,
@@ -48,32 +118,47 @@ where
 
 /// Owns the Actix worker factory, middleware, route registration, and
 /// listener setup.  All application data is assembled before entering this
-/// function so worker creation cannot repeat database/Valkey initialization.
-pub(super) async fn run(assembly: ServiceAssembly) -> anyhow::Result<()> {
-    let ServiceAssembly {
-        startup,
-        core,
-        identity,
-    } = assembly;
-    let super::super::configuration::StartupConfiguration {
-        config,
-        perf_metrics_enabled,
-        settings,
-        control_discovery,
-        mtls_certificate_source,
-        readiness_dependencies,
-        initial_admin_bootstrap,
-        ..
-    } = startup;
-
+/// function so worker creation cannot repeat persistence/provider initialization.
+pub(super) async fn run(
+    process: Arc<ProcessRuntime>,
+    registry: TenantRuntimeRegistry,
+) -> anyhow::Result<()> {
+    let config = process.config.clone();
+    let route_settings = process.route_settings.clone();
+    let perf_metrics_enabled = process.perf_metrics_enabled;
+    let control_discovery = process.control_discovery.clone();
+    let control_tenant_id = web::Data::new(crate::bootstrap::routes::ControlTenantId::new(
+        process.control_tenant_id,
+    ));
+    let database_pool_metrics = process.database_pool_metrics.clone();
     let bind = config.string("BIND", "0.0.0.0:8000");
     let addr: SocketAddr = bind.parse()?;
-    let direct_tls = crate::bootstrap::direct_tls_listeners(&config, &settings)?;
+    let direct_tls = crate::bootstrap::direct_tls_listeners(&config, &route_settings)?;
     let ui_static_dir = crate::bootstrap::ui_release::resolve(&config).await?;
     tracing::info!("nazo-oauth-server(actix-web) listening on {addr}");
 
     let server = HttpServer::new(move || {
-        let app = App::new()
+        let cache = Rc::new(RefCell::new(WorkerTenantDataCache::default()));
+        let tenant_registry = registry.clone();
+        let mut tenant_scope = web::scope("");
+        if let Some(path) = ui_static_dir.clone() {
+            tenant_scope = tenant_scope.service(crate::bootstrap::ui_static_files(path));
+        }
+        let settings = Arc::clone(&route_settings);
+        let cors_registry = registry.clone();
+        tenant_scope = tenant_scope.configure(move |cfg| {
+            crate::bootstrap::routes::configure_dynamic(
+                cfg,
+                &settings,
+                perf_metrics_enabled,
+                cors_registry.clone(),
+            )
+        });
+        let tenant_scope = tenant_scope.wrap(from_fn(move |request, next| {
+            bind_tenant_app_data(tenant_registry.clone(), Rc::clone(&cache), request, next)
+        }));
+
+        App::new()
             .wrap(from_fn(request_timeout))
             .wrap_fn(|req, service| {
                 let method = req.method().clone();
@@ -105,96 +190,11 @@ pub(super) async fn run(assembly: ServiceAssembly) -> anyhow::Result<()> {
                 .instrument(span)
             })
             .wrap(from_fn(security_headers))
-            .app_data(identity.runtime_module_admin_endpoint.clone())
-            .app_data(identity.authorization_decision_endpoint.clone())
-            .app_data(identity.authorization_endpoint.clone())
-            .app_data(core.authorization_service.clone())
-            .app_data(core.token_service.clone());
-        #[cfg(not(test))]
-        let app = app.app_data(core.token_management_endpoint.clone());
-        let app = app.app_data(core.userinfo_endpoint.clone());
-        let app = app
-            .app_data(mtls_certificate_source.clone())
-            .app_data(readiness_dependencies.clone())
+            .app_data(database_pool_metrics.clone())
             .app_data(control_discovery.clone())
-            .app_data(initial_admin_bootstrap.clone())
-            .app_data(core.token_endpoint_handles.clone())
-            .app_data(core.ciba_service.clone())
-            .app_data(core.ciba_users.clone())
-            .app_data(core.ciba_config.clone())
-            .app_data(core.token_issuance_config.clone())
-            .app_data(core.device_service.clone())
-            .app_data(core.device_grants.clone())
-            .app_data(identity.device_decision_handles.clone())
-            .app_data(core.device_config.clone());
-        let app = app
-            .app_data(core.authorization_config.clone())
-            .app_data(core.authorization_runtime.clone())
-            .app_data(core.metadata_handles.clone())
-            .app_data(identity.admin_sessions.clone())
-            .app_data(identity.admin_federation.clone())
-            .app_data(identity.session_profiles.clone())
-            .app_data(identity.session_management_endpoint.clone())
-            .app_data(identity.profile_logout_endpoint.clone())
-            .app_data(identity.profile_account_endpoint.clone())
-            .app_data(identity.oidc_logout.clone())
-            .app_data(identity.csrf_http_config.clone())
-            .app_data(identity.mfa_profiles.clone())
-            .app_data(identity.account_profiles.clone())
-            .app_data(identity.avatar_profiles.clone())
-            .app_data(identity.profile_access_requests.clone())
-            .app_data(identity.profile_federation.clone())
-            .app_data(core.resource_server_http_data.clone())
-            .app_data(identity.admin_users.clone())
-            .app_data(identity.admin_user_registration.clone())
-            .app_data(identity.admin_grants.clone())
-            .app_data(identity.admin_access_requests.clone())
-            .app_data(identity.controller_registry.clone())
-            .app_data(identity.recovery_root.clone())
-            .app_data(identity.mtls_trust_anchors.clone())
-            .app_data(identity.admin_access_delivery.clone())
-            .app_data(identity.admin_access_request_config.clone())
-            .app_data(core.admin_client_service.clone())
-            .app_data(core.admin_client_config.clone())
-            .app_data(identity.client_ip_config.clone())
-            .app_data(identity.auth_request_limiter.clone())
-            .app_data(identity.token_management_limiter.clone())
-            .app_data(identity.local_registration_endpoint.clone())
-            .app_data(identity.password_login_endpoint.clone())
-            .app_data(identity.passkey_login_endpoint.clone())
-            .app_data(identity.passkey_profile_endpoint.clone())
-            .app_data(identity.federation.clone())
-            .app_data(identity.federation_http_config.clone())
-            .app_data(core.dynamic_registration_handles.clone())
-            .app_data(core.scim_endpoint.clone());
-        let app = if let Some(endpoint) = core.credential_issuer_endpoint.clone() {
-            app.app_data(endpoint)
-        } else {
-            app
-        };
-        let app = if let Some(service) = core.credential_dataset_admin.clone() {
-            app.app_data(service)
-        } else {
-            app
-        };
-        let app = if let Some(endpoint) = core.presentation_endpoint.clone() {
-            app.app_data(endpoint)
-        } else {
-            app
-        };
-        let app = if let Some(validator) = core.client_attestation_validator.clone() {
-            app.app_data(web::Data::from(validator))
-        } else {
-            app
-        };
-        let app = if let Some(path) = ui_static_dir.clone() {
-            app.service(crate::bootstrap::ui_static_files(path))
-        } else {
-            app
-        };
-        app.configure(|cfg| {
-            crate::bootstrap::routes::configure(cfg, &settings, perf_metrics_enabled)
-        })
+            .app_data(control_tenant_id.clone())
+            .app_data(web::Data::new(registry.clone()))
+            .service(tenant_scope)
     })
     .client_request_timeout(HTTP_CLIENT_REQUEST_TIMEOUT)
     .max_connections(HTTP_MAX_CONNECTIONS_PER_WORKER)

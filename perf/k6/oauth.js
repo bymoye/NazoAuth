@@ -104,11 +104,6 @@ const scenarioSteps = {
     'fapi_token_authorization_code',
     'fapi_token_refresh',
   ],
-  ciba_private_key_jwt_dpop_poll: [
-    'ciba_backchannel_authentication',
-    'ciba_automated_decision',
-    'ciba_token',
-  ],
 };
 const vectorStride = Math.max(iterations, 100);
 const vectorOffsets = {
@@ -459,112 +454,6 @@ async function dpopProof(method, htu, prefix) {
       jti: uniqueJti(prefix),
     },
   );
-}
-
-async function cibaRequestObject(user) {
-  const now = nowSeconds();
-  return signPs256(
-    {},
-    {
-      iss: secrets.clients.ciba,
-      aud: secrets.issuer,
-      iat: now,
-      nbf: now,
-      exp: now + 240,
-      jti: uniqueJti('ciba-request'),
-      scope: 'openid profile',
-      login_hint: user.email,
-      binding_message: `NazoAuth CIBA ${__VU}-${exec.scenario.iterationInTest}`,
-      acr_values: '1',
-      requested_expiry: 300,
-    },
-  );
-}
-
-async function cibaBackchannelAuthentication(user) {
-  const assertion = await clientAssertion(secrets.clients.ciba, secrets.issuer, 'ciba-backchannel', 'PS256');
-  const request = await cibaRequestObject(user);
-  const response = http.post(
-    `${BASE_URL}/bc-authorize`,
-    form({
-      client_id: secrets.clients.ciba,
-      client_assertion_type: secrets.client_assertion_type,
-      client_assertion: assertion,
-      request,
-    }),
-    formHeaders({}, requestTags('ciba_backchannel_authentication', {
-      endpoint: '/bc-authorize',
-      grant_type: 'urn:openid:params:grant-type:ciba',
-      client_profile: 'ciba-fapi-compatible',
-      client_auth: 'private_key_jwt',
-      request_object: 'signed',
-      delivery_mode: 'poll',
-    })),
-  );
-  check(response, {
-    'ciba backchannel status is 200': (r) => r.status === 200,
-    'ciba auth_req_id returned': (r) => Boolean(r.json('auth_req_id')),
-    'ciba interval returned': (r) => Number(r.json('interval')) > 0,
-  });
-  if (response.status !== 200) {
-    fail(`ciba backchannel failed: ${response.status} ${response.body}`);
-  }
-  return response.json('auth_req_id');
-}
-
-function approveCiba(authReqId) {
-  const response = http.get(
-    `${BASE_URL}/auth/ciba-automated-decision?${form({
-      auth_req_id: authReqId,
-      action: 'approve',
-      decision_token: secrets.ciba_automated_decision_token,
-    })}`,
-    {
-      redirects: 0,
-      tags: requestTags('ciba_automated_decision', {
-        endpoint: '/auth/ciba-automated-decision',
-        grant_type: 'urn:openid:params:grant-type:ciba',
-        decision: 'approve',
-      }),
-    },
-  );
-  check(response, {
-    'ciba automated decision status is 200': (r) => r.status === 200,
-    'ciba automated decision succeeded': (r) => r.json('success') === true,
-  });
-  if (response.status !== 200) {
-    fail(`ciba automated decision failed: ${response.status} ${response.body}`);
-  }
-}
-
-async function cibaToken(authReqId) {
-  const assertion = await clientAssertion(secrets.clients.ciba, secrets.issuer, 'ciba-token', 'PS256');
-  const dpop = await dpopProof('POST', `${secrets.issuer}/token`, 'dpop-ciba-token');
-  const response = http.post(
-    `${BASE_URL}/token`,
-    form({
-      grant_type: 'urn:openid:params:grant-type:ciba',
-      auth_req_id: authReqId,
-      client_assertion_type: secrets.client_assertion_type,
-      client_assertion: assertion,
-    }),
-    formHeaders({ DPoP: dpop }, requestTags('ciba_token', {
-      endpoint: '/token',
-      grant_type: 'urn:openid:params:grant-type:ciba',
-      client_profile: 'ciba-fapi-compatible',
-      client_auth: 'private_key_jwt',
-      sender_constraint: 'dpop',
-      delivery_mode: 'poll',
-    })),
-  );
-  check(response, {
-    'ciba token status is 200': (r) => r.status === 200,
-    'ciba token is DPoP-bound': (r) => r.json('token_type') === 'DPoP',
-    'ciba access token returned': (r) => Boolean(r.json('access_token')),
-  });
-  if (response.status !== 200) {
-    fail(`ciba token failed: ${response.status} ${response.body}`);
-  }
 }
 
 async function oidcPar(v) {
@@ -1071,13 +960,6 @@ export async function fapi2_logged_in_high_security() {
   if (response.status !== 200) {
     fail(`fapi logged-in refresh failed: ${response.status} ${response.body}`);
   }
-}
-
-export async function ciba_private_key_jwt_dpop_poll() {
-  const user = selectedUser(false);
-  const authReqId = await cibaBackchannelAuthentication(user);
-  approveCiba(authReqId);
-  await cibaToken(authReqId);
 }
 
 export async function same_user_refresh_token_rotation() {

@@ -5,11 +5,6 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
-[[bin]]
-name = "nazoauth"
-path = "src/main.rs"
-test = false
-
 [dependencies]
 actix-cors.workspace = true
 actix-files.workspace = true
@@ -24,8 +19,6 @@ aws-lc-rs.workspace = true
 base64.workspace = true
 blake3.workspace = true
 chrono = { workspace = true, features = ["serde"] }
-diesel = { workspace = true, features = ["postgres_backend", "uuid", "chrono", "serde_json", "64-column-tables"] }
-diesel-async = { workspace = true, features = ["postgres", "deadpool"] }
 der.workspace = true
 ed25519-dalek.workspace = true
 flate2.workspace = true
@@ -44,11 +37,10 @@ nazo-openid4vc-http-actix.workspace = true
 nazo-operator-protocol.workspace = true
 nazo-openid4vci.workspace = true
 nazo-openid4vp.workspace = true
+nazo-persistence.workspace = true
 nazo-digital-credentials.workspace = true
 nazo-identity.workspace = true
 nazo-key-management.workspace = true
-nazo-postgres.workspace = true
-nazo-valkey.workspace = true
 nazo-resource-server.workspace = true
 nazo-runtime-modules.workspace = true
 nazo-scim-events.workspace = true
@@ -80,9 +72,14 @@ x509-cert.workspace = true
 urlencoding.workspace = true
 uuid = { workspace = true, features = ["v7", "serde"] }
 yaml_serde = "0.10.4"
+zeroize.workspace = true
 
 [dev-dependencies]
+diesel = { workspace = true, features = ["postgres_backend", "uuid", "chrono", "serde_json", "64-column-tables"] }
+diesel-async = { workspace = true, features = ["postgres", "deadpool"] }
 diesel_migrations.workspace = true
+nazo-postgres.workspace = true
+nazo-valkey.workspace = true
 fred = { workspace = true, features = ["i-scripts"] }
 pkcs8.workspace = true
 proptest.workspace = true

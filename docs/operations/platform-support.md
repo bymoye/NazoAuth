@@ -5,8 +5,8 @@
 The tagged Release workflow builds and executes the server binary on a native runner
 with the same operating system and CPU architecture as the target. It does not
 label a cross-compiled file as supported without executing it. Every matrix
-entry executes `nazoauth` and checks its `build-identity` JSON against the exact tag, commit, operator
-protocol, and workflow build ID.
+entry executes `nazoauth` and checks its `release-identity` JSON against the
+release tag and operator protocol version.
 
 | Rust target | Native runner | GitHub Release assets |
 | --- | --- | --- |
@@ -49,7 +49,7 @@ binds container operations to `linux/arm64`. Host paths and systemd units are
 architecture-neutral; the signed target-specific binary digest remains the
 authority for install and every later update.
 
-The browser UI is not embedded in the server executable. A schema-5 Release
+The browser UI is not embedded in the server executable. A schema-6 Release
 attestation binds the independently attested NazoAuthWeb Release descriptor;
 the runtime obtains and verifies that UI artifact through the documented
 control-plane flow.
@@ -67,7 +67,7 @@ attestations, Sigstore, and the signed GHCR image.
 
 Each executable has a custom GitHub attestation with predicate type
 `https://nazo.run/attestations/release-manifest/v1`. Its closed schema binds the
-target, server executable digest, embedded build identity, operator protocol and
+target, server executable digest, operator protocol and
 controller compatibility range, frontend descriptor,
 OCI index and platform manifests, and rollback boundary. Verify a downloaded
 file before execution:

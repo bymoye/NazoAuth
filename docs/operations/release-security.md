@@ -41,14 +41,14 @@ The `release-security` workflow runs for `v*` tags and manual dispatch:
 - the tag commit must be reachable from `main` with successful exact-SHA `main`
   push quality gates. Arbitrary branches and unverified tags fail closed
 - a `workflow_dispatch` for a commit reachable from `main` remains a
-  non-publishing native-matrix rehearsal. It embeds `sha-<commit>` as the
-  release identity, runs the policy, native tests, binary builds, and OCI
-  assembly, and skips every tag-only attestation and publication job
+  non-publishing native-matrix rehearsal. It runs the policy, native tests,
+  binary builds, and OCI assembly, and skips every tag-only attestation and
+  publication job
 
 - builds eight platform targets on native x86-64 and Arm64 Linux, Windows, and
   macOS runners with the pinned Rust toolchain
-- executes the server binary on every native target and verifies its embedded
-  tag, commit, protocol, and build ID
+- executes the server binary on every native target and verifies its package
+  release version and operator protocol version
 - packages `nazo-operator-protocol` once from its unique source, verifies the
   package build, records its digest, and gives the exact `.crate` standard
   build-provenance attestation
@@ -57,7 +57,7 @@ The `release-security` workflow runs for `v*` tags and manual dispatch:
 - scans the exact OCI archive with Trivy and publishes that archive without a
   second build
 - generates the server CycloneDX SBOM
-- binds each server binary to the closed schema-5 ReleaseManifest with the custom
+- binds each server binary to the closed schema-6 ReleaseManifest with the custom
   `https://nazo.run/attestations/release-manifest/v1` GitHub attestation
 - declares the operator protocol version and supported NazoAuthCtl SemVer range
 - binds the independently released and attested NazoAuthWeb descriptor rather

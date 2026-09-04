@@ -1,5 +1,5 @@
 //! OAuth/OIDC 流程中的序列化载荷。
-// 这些结构体会进入 JWT、Valkey 临时键或 token 签发逻辑，字段名需保持协议稳定。
+// 这些结构体会进入 JWT、临时协议状态或 token 签发逻辑，字段名需保持协议稳定。
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 use uuid::Uuid;

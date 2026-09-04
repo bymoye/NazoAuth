@@ -8,17 +8,23 @@ pub use fred::prelude::{
     Builder, Client, Config, ConnectionConfig, Error, Expiration, LuaInterface, PerformanceConfig,
 };
 
+use nazo_identity::TenantId;
 use std::time::Duration;
 use uuid::Uuid;
 
 const TEST_DEPLOYMENT_ID: &str = "test";
 const TEST_STATE_EPOCH: Uuid = Uuid::from_u128(0x019c_8ca2_30a6_7000_8000_0000_0000_0001);
+const TEST_TENANT_ID: Uuid = Uuid::from_u128(1);
+
+fn test_tenant_id() -> TenantId {
+    TenantId::new(TEST_TENANT_ID).expect("fixed test tenant is non-nil")
+}
 
 /// Prefix an inspected business key with the fixed explicit test namespace.
 /// Raw test clients never receive an unscoped business key.
 #[must_use]
 pub fn state_storage_key(key: impl AsRef<str>) -> String {
-    storage_key(TEST_DEPLOYMENT_ID, TEST_STATE_EPOCH, key)
+    storage_key(TEST_DEPLOYMENT_ID, TEST_STATE_EPOCH, test_tenant_id(), key)
         .expect("fixed test state namespace is valid")
 }
 
@@ -28,11 +34,25 @@ pub fn state_storage_key(key: impl AsRef<str>) -> String {
 pub fn storage_key(
     deployment_id: &str,
     state_epoch: Uuid,
+    tenant_id: TenantId,
     key: impl AsRef<str>,
 ) -> Result<String, crate::Error> {
     Ok(format!(
         "{}{}",
-        crate::connection::state_namespace(deployment_id, state_epoch)?,
+        crate::connection::state_namespace(deployment_id, state_epoch, tenant_id)?,
+        key.as_ref()
+    ))
+}
+
+/// Derive a deployment-scoped, non-tenant cache key for raw contract tests.
+pub fn deployment_storage_key(
+    deployment_id: &str,
+    state_epoch: Uuid,
+    key: impl AsRef<str>,
+) -> Result<String, crate::Error> {
+    Ok(format!(
+        "{}{}",
+        crate::connection::deployment_namespace(deployment_id, state_epoch)?,
         key.as_ref()
     ))
 }
@@ -92,8 +112,20 @@ pub async fn connect(url: &str, timeout: Duration) -> Result<Client, Error> {
 /// Construct a scoped store connection for tests. Production construction has
 /// no test fallback and always receives the deployment epoch from startup.
 pub fn scoped_connection(client: Client) -> crate::ValkeyConnection {
-    crate::ValkeyConnection::from_existing_client(client, TEST_DEPLOYMENT_ID, TEST_STATE_EPOCH)
-        .expect("fixed test state namespace is valid")
+    tenant_scoped_connection(client, test_tenant_id())
+}
+
+/// Construct a connection in the fixed test deployment and epoch for an
+/// explicit tenant. Cross-tenant contract tests use this without duplicating
+/// production namespace construction.
+pub fn tenant_scoped_connection(client: Client, tenant_id: TenantId) -> crate::ValkeyConnection {
+    crate::ValkeyConnection::from_existing_client(
+        client,
+        TEST_DEPLOYMENT_ID,
+        TEST_STATE_EPOCH,
+        tenant_id,
+    )
+    .expect("fixed test state namespace is valid")
 }
 
 pub async fn scoped_connect(

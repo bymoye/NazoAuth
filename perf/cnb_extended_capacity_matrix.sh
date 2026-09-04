@@ -11,7 +11,7 @@ children_file="perf/results/cnb-extended-capacity-children.txt"
 cpusets_file="perf/results/cnb-extended-capacity-cpusets.txt"
 : >"${children_file}"
 
-python3 - "${PERF_CPU_RESERVE:-4}" "${EXTENDED_CAPACITY_GROUPS:-10}" >"${cpusets_file}" <<'PY'
+python3 - "${PERF_CPU_RESERVE:-4}" "${EXTENDED_CAPACITY_GROUPS:-9}" >"${cpusets_file}" <<'PY'
 import sys
 from pathlib import Path
 
@@ -135,10 +135,9 @@ run_extended_child introspect_opaque_refresh_token introspect-opaque-refresh-tok
 run_extended_child authorize_par_session authorize-par-session "16,32,64,128,256" "$(sed -n '4p' "${cpusets_file}")"
 run_extended_child revoke_refresh_token revoke-refresh-token "16,32,64,128,256" "$(sed -n '5p' "${cpusets_file}")"
 run_extended_child metadata_jwks metadata-jwks "250,500,1000,1500,2000" "$(sed -n '6p' "${cpusets_file}")"
-run_extended_child ciba_private_key_jwt_dpop_poll ciba-private-key-jwt-dpop-poll "16,32,64,128,256" "$(sed -n '7p' "${cpusets_file}")"
-run_extended_child same_user_refresh_token_rotation same-user-refresh-token-rotation "8,16,32,64,128" "$(sed -n '8p' "${cpusets_file}")"
-run_extended_child same_user_introspect_opaque_refresh_token same-user-introspect-opaque-refresh-token "8,16,32,64,128" "$(sed -n '9p' "${cpusets_file}")"
-run_extended_child same_user_authorize_par_session same-user-authorize-par-session "8,16,32,64,128" "$(sed -n '10p' "${cpusets_file}")"
+run_extended_child same_user_refresh_token_rotation same-user-refresh-token-rotation "8,16,32,64,128" "$(sed -n '7p' "${cpusets_file}")"
+run_extended_child same_user_introspect_opaque_refresh_token same-user-introspect-opaque-refresh-token "8,16,32,64,128" "$(sed -n '8p' "${cpusets_file}")"
+run_extended_child same_user_authorize_par_session same-user-authorize-par-session "8,16,32,64,128" "$(sed -n '9p' "${cpusets_file}")"
 
 report_child_logs() {
   interval_seconds="${CAPACITY_LOG_INTERVAL_SECONDS:-60}"

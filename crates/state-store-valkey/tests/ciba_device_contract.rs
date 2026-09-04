@@ -17,6 +17,18 @@ use serde_json::json;
 
 static CIBA_PING_DELIVERY_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+#[test]
+fn legacy_version_exports_alias_the_core_cas_tokens() {
+    let ciba: nazo_valkey::StoredCibaRequest =
+        nazo_auth::CibaStateVersion::new("ciba-snapshot".to_owned(), 1_700_000_120);
+    let device: nazo_valkey::StoredDeviceState =
+        nazo_auth::DeviceStateVersion::new("device-snapshot".to_owned());
+
+    assert_eq!(ciba.comparison_token(), "ciba-snapshot");
+    assert_eq!(ciba.retention_expires_at(), 1_700_000_120);
+    assert_eq!(device.comparison_token(), "device-snapshot");
+}
+
 fn ciba_approval_context(auth_time: i64) -> CibaAuthenticationContext {
     CibaAuthenticationContext {
         auth_time,
@@ -91,13 +103,13 @@ async fn ciba_cas_preserves_exact_key_payload_deadline_and_single_winner() {
         state.retention_expires_at
     );
     let stored = store.load(&auth_req_id).await.unwrap().unwrap();
-    assert_eq!(stored.value(), &state);
+    assert_eq!(stored.state(), &state);
     state.last_poll_at = Some(now + 1);
     let mut other = state.clone();
     other.interval_seconds = 10;
     let (first, second) = tokio::join!(
-        store.replace(&auth_req_id, &stored, &state),
-        store.replace(&auth_req_id, &stored, &other)
+        store.replace(&auth_req_id, stored.version(), &state),
+        store.replace(&auth_req_id, stored.version(), &other)
     );
     assert_eq!(
         [first.unwrap(), second.unwrap()]
@@ -142,20 +154,25 @@ async fn ciba_cas_rejects_an_expired_authorization_without_mutating_state() {
     replacement.authentication_context = Some(ciba_approval_context(now));
     assert_eq!(
         store
-            .replace_with_authorization_deadline(&auth_req_id, &stored, &replacement, Some(now))
+            .replace_with_authorization_deadline(
+                &auth_req_id,
+                stored.version(),
+                &replacement,
+                Some(now),
+            )
             .await
             .unwrap(),
         AtomicResult::DeadlineElapsed
     );
     assert_eq!(
         store
-            .delete_with_authorization_deadline(&auth_req_id, &stored, Some(now))
+            .delete_with_authorization_deadline(&auth_req_id, stored.version(), Some(now))
             .await
             .unwrap(),
         AtomicResult::DeadlineElapsed
     );
     assert_eq!(
-        store.load(&auth_req_id).await.unwrap().unwrap().value(),
+        store.load(&auth_req_id).await.unwrap().unwrap().state(),
         &state
     );
 }
@@ -272,7 +289,7 @@ async fn ciba_decision_atomically_schedules_and_terminally_acks_ping_delivery() 
     );
 
     let stored = store.load(&auth_req_id).await.unwrap().unwrap();
-    let notification = stored.value().ping_notification.as_ref().unwrap();
+    let notification = stored.state().ping_notification.as_ref().unwrap();
     assert_eq!(notification.status, CibaPingNotificationStatus::Delivered);
     assert!(notification.client_notification_token.is_none());
     assert!(
@@ -340,7 +357,7 @@ async fn expired_ciba_ping_is_failed_without_exposing_its_notification_token() {
         "an expired authorization request must never trigger outbound notification"
     );
     let stored = store.load(&auth_req_id).await.unwrap().unwrap();
-    let notification = stored.value().ping_notification.as_ref().unwrap();
+    let notification = stored.state().ping_notification.as_ref().unwrap();
     assert_eq!(notification.status, CibaPingNotificationStatus::Failed);
     assert!(notification.client_notification_token.is_none());
 }

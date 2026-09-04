@@ -28,7 +28,7 @@ pub use service::{
     ProtectedResourceAuthorizationContext, ProtectedResourceAuthorizationError,
     ProtectedResourceAuthorizationRequest, ProtectedResourceAuthorizationResult,
     ProtectedResourceAuthorizationService, ProtectedResourceDependencyError,
-    ResourceServerPortFuture, RevocationLookupKey,
+    ProtectedResourceDpopStateStore, ResourceServerPortFuture, RevocationLookupKey,
 };
 
 /// The largest expiry grace NazoAuth resource servers may apply. This is part

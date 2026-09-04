@@ -20,7 +20,9 @@ Nazo Auth Server 是一个用 Rust 写的自托管 OAuth 2.x / OAuth 2.1-aligned
 
 | 项目 | 值 |
 | --- | --- |
-| 包名 | `nazo-oauth-server` |
+| 应用库 | `nazo-oauth-server`（不依赖具体数据库） |
+| 默认发行总包 | `nazoauth`（PostgreSQL + Valkey） |
+| 存储适配包 | `nazo-oauth-server-postgres`、`nazo-oauth-server-valkey` |
 | Workspace 版本 | `0.2.3` |
 | 许可证 | AGPL-3.0-or-later |
 | 语言 | Rust 2024 |
@@ -76,7 +78,7 @@ nazoauthctl install --host production-host --name production \
   --database-lifecycle-password-file ./database-lifecycle-password \
   --valkey-host valkey.internal --valkey-port 6379 \
   --valkey-password-file ./valkey-password
-nazoauthctl bootstrap-admin --instance production
+nazoauthctl admin create --instance production
 nazoauthctl bind --instance production --label operations \
   --output-secret-file ./production-recovery-secret
 nazoauthctl status --instance production
@@ -91,10 +93,9 @@ PostgreSQL 或 Valkey 创建凭据。lifecycle PostgreSQL role 负责迁移、�
 secret 和头像会持久保存。当前格式导入与备份策略见
 [受管安装、更新与恢复](docs/operations/one-click-update.zh-CN.md)。
 
-数据库还没有管理员时，`nazoauthctl bootstrap-admin` 会读取 runtime 所有、且不会被
-打印的一次性 claim。交互模式只通过 TTY 提示；自动化必须通过 stdin 或专用文件描述符
-提交封闭的凭据文档。token、凭据或携带 token 的 URL 都不得进入 argv、普通环境变量、
-日志或审计记录。
+数据库还没有管理员时，`nazoauthctl admin create` 会调用目标 runtime 内的
+`nazoauth admin-provision` 一次性命令。封闭的凭据文档只通过 controller 的受保护凭据
+路径交付；不会经过 HTTP 初始化路由，也不会进入 argv、普通环境变量、日志或审计记录。
 
 公开部署时传入 `--public-url https://auth.example.com`；TLS 入口要求见
 [部署指南](docs/operations/deployment.zh-CN.md)。`compose.yml` 仅保留为源码树开发沙箱，

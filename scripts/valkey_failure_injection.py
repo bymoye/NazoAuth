@@ -5,11 +5,13 @@ from __future__ import annotations
 
 import json
 import os
+from urllib.parse import urlparse
 
 import requests
 
 
 BASE_URL = os.environ.get("E2E_BASE_URL", "http://nazo-oauth-e2e-server:8000").rstrip("/")
+TENANT_HEADERS = {"Host": os.environ.get("E2E_TENANT_HOST", urlparse(BASE_URL).netloc)}
 
 
 def fail(name: str, detail: object) -> None:
@@ -32,16 +34,16 @@ def response_json(response: requests.Response) -> dict[str, object]:
 
 
 def main() -> int:
-    health = requests.get(f"{BASE_URL}/health", timeout=5)
+    health = requests.get(f"{BASE_URL}/health", headers=TENANT_HEADERS, timeout=5)
     health_payload = response_json(health)
     if health.status_code != 503:
         fail("health_without_valkey", {"status": health.status_code, "body": health.text[:200]})
     if health_payload != {
         "status": "not_ready",
         "checks": {
-            "postgresql": {"status": "up"},
+            "database": {"status": "up"},
             "signing_keys": {"status": "up"},
-            "valkey": {"status": "down"},
+            "transient_state": {"status": "down"},
         },
     }:
         fail("health_without_valkey", health_payload)
@@ -50,7 +52,7 @@ def main() -> int:
     token = requests.post(
         f"{BASE_URL}/token",
         data={"grant_type": "client_credentials", "client_id": "missing-client"},
-        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        headers={**TENANT_HEADERS, "Content-Type": "application/x-www-form-urlencoded"},
         timeout=10,
     )
     payload = response_json(token)

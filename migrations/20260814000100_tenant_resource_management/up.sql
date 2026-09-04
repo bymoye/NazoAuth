@@ -1,8 +1,7 @@
--- Ordinary tenant-resource management is a control-plane capability.  It is
--- deliberately independent from the conformance-suite provenance used by
--- the older onboarding path.
+-- Ordinary tenant-resource management is a control-plane capability.
 ALTER TABLE oauth_client_mtls_trust_anchor_requests
-    ALTER COLUMN user_id DROP NOT NULL;
+    ALTER COLUMN user_id DROP NOT NULL,
+    ADD COLUMN source VARCHAR(32) NOT NULL DEFAULT 'admin-session';
 
 ALTER TABLE oauth_client_mtls_trust_anchor_requests
     DROP CONSTRAINT IF EXISTS ck_mtls_trust_anchor_source,
@@ -10,10 +9,10 @@ ALTER TABLE oauth_client_mtls_trust_anchor_requests
 
 ALTER TABLE oauth_client_mtls_trust_anchor_requests
     ADD CONSTRAINT ck_mtls_trust_anchor_source CHECK (
-        source IN ('admin-session', 'operator-conformance', 'operator-managed')
+        source IN ('admin-session', 'operator-managed')
     ),
     ADD CONSTRAINT ck_mtls_trust_anchor_state CHECK (
-        (status = 0 AND source IN ('admin-session', 'operator-conformance')
+        (status = 0 AND source = 'admin-session'
             AND user_id IS NOT NULL AND resolved_by_user_id IS NULL AND resolved_at IS NULL
             AND revoked_by_user_id IS NULL AND revoked_at IS NULL)
         OR (status = 0 AND source = 'operator-managed'
@@ -22,17 +21,11 @@ ALTER TABLE oauth_client_mtls_trust_anchor_requests
         OR (status IN (1, 2) AND source = 'admin-session'
             AND user_id IS NOT NULL AND resolved_by_user_id IS NOT NULL AND resolved_at IS NOT NULL
             AND revoked_by_user_id IS NULL AND revoked_at IS NULL)
-        OR (status = 1 AND source = 'operator-conformance'
-            AND user_id IS NOT NULL AND resolved_by_user_id IS NULL AND resolved_at IS NOT NULL
-            AND revoked_by_user_id IS NULL AND revoked_at IS NULL)
         OR (status IN (1, 2) AND source = 'operator-managed'
             AND user_id IS NULL AND resolved_by_user_id IS NULL AND resolved_at IS NOT NULL
             AND revoked_by_user_id IS NULL AND revoked_at IS NULL)
         OR (status = 3 AND source = 'admin-session'
             AND user_id IS NOT NULL AND resolved_by_user_id IS NOT NULL AND resolved_at IS NOT NULL
-            AND revoked_by_user_id IS NOT NULL AND revoked_at IS NOT NULL)
-        OR (status = 3 AND source = 'operator-conformance'
-            AND user_id IS NOT NULL AND resolved_by_user_id IS NULL AND resolved_at IS NOT NULL
             AND revoked_by_user_id IS NOT NULL AND revoked_at IS NOT NULL)
         OR (status = 3 AND source = 'operator-managed'
             AND user_id IS NULL AND resolved_by_user_id IS NULL AND resolved_at IS NOT NULL
@@ -60,15 +53,6 @@ BEGIN
         RAISE EXCEPTION 'admin-session trust events require an actor'
             USING ERRCODE = '23514';
     END IF;
-    IF request_source = 'operator-conformance'
-       AND (
-           (NEW.action IN (0, 1) AND NEW.actor_user_id IS NOT NULL)
-           OR (NEW.action = 3 AND NEW.actor_user_id IS NULL)
-           OR NEW.action = 2
-       ) THEN
-        RAISE EXCEPTION 'operator-conformance trust event actor/action is inconsistent'
-            USING ERRCODE = '23514';
-    END IF;
     IF request_source = 'operator-managed' AND NEW.actor_user_id IS NOT NULL THEN
         RAISE EXCEPTION 'operator-managed trust events cannot carry a user actor'
             USING ERRCODE = '23514';
@@ -77,12 +61,20 @@ BEGIN
 END;
 $$;
 
+ALTER TABLE oauth_client_mtls_trust_anchor_events
+    ALTER COLUMN actor_user_id DROP NOT NULL;
+
+CREATE TRIGGER trg_mtls_trust_event_actor
+BEFORE INSERT OR UPDATE ON oauth_client_mtls_trust_anchor_events
+FOR EACH ROW
+EXECUTE FUNCTION nazo_oauth_validate_mtls_trust_event_actor();
+
 ALTER TABLE openid4vci_credential_dataset_events
     DROP CONSTRAINT IF EXISTS ck_openid4vci_dataset_event_source;
 
 ALTER TABLE openid4vci_credential_dataset_events
     ADD CONSTRAINT ck_openid4vci_dataset_event_source
-    CHECK (source IN ('admin-session', 'operator-conformance', 'operator-managed'));
+    CHECK (source IN ('admin-session', 'operator-managed'));
 
 ALTER TABLE openid4vci_credential_dataset_events
     ALTER COLUMN actor_user_id DROP NOT NULL;
@@ -92,9 +84,8 @@ RETURNS trigger
 LANGUAGE plpgsql
 AS $$
 BEGIN
-    IF NEW.source IN ('admin-session', 'operator-conformance')
-       AND NEW.actor_user_id IS NULL THEN
-        RAISE EXCEPTION '% dataset events require a user actor', NEW.source
+    IF NEW.source = 'admin-session' AND NEW.actor_user_id IS NULL THEN
+        RAISE EXCEPTION 'admin-session dataset events require a user actor'
             USING ERRCODE = '23514';
     END IF;
     IF NEW.source = 'operator-managed' AND NEW.actor_user_id IS NOT NULL THEN
@@ -396,12 +387,6 @@ ALTER TABLE openid4vp_transactions
     ADD CONSTRAINT fk_openid4vp_transactions_openid4vc_trust_policy
         FOREIGN KEY (tenant_id, openid4vc_trust_policy_binding_id)
         REFERENCES openid4vc_trust_policies(tenant_id, id),
-    ADD CONSTRAINT ck_openid4vp_transactions_trust_owner CHECK (
-        NOT (
-            conformance_lease_id IS NOT NULL
-            AND openid4vc_trust_policy_binding_id IS NOT NULL
-        )
-    ),
     ADD CONSTRAINT ck_openid4vp_transactions_trust_policy_binding CHECK (
         (
             openid4vc_trust_policy_binding_id IS NULL

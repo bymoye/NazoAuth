@@ -1,4 +1,4 @@
-use std::{future::Future, pin::Pin};
+use std::{future::Future, pin::Pin, sync::Arc};
 
 use serde_json::Value;
 use uuid::Uuid;
@@ -54,6 +54,42 @@ pub trait AdminClientRepositoryPort: Send + Sync {
     ) -> AdminClientFuture<'a, OAuthClient>;
 
     fn update<'a>(&'a self, client: &'a OAuthClient) -> AdminClientFuture<'a, OAuthClient>;
+}
+
+impl<T> AdminClientRepositoryPort for Arc<T>
+where
+    T: AdminClientRepositoryPort + ?Sized,
+{
+    fn page(
+        &self,
+        tenant_id: Uuid,
+        offset: i64,
+        limit: i64,
+    ) -> AdminClientFuture<'_, (Vec<OAuthClient>, i64)> {
+        self.as_ref().page(tenant_id, offset, limit)
+    }
+
+    fn by_client_id<'a>(
+        &'a self,
+        tenant_id: Uuid,
+        client_id: &'a str,
+    ) -> AdminClientFuture<'a, Option<OAuthClient>> {
+        self.as_ref().by_client_id(tenant_id, client_id)
+    }
+
+    fn insert<'a>(
+        &'a self,
+        client: &'a OAuthClient,
+        client_secret_hash: Option<&'a str>,
+        registration_access_token_blake3: Option<&'a str>,
+    ) -> AdminClientFuture<'a, OAuthClient> {
+        self.as_ref()
+            .insert(client, client_secret_hash, registration_access_token_blake3)
+    }
+
+    fn update<'a>(&'a self, client: &'a OAuthClient) -> AdminClientFuture<'a, OAuthClient> {
+        self.as_ref().update(client)
+    }
 }
 
 /// External sector identifier document lookup boundary.

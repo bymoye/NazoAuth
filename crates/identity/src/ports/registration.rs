@@ -84,6 +84,83 @@ pub trait EmailVerificationStorePort: Send + Sync {
     ) -> RepositoryFuture<'a, ()>;
 }
 
+impl<T> EmailVerificationStorePort for std::sync::Arc<T>
+where
+    T: EmailVerificationStorePort + ?Sized,
+{
+    fn reserve_peer_send<'a>(
+        &'a self,
+        tenant_id: crate::TenantId,
+        subject: &'a str,
+        ttl_seconds: u64,
+    ) -> RepositoryFuture<'a, bool> {
+        self.as_ref()
+            .reserve_peer_send(tenant_id, subject, ttl_seconds)
+    }
+
+    fn reserve_email_send<'a>(
+        &'a self,
+        tenant_id: crate::TenantId,
+        email: &'a str,
+        ttl_seconds: u64,
+    ) -> RepositoryFuture<'a, bool> {
+        self.as_ref()
+            .reserve_email_send(tenant_id, email, ttl_seconds)
+    }
+
+    fn store_code<'a>(
+        &'a self,
+        tenant_id: crate::TenantId,
+        email: &'a str,
+        password_hash: PasswordHashInput,
+        ttl_seconds: u64,
+    ) -> RepositoryFuture<'a, ()> {
+        self.as_ref()
+            .store_code(tenant_id, email, password_hash, ttl_seconds)
+    }
+
+    fn load_code<'a>(
+        &'a self,
+        tenant_id: crate::TenantId,
+        email: &'a str,
+    ) -> RepositoryFuture<'a, Option<EmailVerificationRecord>> {
+        self.as_ref().load_code(tenant_id, email)
+    }
+
+    fn consume_code<'a>(
+        &'a self,
+        tenant_id: crate::TenantId,
+        email: &'a str,
+        expected: &'a EmailVerificationRecord,
+    ) -> RepositoryFuture<'a, EmailVerificationConsume> {
+        self.as_ref().consume_code(tenant_id, email, expected)
+    }
+
+    fn delete_code<'a>(
+        &'a self,
+        tenant_id: crate::TenantId,
+        email: &'a str,
+    ) -> RepositoryFuture<'a, ()> {
+        self.as_ref().delete_code(tenant_id, email)
+    }
+
+    fn release_email_send<'a>(
+        &'a self,
+        tenant_id: crate::TenantId,
+        email: &'a str,
+    ) -> RepositoryFuture<'a, ()> {
+        self.as_ref().release_email_send(tenant_id, email)
+    }
+
+    fn release_peer_send<'a>(
+        &'a self,
+        tenant_id: crate::TenantId,
+        subject: &'a str,
+    ) -> RepositoryFuture<'a, ()> {
+        self.as_ref().release_peer_send(tenant_id, subject)
+    }
+}
+
 pub trait SecretHashPort: Send + Sync {
     fn hash_secret(&self, secret: String) -> RepositoryFuture<'_, PasswordHashInput>;
 

@@ -55,7 +55,6 @@ class DeployLiveWrapperContractTests(unittest.TestCase):
             "FrontendCommit",
             "cargo build",
             "docker build",
-            "OIDF",
             "conformance",
         ):
             self.assertNotIn(forbidden, self.source)

@@ -3,7 +3,7 @@ impl UserinfoHandles {
         state: &crate::test_support::TestInfrastructure,
     ) -> Self {
         Self::new(
-            nazo_valkey::ReplayStore::new(&state.valkey_connection()),
+            std::sync::Arc::new(nazo_valkey::ReplayStore::new(&state.valkey_connection())),
             state.keyset.clone(),
             UserinfoConfig::from(state.settings.as_ref()),
         )
@@ -84,7 +84,7 @@ fn userinfo_token_service(state: &TestInfrastructure) -> ServerTokenService {
     let connection = state.valkey_connection();
     ServerTokenService::new(
         nazo_postgres::TokenIssuanceRepository::new(state.diesel_db.clone()),
-        nazo_valkey::TokenIssuanceStateAdapter::new(&connection),
+        std::sync::Arc::new(nazo_valkey::TokenIssuanceStateAdapter::new(&connection)),
         state.keyset.clone(),
     )
 }

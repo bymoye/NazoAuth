@@ -18,12 +18,23 @@ pub type RuntimeModuleEventPage = ModuleEventPage;
 #[derive(Clone)]
 pub struct RuntimeModuleRepository {
     pool: DbPool,
+    tenant_id: uuid::Uuid,
 }
 
 impl RuntimeModuleRepository {
     #[must_use]
     pub fn new(pool: DbPool) -> Self {
-        Self { pool }
+        Self::for_tenant(
+            pool,
+            nazo_identity::TenantContext::default_system()
+                .tenant_id
+                .as_uuid(),
+        )
+    }
+
+    #[must_use]
+    pub fn for_tenant(pool: DbPool, tenant_id: uuid::Uuid) -> Self {
+        Self { pool, tenant_id }
     }
 
     pub(super) async fn connection(&self) -> Result<crate::DbConnection, RepositoryError> {
@@ -31,6 +42,10 @@ impl RuntimeModuleRepository {
             .get()
             .await
             .map_err(|_| RepositoryError::Unavailable)
+    }
+
+    pub(super) fn tenant_id(&self) -> uuid::Uuid {
+        self.tenant_id
     }
 
     pub async fn page_events(
@@ -104,6 +119,85 @@ impl ModuleStateRepository for RuntimeModuleRepository {
         expected: ModuleRevision,
     ) -> Result<bool, Self::Error> {
         desired::validate_revision(self, requested_module_id, expected).await
+    }
+}
+
+impl nazo_persistence::RuntimeModuleStore for RuntimeModuleRepository {
+    fn read_desired(
+        &self,
+        module_id: ModuleId,
+    ) -> futures_util::future::BoxFuture<'_, Result<Option<DesiredStateRecord>, RepositoryError>>
+    {
+        Box::pin(async move { desired::read_desired(self, module_id).await })
+    }
+
+    fn read_all_desired(
+        &self,
+    ) -> futures_util::future::BoxFuture<'_, Result<Vec<DesiredStateRecord>, RepositoryError>> {
+        Box::pin(async move { desired::read_all_desired(self).await })
+    }
+
+    fn compare_and_set_desired(
+        &self,
+        change: DesiredStateChange,
+    ) -> futures_util::future::BoxFuture<'_, Result<CasOutcome<DesiredStateRecord>, RepositoryError>>
+    {
+        Box::pin(async move { desired::compare_and_set_desired(self, change, Vec::new()).await })
+    }
+
+    fn compare_and_set_desired_guarded(
+        &self,
+        change: DesiredStateChange,
+        required_revisions: Vec<DesiredRevisionGuard>,
+    ) -> futures_util::future::BoxFuture<'_, Result<CasOutcome<DesiredStateRecord>, RepositoryError>>
+    {
+        Box::pin(
+            async move { desired::compare_and_set_desired(self, change, required_revisions).await },
+        )
+    }
+
+    fn read_instance<'a>(
+        &'a self,
+        instance_id: &'a str,
+        module_id: ModuleId,
+    ) -> futures_util::future::BoxFuture<'a, Result<Option<InstanceStateRecord>, RepositoryError>>
+    {
+        Box::pin(async move { instance::read_instance(self, instance_id, module_id).await })
+    }
+
+    fn read_all_instances<'a>(
+        &'a self,
+        instance_id: &'a str,
+    ) -> futures_util::future::BoxFuture<'a, Result<Vec<InstanceStateRecord>, RepositoryError>>
+    {
+        Box::pin(async move { instance::read_all_instances(self, instance_id).await })
+    }
+
+    fn page_events(
+        &self,
+        offset: i64,
+        limit: i64,
+    ) -> futures_util::future::BoxFuture<'_, Result<ModuleEventPage, RepositoryError>> {
+        Box::pin(async move { events::page_events(self, offset, limit).await })
+    }
+
+    fn compare_and_set_instance(
+        &self,
+        required_desired_revision: ModuleRevision,
+        mutation: InstanceStateMutation,
+    ) -> futures_util::future::BoxFuture<'_, Result<CasOutcome<InstanceStateRecord>, RepositoryError>>
+    {
+        Box::pin(async move {
+            instance::compare_and_set_instance(self, required_desired_revision, mutation).await
+        })
+    }
+
+    fn validate_revision(
+        &self,
+        module_id: ModuleId,
+        expected: ModuleRevision,
+    ) -> futures_util::future::BoxFuture<'_, Result<bool, RepositoryError>> {
+        Box::pin(async move { desired::validate_revision(self, module_id, expected).await })
     }
 }
 

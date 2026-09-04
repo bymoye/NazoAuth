@@ -12,8 +12,7 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[1]
 REPOSITORY = "nazozero/NazoAuth"
 OCI_REPOSITORY = "ghcr.io/nazozero/nazoauth"
-PROTOCOL_VERSION = 2
-GIT_COMMIT = re.compile(r"^[0-9a-f]{40}$")
+PROTOCOL_VERSION = 3
 SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
 HEX_SHA256 = re.compile(r"^[0-9a-f]{64}$")
 VERSION = re.compile(
@@ -102,7 +101,7 @@ def local_artifact(path: Path, expected_name: str) -> dict[str, Any]:
 def validate_frontend(path: Path) -> dict[str, Any]:
     value = load_closed_json(
         path,
-        {"schema", "repository", "version", "commit", "release_identity", "artifact"},
+        {"schema", "repository", "version", "release_identity", "artifact"},
         "frontend descriptor",
     )
     if value["schema"] != 1:
@@ -113,9 +112,6 @@ def validate_frontend(path: Path) -> dict[str, Any]:
     version = require_string(value["version"], "frontend.version")
     if not VERSION.fullmatch(version):
         raise SystemExit("frontend.version must be an immutable vSemVer tag")
-    commit = require_string(value["commit"], "frontend.commit", 40)
-    if not GIT_COMMIT.fullmatch(commit):
-        raise SystemExit("frontend.commit must be a full lowercase Git commit")
     identity = require_string(value["release_identity"], "frontend.release_identity")
     expected_identity = (
         f"https://github.com/{repository}/.github/workflows/"
@@ -131,7 +127,6 @@ def validate_frontend(path: Path) -> dict[str, Any]:
     return {
         "repository": repository,
         "version": version,
-        "commit": commit,
         "release_identity": identity,
         "artifact": artifact,
     }
@@ -243,8 +238,6 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--version", required=True)
     parser.add_argument("--target", required=True)
-    parser.add_argument("--backend-commit", required=True)
-    parser.add_argument("--build-id", required=True)
     parser.add_argument("--binary", type=Path, required=True)
     parser.add_argument("--operator-compatibility", type=Path, required=True)
     parser.add_argument("--frontend", type=Path, required=True)
@@ -257,28 +250,16 @@ def main() -> None:
         raise SystemExit("version must be an immutable vSemVer tag")
     if args.target not in TARGETS:
         raise SystemExit("target is not in the closed supported Release target set")
-    backend_commit = args.backend_commit.strip().lower()
-    if not GIT_COMMIT.fullmatch(backend_commit):
-        raise SystemExit("backend commit must be a full lowercase Git commit")
-    if not re.fullmatch(r"[0-9A-Za-z.:_@/+\-]{1,256}", args.build_id):
-        raise SystemExit("build id is invalid")
     extension = ".exe" if "windows" in args.target else ""
     binary_name = f"nazoauth-{args.target}{extension}"
     manifest = {
-        "schema": 5,
+        "schema": 6,
         "version": args.version,
         "target": args.target,
-        "backend_commit": backend_commit,
         "release_identity": (
             "https://github.com/nazozero/NazoAuth/"
             f".github/workflows/release-security.yml@refs/tags/{args.version}"
         ),
-        "embedded": {
-            "release": args.version,
-            "revision": backend_commit,
-            "protocol": PROTOCOL_VERSION,
-            "build_id": args.build_id,
-        },
         "operator_protocol": validate_operator_compatibility(args.operator_compatibility),
         "artifacts": {
             "binary": local_artifact(args.binary, binary_name),

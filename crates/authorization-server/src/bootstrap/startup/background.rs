@@ -21,13 +21,6 @@ pub(crate) async fn load_revocation_policy(
             CertificateRevocationPolicy::required(Arc::new(snapshot))
         }
     };
-    if policy.is_enabled() {
-        spawn_revocation_snapshot_reloader(
-            policy.clone(),
-            path.clone(),
-            Duration::from_secs(settings.revocation_reload_interval_seconds),
-        );
-    }
     Ok(policy)
 }
 
@@ -52,11 +45,11 @@ pub(crate) async fn read_revocation_snapshot(
     Ok(snapshot)
 }
 
-fn spawn_revocation_snapshot_reloader(
+pub(crate) fn spawn_revocation_snapshot_reloader(
     policy: CertificateRevocationPolicy,
     path: PathBuf,
     interval: Duration,
-) {
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(interval);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -84,47 +77,43 @@ fn spawn_revocation_snapshot_reloader(
                 ),
             }
         }
-    });
+    })
 }
 
 /// Start tasks whose ownership is the process lifetime rather than an HTTP
 /// worker.  Keeping these calls here prevents the server factory from
 /// accidentally starting one copy per Actix worker.
-pub(super) fn spawn_runtime_reconciler(runtime_modules: web::Data<RuntimeModules>) {
-    RuntimeModules::spawn_reconciler(runtime_modules);
+pub(super) fn spawn_key_lifecycle(
+    keyset: nazo_key_management::KeyManager,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(keyset.run_lifecycle())
 }
 
-pub(super) fn spawn_key_lifecycle(keyset: nazo_key_management::KeyManager) {
-    tokio::spawn(keyset.run_lifecycle());
-}
-
-#[cfg(not(test))]
 pub(super) fn spawn_ciba_ping_worker(
-    valkey_connection: &nazo_valkey::ValkeyConnection,
+    deliveries: Arc<dyn crate::bootstrap::CibaPingDeliveryPort>,
     settings: &Settings,
-    runtime_modules: &RuntimeModules,
-) -> anyhow::Result<()> {
-    if nazo_auth::module_admissible(
-        runtime_modules.registry.snapshot().as_ref(),
-        nazo_runtime_modules::ModuleId::Ciba,
-        nazo_auth::CapabilityAdmission::NewRequest,
-    ) {
-        spawn_ciba_ping_delivery_worker(CibaPingDeliveryWorker::new(
-            nazo_valkey::CibaStore::new(valkey_connection),
-            &settings.ciba.ciba_notification_private_origins,
-        )?);
-    }
-    Ok(())
+    _runtime_modules: &RuntimeModules,
+) -> anyhow::Result<Option<tokio::task::JoinHandle<()>>> {
+    // Tenant capabilities can change after this runtime starts; the delivery
+    // queue, rather than the startup snapshot, determines whether work exists.
+    Ok(Some(spawn_ciba_ping_delivery_worker(
+        CibaPingDeliveryWorker::new(deliveries, &settings.ciba.ciba_notification_private_origins)?,
+    )))
 }
 
 #[cfg(not(test))]
 pub(super) fn spawn_backchannel_logout_worker(
-    logout_deliveries: nazo_postgres::AuditRepository,
+    logout_deliveries: Arc<dyn nazo_persistence::BackchannelLogoutDeliveryStore>,
     settings: &Settings,
-) -> anyhow::Result<()> {
-    spawn_backchannel_logout_delivery_worker(BackchannelLogoutWorker::new(
-        logout_deliveries,
-        &settings.modules.backchannel_logout_private_origins,
-    )?);
-    Ok(())
+) -> anyhow::Result<tokio::task::JoinHandle<()>> {
+    Ok(spawn_backchannel_logout_delivery_worker(
+        BackchannelLogoutWorker::from_port(
+            logout_deliveries,
+            &settings.modules.backchannel_logout_private_origins,
+        )?,
+    ))
 }
+
+#[cfg(test)]
+#[path = "../../../tests/unit/bootstrap/startup/background.rs"]
+mod tests;

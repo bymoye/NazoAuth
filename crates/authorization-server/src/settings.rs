@@ -59,19 +59,19 @@ pub(crate) struct Settings {
     pub(crate) openid4vc: Openid4vcSettings,
 }
 
-/// The single active tenant owned by this process runtime.
+/// The immutable tenant identity selected for this runtime snapshot.
 ///
-/// The tenant is the process-wide security and routing boundary. The realm and
-/// organization are validated active defaults for identity placement inside
-/// that tenant; they are not independent request authorization partitions.
-/// Request-level multi-tenant routing is enabled only after transport identity,
-/// protocol keys, clients, and transient state can all be selected from the
-/// same immutable tenant snapshot. Until then every service is composed from
-/// this explicit context instead of silently falling back to the legacy IDs.
-#[derive(Clone, Copy)]
+/// A directory binding creates one complete `Settings` value per tenant.
+/// Keeping the host beside the identity prevents request routing from consulting
+/// a second tenant registry after the snapshot has been selected.
+#[derive(Clone)]
 pub(crate) struct TenantSettings {
     pub(crate) context: nazo_identity::TenantContext,
 }
+
+/// Canonicalizes a configured tenant host without accepting a URL, userinfo,
+/// path, or port. Ports cannot distinguish tenants because TLS SNI has none.
+pub(crate) use nazo_identity::canonical_tenant_host;
 
 #[derive(Clone)]
 pub(crate) struct EndpointSettings {
@@ -181,6 +181,12 @@ pub(crate) struct KeyManagementSettings {
 pub(crate) struct ModuleSettings {
     pub(crate) enable_openid4vci_issuer: bool,
     pub(crate) enable_openid4vp_verifier: bool,
+    /// Route registration is process-wide, while module services are selected
+    /// from the request tenant's runtime. These flags cover both the control
+    /// tenant and directory-managed tenants without enabling either service
+    /// for the control tenant.
+    pub(crate) register_openid4vci_routes: bool,
+    pub(crate) register_openid4vp_routes: bool,
     pub(crate) dynamic_client_registration_initial_access_token: Option<String>,
     pub(crate) remote_client_document_private_origins: Vec<String>,
     pub(crate) backchannel_logout_private_origins: Vec<String>,
@@ -316,7 +322,7 @@ pub(crate) fn mfa_totp_key_ring(
 /// constructing the token repository.
 pub(crate) fn token_issuance_response_key_ring(
     config: &ConfigSource,
-) -> anyhow::Result<nazo_postgres::TokenIssuanceResponseKeyRing> {
+) -> anyhow::Result<nazo_persistence::TokenIssuanceResponseKeyRing> {
     let current_key = parse_required_32_byte_key(config, "TOKEN_ISSUANCE_RESPONSE_ENCRYPTION_KEY")?;
     let current_id = config.required_string("TOKEN_ISSUANCE_RESPONSE_ENCRYPTION_KEY_ID")?;
     let previous_key =
@@ -328,7 +334,7 @@ pub(crate) fn token_issuance_response_key_ring(
         );
     }
     let previous = previous_key.zip(previous_id).map(|(key, id)| (id, key));
-    nazo_postgres::TokenIssuanceResponseKeyRing::new(current_id, current_key, previous)
+    nazo_persistence::TokenIssuanceResponseKeyRing::new(current_id, current_key, previous)
         .map_err(anyhow::Error::from)
 }
 

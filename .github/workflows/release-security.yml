@@ -12,9 +12,7 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  NAZOAUTH_BUILD_RELEASE: ${{ github.ref_type == 'tag' && github.ref_name || format('sha-{0}', github.sha) }}
-  NAZOAUTH_BUILD_REVISION: ${{ github.sha }}
-  NAZOAUTH_BUILD_ID: github:${{ github.run_id }}:${{ github.run_attempt }}
+  NAZOAUTH_IMAGE_VERSION: ${{ github.ref_type == 'tag' && github.ref_name || 'candidate' }}
 
 jobs:
   policy:
@@ -109,14 +107,12 @@ jobs:
           test "$(jq -r '.schema' release/frontend.json)" = 1
           repository="$(jq -er '.repository' release/frontend.json)"
           version="$(jq -er '.version' release/frontend.json)"
-          commit="$(jq -er '.commit' release/frontend.json)"
           identity="$(jq -er '.release_identity' release/frontend.json)"
           artifact="$(jq -er '.artifact.name' release/frontend.json)"
           expected_sha256="$(jq -er '.artifact.sha256' release/frontend.json)"
           expected_size="$(jq -er '.artifact.size' release/frontend.json)"
           test "$repository" = "nazozero/NazoAuthWeb"
           [[ "$version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$ ]]
-          [[ "$commit" =~ ^[0-9a-f]{40}$ ]]
           [[ "$artifact" =~ ^[0-9A-Za-z._-]+$ ]]
           [[ "$expected_sha256" =~ ^[0-9a-f]{64}$ ]]
           [[ "$expected_size" =~ ^[1-9][0-9]*$ ]]
@@ -131,13 +127,12 @@ jobs:
             --repo "$repository" \
             --signer-workflow "$repository/.github/workflows/release.yml" \
             --source-ref "refs/tags/$version" \
-            --source-digest "$commit" \
             --deny-self-hosted-runners \
             --format json > target/release-evidence/frontend/verification.json
       - name: Validate Release workflow and predicate contracts
         run: python3 -m unittest tests.unit.test_release_attestation tests.unit.test_release_governance tests.unit.test_release_oci
       - name: Install pinned Rust supply-chain tools
-        uses: taiki-e/install-action@a2a5f6e99e1a31540baa0468acfa302cff0f359f # v2.86.4
+        uses: taiki-e/install-action@fcf5432d9f50d67e37ee6e29bdb7a224ff67b4a7 # v2.86.8
         with:
           tool: |
             cargo-audit@0.22.2
@@ -151,9 +146,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cargo cyclonedx --manifest-path crates/authorization-server/Cargo.toml --format json --override-filename nazoauth.cdx
+          cargo cyclonedx --manifest-path crates/nazoauth/Cargo.toml --format json --override-filename nazoauth.cdx
           mkdir -p target/release-evidence/sbom
-          mv crates/authorization-server/nazoauth.cdx.json target/release-evidence/sbom/nazoauth.cdx.json
+          mv crates/nazoauth/nazoauth.cdx.json target/release-evidence/sbom/nazoauth.cdx.json
       - name: Upload internal supply-chain evidence
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -295,19 +290,19 @@ jobs:
       - name: Build the server binary once for this platform
         run: >-
           cargo build --release --locked --target ${{ matrix.target }}
-          --package nazo-oauth-server --bin nazoauth
-      - name: Smoke the server binary and verify embedded build identity
+          --package nazoauth --bin nazoauth
+      - name: Smoke the server binary and verify release identity
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
           $server = Resolve-Path "target/${{ matrix.target }}/release/nazoauth${{ matrix.executable_suffix }}"
           & $server --help
           if ($LASTEXITCODE -ne 0) { throw "nazoauth help smoke failed" }
-          $identity = (& $server build-identity | ConvertFrom-Json)
-          if ($LASTEXITCODE -ne 0) { throw "nazoauth build identity smoke failed" }
-          if ($identity.release -ne $env:NAZOAUTH_BUILD_RELEASE) { throw "embedded release mismatch" }
-          if ($identity.revision -ne $env:NAZOAUTH_BUILD_REVISION) { throw "embedded revision mismatch" }
-          if ($identity.build_id -ne $env:NAZOAUTH_BUILD_ID) { throw "embedded build id mismatch" }
+          $identity = (& $server release-identity | ConvertFrom-Json)
+          if ($LASTEXITCODE -ne 0) { throw "nazoauth release identity smoke failed" }
+          $metadata = cargo metadata --locked --no-deps --format-version 1 | ConvertFrom-Json
+          $serverPackage = $metadata.packages | Where-Object { $_.name -eq "nazoauth" }
+          if ($identity.release -ne "v$($serverPackage.version)") { throw "embedded release mismatch" }
           $protocolSource = Get-Content "crates/operator-protocol/src/lib.rs" -Raw
           $protocolMatch = [regex]::Match($protocolSource, 'pub const PROTOCOL_VERSION: u32 = (\d+);')
           if (!$protocolMatch.Success) { throw "unable to read the source protocol version" }
@@ -416,14 +411,13 @@ jobs:
           context: .
           file: Containerfile.release
           platforms: linux/amd64,linux/arm64
-          outputs: type=oci,dest=${{ runner.temp }}/nazoauth-image.oci.tar,name=ghcr.io/nazozero/nazoauth:${{ env.NAZOAUTH_BUILD_RELEASE }},oci-artifact=true
+          outputs: type=oci,dest=${{ runner.temp }}/nazoauth-image.oci.tar,name=ghcr.io/nazozero/nazoauth:${{ env.NAZOAUTH_IMAGE_VERSION }},oci-artifact=true
           provenance: mode=max
           sbom: true
           cache-from: type=gha,scope=nazoauth-release-oci
           cache-to: type=gha,mode=max,scope=nazoauth-release-oci
           labels: |
-            org.opencontainers.image.revision=${{ github.sha }}
-            org.opencontainers.image.version=${{ env.NAZOAUTH_BUILD_RELEASE }}
+            org.opencontainers.image.version=${{ env.NAZOAUTH_IMAGE_VERSION }}
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
       - name: Scan the exact OCI archive before publication
         shell: bash
@@ -534,8 +528,6 @@ jobs:
           python3 scripts/build_release_attestation.py \
             --version "$GITHUB_REF_NAME" \
             --target "${{ matrix.target }}" \
-            --backend-commit "$GITHUB_SHA" \
-            --build-id "$NAZOAUTH_BUILD_ID" \
             --binary "target/release-binaries/nazoauth-${{ matrix.target }}${{ matrix.executable_suffix }}" \
             --operator-compatibility release/operator-compatibility.json \
             --frontend release/frontend.json \

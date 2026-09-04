@@ -33,17 +33,33 @@ impl ConfigSource {
         path: impl AsRef<Path>,
         env: impl IntoIterator<Item = (String, String)>,
     ) -> anyhow::Result<Self> {
+        install_test_server_config_extension();
         Self::load_from_dir_with_env_mode(path, env, true, true)
     }
 
     fn merge_env(&mut self, env: impl IntoIterator<Item = (String, String)>) -> anyhow::Result<()> {
+        install_test_server_config_extension();
         self.merge_env_with_worker_policy(env, true)
     }
 }
 
 use super::*;
 
+fn install_test_server_config_extension() {
+    install_server_config_extension(ServerConfigExtension::new(
+        "VALKEY_URL: \"redis://127.0.0.1:6379/0\"\n".to_owned(),
+        vec![
+            "VALKEY_COMMAND_TIMEOUT_MS",
+            "VALKEY_STATE_EPOCH",
+            "VALKEY_URL",
+        ],
+        "VALKEY_STATE_EPOCH",
+    ))
+    .unwrap();
+}
+
 fn temp_config_dir(label: &str) -> std::path::PathBuf {
+    install_test_server_config_extension();
     let path = std::env::temp_dir().join(format!(
         "nazo_config_{label}_{}",
         std::time::SystemTime::now()
@@ -163,7 +179,7 @@ fn dotenv_file_is_rejected() {
 fn first_server_run_creates_the_local_configuration_once() {
     let path = temp_config_dir("first_server_run");
 
-    let result = prepare_server_config_in(&path).unwrap();
+    let result = prepare_server_config_in(&path, "adapter://runtime/database").unwrap();
     let config_path = path.join(CONFIG_FILE);
 
     assert_eq!(
@@ -171,13 +187,14 @@ fn first_server_run_creates_the_local_configuration_once() {
         ServerConfigPreparation::Created(config_path.clone())
     );
     let persisted = std::fs::read_to_string(&config_path).unwrap();
-    assert!(persisted.starts_with(INITIAL_CONFIG));
+    assert!(persisted.starts_with(INITIAL_CONFIG_PREFIX));
+    assert!(persisted.contains("DATABASE_URL: \"adapter://runtime/database\""));
     let source = ConfigSource::load_from_dir(&path).unwrap();
     let epoch = uuid::Uuid::parse_str(&source.required_string("VALKEY_STATE_EPOCH").unwrap())
         .expect("fresh config epoch must be a UUID");
     assert_eq!(epoch.get_version_num(), 7);
     assert_eq!(
-        prepare_server_config_in(&path).unwrap(),
+        prepare_server_config_in(&path, "adapter://runtime/database").unwrap(),
         ServerConfigPreparation::Ready
     );
     let _ = std::fs::remove_dir_all(&path);
@@ -189,7 +206,7 @@ fn existing_server_config_is_never_overwritten() {
     let config_path = path.join(CONFIG_FILE);
     std::fs::write(&config_path, "PUBLIC_BASE_URL: https://auth.example\n").unwrap();
 
-    let result = prepare_server_config_in(&path).unwrap();
+    let result = prepare_server_config_in(&path, "adapter://runtime/database").unwrap();
 
     assert_eq!(result, ServerConfigPreparation::Ready);
     assert_eq!(
@@ -203,8 +220,8 @@ fn existing_server_config_is_never_overwritten() {
 fn fresh_server_configs_persist_distinct_valkey_epochs() {
     let first = temp_config_dir("first_epoch");
     let second = temp_config_dir("second_epoch");
-    prepare_server_config_in(&first).unwrap();
-    prepare_server_config_in(&second).unwrap();
+    prepare_server_config_in(&first, "adapter://runtime/database").unwrap();
+    prepare_server_config_in(&second, "adapter://runtime/database").unwrap();
 
     let first_epoch = ConfigSource::load_from_dir(&first)
         .unwrap()
@@ -218,7 +235,7 @@ fn fresh_server_configs_persist_distinct_valkey_epochs() {
 
     let first_contents = std::fs::read_to_string(first.join(CONFIG_FILE)).unwrap();
     assert_eq!(
-        prepare_server_config_in(&first).unwrap(),
+        prepare_server_config_in(&first, "adapter://runtime/database").unwrap(),
         ServerConfigPreparation::Ready
     );
     assert_eq!(
@@ -279,15 +296,19 @@ fn first_server_run_creates_the_overridden_configuration_file() {
     std::fs::create_dir(config_dir.join("mounted")).unwrap();
     let override_path = config_dir.join("mounted").join("app-config.yaml");
 
-    let result =
-        prepare_server_config_at(&config_dir, Some(override_path.to_str().unwrap())).unwrap();
+    let result = prepare_server_config_at(
+        &config_dir,
+        Some(override_path.to_str().unwrap()),
+        "adapter://runtime/database",
+    )
+    .unwrap();
 
     assert_eq!(
         result,
         ServerConfigPreparation::Created(override_path.clone())
     );
     let persisted = std::fs::read_to_string(&override_path).unwrap();
-    assert!(persisted.starts_with(INITIAL_CONFIG));
+    assert!(persisted.starts_with(INITIAL_CONFIG_PREFIX));
     let source = ConfigSource::load_from_dir_with_config_file_override(
         &config_dir,
         Some(override_path.to_str().unwrap()),
@@ -552,44 +573,50 @@ fn malformed_persisted_generated_secret_fails_closed() {
 #[test]
 fn explicit_yaml_scalar_overrides_environment_secret_file_fallback() {
     let path = temp_config_dir("secret_file_precedence");
-    let database_url_file = path.join("database-url");
+    let secret_file = path.join("client-secret-pepper");
     std::fs::write(
         path.join(CONFIG_FILE),
-        "DATABASE_URL: postgresql://yaml.example/oauth\nDATA_DIR: state\n",
+        "CLIENT_SECRET_PEPPER: yaml-secret\nDATA_DIR: state\n",
     )
     .unwrap();
-    std::fs::write(&database_url_file, "postgresql://file.example/oauth\n").unwrap();
+    std::fs::write(&secret_file, "file-secret\n").unwrap();
 
     let source = ConfigSource::load_from_dir_with_env(
         &path,
         [(
-            "DATABASE_URL_FILE".to_owned(),
-            database_url_file.display().to_string(),
+            "CLIENT_SECRET_PEPPER_FILE".to_owned(),
+            secret_file.display().to_string(),
         )],
     )
     .unwrap();
 
-    assert_eq!(database_url(&source), "postgresql://yaml.example/oauth");
+    assert_eq!(
+        source.get("CLIENT_SECRET_PEPPER").as_deref(),
+        Some("yaml-secret")
+    );
     let _ = std::fs::remove_dir_all(&path);
 }
 
 #[test]
 fn environment_secret_file_supplies_an_absent_scalar() {
     let path = temp_config_dir("secret_file_fallback");
-    let database_url_file = path.join("database-url");
+    let secret_file = path.join("client-secret-pepper");
     std::fs::write(path.join(CONFIG_FILE), "DATA_DIR: state\n").unwrap();
-    std::fs::write(&database_url_file, "postgresql://file.example/oauth\n").unwrap();
+    std::fs::write(&secret_file, "file-secret\n").unwrap();
 
     let source = ConfigSource::load_from_dir_with_env(
         &path,
         [(
-            "DATABASE_URL_FILE".to_owned(),
-            database_url_file.display().to_string(),
+            "CLIENT_SECRET_PEPPER_FILE".to_owned(),
+            secret_file.display().to_string(),
         )],
     )
     .unwrap();
 
-    assert_eq!(database_url(&source), "postgresql://file.example/oauth");
+    assert_eq!(
+        source.get("CLIENT_SECRET_PEPPER").as_deref(),
+        Some("file-secret")
+    );
     let _ = std::fs::remove_dir_all(&path);
 }
 
@@ -598,18 +625,17 @@ fn yaml_secret_file_path_is_resolved_and_trimmed() {
     let path = temp_config_dir("yaml_secret_file");
     std::fs::write(
         path.join(CONFIG_FILE),
-        "DATA_DIR: state\nDATABASE_URL_FILE: database-url\n",
+        "DATA_DIR: state\nCLIENT_SECRET_PEPPER_FILE: client-secret-pepper\n",
     )
     .unwrap();
-    std::fs::write(
-        path.join("database-url"),
-        "  postgresql://file.example/oauth  \n",
-    )
-    .unwrap();
+    std::fs::write(path.join("client-secret-pepper"), "  file-secret  \n").unwrap();
 
     let source = ConfigSource::load_from_dir(&path).unwrap();
 
-    assert_eq!(database_url(&source), "postgresql://file.example/oauth");
+    assert_eq!(
+        source.get("CLIENT_SECRET_PEPPER").as_deref(),
+        Some("file-secret")
+    );
     let _ = std::fs::remove_dir_all(&path);
 }
 
@@ -619,51 +645,42 @@ fn secret_file_inputs_fail_closed_for_empty_path_missing_file_and_empty_file() {
     std::fs::write(empty_path.join(CONFIG_FILE), "DATA_DIR: state\n").unwrap();
     let error = ConfigSource::load_from_dir_with_env(
         &empty_path,
-        [("DATABASE_URL_FILE".to_owned(), "   ".to_owned())],
+        [("CLIENT_SECRET_PEPPER_FILE".to_owned(), "   ".to_owned())],
     )
     .unwrap_err();
-    assert_eq!(error.to_string(), "DATABASE_URL_FILE must not be empty");
+    assert_eq!(
+        error.to_string(),
+        "CLIENT_SECRET_PEPPER_FILE must not be empty"
+    );
     let _ = std::fs::remove_dir_all(&empty_path);
 
     let missing = temp_config_dir("missing_secret_file");
     std::fs::write(missing.join(CONFIG_FILE), "DATA_DIR: state\n").unwrap();
     let error = ConfigSource::load_from_dir_with_env(
         &missing,
-        [("DATABASE_URL_FILE".to_owned(), "absent".to_owned())],
+        [("CLIENT_SECRET_PEPPER_FILE".to_owned(), "absent".to_owned())],
     )
     .unwrap_err();
     assert!(
         error
             .to_string()
-            .contains("failed to read DATABASE_URL_FILE")
+            .contains("failed to read CLIENT_SECRET_PEPPER_FILE")
     );
     let _ = std::fs::remove_dir_all(&missing);
 
     let empty = temp_config_dir("empty_secret_file");
     std::fs::write(empty.join(CONFIG_FILE), "DATA_DIR: state\n").unwrap();
-    std::fs::write(empty.join("database-url"), " \n").unwrap();
+    std::fs::write(empty.join("client-secret-pepper"), " \n").unwrap();
     let error = ConfigSource::load_from_dir_with_env(
         &empty,
-        [("DATABASE_URL_FILE".to_owned(), "database-url".to_owned())],
+        [(
+            "CLIENT_SECRET_PEPPER_FILE".to_owned(),
+            "client-secret-pepper".to_owned(),
+        )],
     )
     .unwrap_err();
     assert!(error.to_string().contains("points to an empty secret file"));
     let _ = std::fs::remove_dir_all(&empty);
-}
-
-#[test]
-fn runtime_secret_helper_returns_the_stable_persisted_path_and_value() {
-    let path = temp_config_dir("runtime_secret_helper");
-    let (created_path, first) =
-        read_or_create_runtime_secret(&path, "nested/controller-key").unwrap();
-    let (same_path, second) =
-        read_or_create_runtime_secret(&path, "nested/controller-key").unwrap();
-
-    assert_eq!(created_path, path.join("nested/controller-key"));
-    assert_eq!(same_path, created_path);
-    assert_eq!(first, second);
-    assert!(first.len() >= 32);
-    let _ = std::fs::remove_dir_all(&path);
 }
 
 #[test]
@@ -708,24 +725,25 @@ fn generated_secret_creation_reports_an_invalid_parent_without_partial_state() {
 #[test]
 fn migration_config_does_not_materialize_unrelated_application_secrets() {
     let path = temp_config_dir("migration_config_no_application_secrets");
-    let database_url_file = path.join("database-url");
     std::fs::write(
         path.join(CONFIG_FILE),
         "DATA_DIR: state\nCLIENT_SECRET_PEPPER_FILE: deliberately-absent\n",
     )
     .unwrap();
-    std::fs::write(&database_url_file, "postgresql://file.example/oauth\n").unwrap();
 
     let source = ConfigSource::load_for_migrations_from_dir_with_env(
         &path,
         [(
-            "DATABASE_URL_FILE".to_owned(),
-            database_url_file.display().to_string(),
+            "DATABASE_URL".to_owned(),
+            "postgresql://env.example/oauth".to_owned(),
         )],
     )
     .unwrap();
 
-    assert_eq!(database_url(&source), "postgresql://file.example/oauth");
+    assert_eq!(
+        database_url(&source).unwrap(),
+        "postgresql://env.example/oauth"
+    );
     assert!(!path.join("state").exists());
     assert!(source.get("CLIENT_SECRET_PEPPER").is_none());
     let _ = std::fs::remove_dir_all(&path);
@@ -772,14 +790,14 @@ fn metadata_only_config_does_not_read_secret_files_or_expose_secret_values() {
     let path = temp_config_dir("metadata_config_no_secret_reads");
     std::fs::write(
         path.join(CONFIG_FILE),
-        "DATA_DIR: state\nDATABASE_URL_FILE: deliberately-absent\n",
+        "DATA_DIR: state\nCLIENT_SECRET_PEPPER_FILE: deliberately-absent\n",
     )
     .unwrap();
 
     let source = ConfigSource::load_from_dir_with_env_mode(&path, [], false, false).unwrap();
 
     assert_eq!(
-        source.get("DATABASE_URL_FILE").as_deref(),
+        source.get("CLIENT_SECRET_PEPPER_FILE").as_deref(),
         Some("deliberately-absent")
     );
     assert!(source.get("DATABASE_URL").is_none());
@@ -898,6 +916,7 @@ fn relative_persistent_paths_cannot_escape_the_configuration_directory() {
 
 #[test]
 fn canonical_config_keys_are_locked_to_the_reviewed_baseline() {
+    install_test_server_config_extension();
     assert_eq!(
         ENV_CONFIG_KEYS,
         &[
@@ -908,7 +927,6 @@ fn canonical_config_keys_are_locked_to_the_reviewed_baseline() {
             "AUDIT_ANCHOR_BATCH_SIZE",
             "AUDIT_ANCHOR_DATABASE_MAX_CONNECTIONS",
             "AUDIT_ANCHOR_DATABASE_URL",
-            "AUDIT_ANCHOR_DATABASE_URL_FILE",
             "AUDIT_ANCHOR_FRESHNESS_SECONDS",
             "AUDIT_ANCHOR_LOCK_TIMEOUT_SECONDS",
             "AUDIT_ANCHOR_MAX_LAG_SECONDS",
@@ -936,7 +954,6 @@ fn canonical_config_keys_are_locked_to_the_reviewed_baseline() {
             "CORS_ALLOWED_ORIGINS",
             "CSRF_COOKIE_NAME",
             "DATABASE_URL",
-            "DATABASE_URL_FILE",
             "DATABASE_MAX_CONNECTIONS",
             "DATA_DIR",
             "DEFAULT_AUDIENCE",
@@ -948,6 +965,8 @@ fn canonical_config_keys_are_locked_to_the_reviewed_baseline() {
             "DYNAMIC_CLIENT_REGISTRATION_INITIAL_ACCESS_TOKEN_FILE",
             "ENABLE_OPENID4VCI_ISSUER",
             "ENABLE_OPENID4VP_VERIFIER",
+            "ENABLE_DIRECTORY_OPENID4VCI_ISSUER",
+            "ENABLE_DIRECTORY_OPENID4VP_VERIFIER",
             "EMAIL_CODE_DEV_RESPONSE_ENABLED",
             "EMAIL_CODE_PEER_COOLDOWN_SECONDS",
             "EMAIL_CODE_SEND_COOLDOWN_SECONDS",
@@ -1050,10 +1069,14 @@ fn canonical_config_keys_are_locked_to_the_reviewed_baseline() {
             "TRUSTED_PROXY_CIDRS",
             "UI_CACHE_DIR",
             "UI_STATIC_DIR",
+        ]
+    );
+    assert_eq!(
+        server_config_extension().unwrap().config_keys,
+        [
             "VALKEY_COMMAND_TIMEOUT_MS",
             "VALKEY_STATE_EPOCH",
             "VALKEY_URL",
-            "VALKEY_URL_FILE",
         ]
     );
 }
@@ -1079,7 +1102,7 @@ fn invalid_environment_type_is_error() {
 fn database_url_uses_documented_default_when_unset() {
     let source = ConfigSource::default();
 
-    assert_eq!(database_url(&source), DEFAULT_DATABASE_URL);
+    assert!(database_url(&source).is_err());
     assert_eq!(
         database_max_connections(&source).unwrap(),
         DEFAULT_DATABASE_MAX_CONNECTIONS
@@ -1100,7 +1123,7 @@ fn database_url_uses_whitelisted_environment_value() {
         .unwrap();
 
     assert_eq!(
-        database_url(&source),
+        database_url(&source).unwrap(),
         "postgresql://nazo:secret@db.internal:5432/oauth"
     );
     assert_eq!(database_max_connections(&source).unwrap(), 48);
@@ -1126,7 +1149,7 @@ fn database_url_does_not_rewrite_unsupported_legacy_driver_scheme() {
     )]);
 
     assert_eq!(
-        database_url(&source),
+        database_url(&source).unwrap(),
         "postgresql+psycopg://nazo:secret@db.internal:5432/oauth"
     );
 }

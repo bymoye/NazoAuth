@@ -78,30 +78,52 @@ pub enum AuthenticatePasswordError {
 }
 
 #[derive(Clone)]
-pub struct AuthenticationService<A, T, V, M, S, U> {
-    accounts: A,
+pub struct AuthenticationService<T, V, S, U> {
+    accounts: std::sync::Arc<dyn LoginAccountRepositoryPort>,
     throttles: T,
     verifier: V,
-    remembered_mfa: M,
+    remembered_mfa: std::sync::Arc<dyn RememberedMfaDevicePort>,
     sessions: S,
     audit: U,
     config: AuthenticationServiceConfig,
 }
 
-impl<A, T, V, M, S, U> AuthenticationService<A, T, V, M, S, U>
+impl<T, V, S, U> AuthenticationService<T, V, S, U>
 where
-    A: LoginAccountRepositoryPort,
     T: LoginThrottlePort,
     V: SecretVerifyPort,
-    M: RememberedMfaDevicePort,
     S: LoginSessionPort,
     U: AuthenticationAuditPort,
 {
-    pub fn new(
+    pub fn new<A, M>(
         accounts: A,
         throttles: T,
         verifier: V,
         remembered_mfa: M,
+        sessions: S,
+        audit: U,
+        config: AuthenticationServiceConfig,
+    ) -> Self
+    where
+        A: LoginAccountRepositoryPort + 'static,
+        M: RememberedMfaDevicePort + 'static,
+    {
+        Self {
+            accounts: std::sync::Arc::new(accounts),
+            throttles,
+            verifier,
+            remembered_mfa: std::sync::Arc::new(remembered_mfa),
+            sessions,
+            audit,
+            config,
+        }
+    }
+
+    pub fn from_ports(
+        accounts: std::sync::Arc<dyn LoginAccountRepositoryPort>,
+        throttles: T,
+        verifier: V,
+        remembered_mfa: std::sync::Arc<dyn RememberedMfaDevicePort>,
         sessions: S,
         audit: U,
         config: AuthenticationServiceConfig,

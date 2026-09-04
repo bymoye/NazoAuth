@@ -1,6 +1,6 @@
 # OpenID Connect RP Metadata Choices 1.0 完整支持任务
 
-状态：实现与本地验证完成；OIDF 官方专项测试尚不存在
+状态：实现与本地验证完成
 
 ## 完成定义
 
@@ -46,8 +46,6 @@
 - [x] 四条运行时 JOSE 消费链路测试。
 - [x] Discovery 与实际密钥/模块一致性测试。
 - [x] 全工作区测试、Clippy、格式和静态契约。
-- [x] 审计 OIDF conformance-suite 是否存在相关模块。
-- [x] 审计 NazoAuth 当前 OIDF 计划矩阵是否包含相关模块。
 
 ## 证据记录
 
@@ -73,18 +71,4 @@
 - Clippy：workspace、all targets、all features、`-D warnings` 通过。
 - `cargo fmt --check`、静态契约和 migration checksum 通过。
 
-### OIDF 套件审计
-
-- NazoAuth workflow 当前锁定
-  `dee9a25160e789f0f80517674693ef7989ab9fa1`；官方 `master` 审计点为
-  [`daf33d61b982d5d33d134b07e9a36f76176b3eff`](https://gitlab.com/openid/conformance-suite/-/commit/daf33d61b982d5d33d134b07e9a36f76176b3eff)。
-- 两个 revision 都没有 RP Metadata Choices 专项 plan/module。现有
-  `oidcc-basic-certification-test-plan[client_registration=dynamic_client]`
-  只测试 RFC 7591 和相关单值元数据，不提交 19 个 choices，不验证交集
-  选择，也不验证注册/读取响应不得回显 choices。
-- NazoAuth 的 27-plan 矩阵包含上述 Dynamic Registration plan，所以有
-  邻接覆盖，但不能把它称为本规范的一致性证据。OIDF 发布专项 plan 后，
-  必须把它加入项目矩阵。
-
-上述结果证明当前源码与本地测试路径；未执行新的公网部署黑盒或不存在的
-OIDF 专项 plan，因此不把本次结果表述为 OIDF 官方认证。
+上述结果证明当前源码与本地测试路径；不把本地测试结果表述为外部认证。

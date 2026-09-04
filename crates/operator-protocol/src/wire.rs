@@ -61,11 +61,9 @@ pub struct TenantResourceSelector {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct EmbeddedIdentity {
+pub struct ReleaseIdentity {
     pub release: String,
-    pub revision: String,
     pub protocol: u32,
-    pub build_id: String,
 }
 
 /// Unauthenticated, bounded challenge for the read-only control discovery endpoint.
@@ -96,8 +94,6 @@ pub struct DiscoveryStatement {
     pub runtime_instance_id: String,
     pub issuer: String,
     pub release: String,
-    pub revision: String,
-    pub build_id: String,
     pub control_protocol_versions: Vec<u32>,
     pub operator_protocol_versions: Vec<u32>,
     pub instance_key_id: String,
@@ -121,8 +117,6 @@ pub struct DeploymentStatement {
     pub runtime_instance_id: String,
     pub issuer: String,
     pub release: String,
-    pub revision: String,
-    pub build_id: String,
     pub control_protocol_versions: Vec<u32>,
     pub operator_protocol_versions: Vec<u32>,
     pub instance_key_id: String,
@@ -142,20 +136,6 @@ pub struct Openid4vcTrustPolicy {
     pub key_attestation_jwks: serde_json::Value,
     pub credential_trust_anchor_pem: String,
     pub wallet_authorization_origins: Vec<String>,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct Openid4vpEvidenceContext {
-    pub run_jti: String,
-    pub artifact_sha256: String,
-    pub matrix_sha256: String,
-    /// Opaque suite identifier: 1-128 file-safe ASCII bytes.
-    pub suite_plan_id: String,
-    /// Opaque module identifier: 1-128 file-safe ASCII bytes.
-    pub suite_module_id: String,
-    pub test_name: String,
-    pub variant_sha256: String,
 }
 
 /// Caller-owned idempotency key for creating one OpenID4VP presentation.
@@ -192,99 +172,4 @@ pub struct Openid4vpNormalizedCreateRequest {
     pub transaction_data: Option<Vec<serde_json::Value>>,
     pub openid4vc_trust_policy_resource_id: Option<String>,
     pub openid4vc_trust_policy_digest: Option<String>,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct Openid4vpAttachEvidenceRequest {
-    pub schema: u32,
-    pub evidence_context: Openid4vpEvidenceContext,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Openid4vpEvidenceAttachmentStatus {
-    Attached,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct Openid4vpAttachEvidenceResponse {
-    pub schema: u32,
-    pub transaction_id: String,
-    pub status: Openid4vpEvidenceAttachmentStatus,
-    pub evidence_context_sha256: String,
-    pub presentation_binding: Openid4vpPresentationBinding,
-    pub presentation_binding_sha256: String,
-    pub intent_jws: String,
-    pub intent_sha256: String,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct Openid4vpTrustPolicyBinding {
-    pub binding_id: Option<String>,
-    pub resource_id: Option<String>,
-    pub resource_digest: Option<String>,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct Openid4vpPresentationBinding {
-    pub presentation_request_sha256: String,
-    pub trust_policy: Openid4vpTrustPolicyBinding,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct Openid4vpIssueVerificationReceiptRequest {
-    pub schema: u32,
-    pub issuance_request_jti: String,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct Openid4vpVerificationReceipt {
-    pub schema: u32,
-    pub iss: String,
-    pub aud: String,
-    pub jti: String,
-    pub iat: i64,
-    pub exp: i64,
-    pub deployment_id: String,
-    pub runtime_instance_id: String,
-    pub instance_key_id: String,
-    pub tenant_id: String,
-    pub transaction_id: String,
-    pub issuance_request_jti: String,
-    pub status: Openid4vpVerificationStatus,
-    pub evidence_context: Openid4vpEvidenceContext,
-    pub presentation_binding: Openid4vpPresentationBinding,
-    pub intent_sha256: String,
-    pub completed_at: String,
-    pub capability_sha256: String,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct Openid4vpVerificationIntent {
-    pub schema: u32,
-    pub iss: String,
-    pub aud: String,
-    pub jti: String,
-    pub iat: i64,
-    pub exp: i64,
-    pub deployment_id: String,
-    pub runtime_instance_id: String,
-    pub instance_key_id: String,
-    pub tenant_id: String,
-    pub transaction_id: String,
-    pub evidence_context: Openid4vpEvidenceContext,
-    pub presentation_binding: Openid4vpPresentationBinding,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Openid4vpVerificationStatus {
-    Verified,
 }

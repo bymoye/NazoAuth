@@ -36,22 +36,22 @@ fn device_authorization_service(
     let connection = state.valkey_connection();
     Data::new(ServerAuthorizationService::new(
         nazo_postgres::AuthorizationFlowRepository::new(state.diesel_db.clone(), DEFAULT_TENANT_ID),
-        nazo_valkey::AuthorizationStateAdapter::new(&connection),
+        std::sync::Arc::new(nazo_valkey::AuthorizationStateAdapter::new(&connection)),
         state.keyset.clone(),
     ))
 }
 
 fn device_grant_service(state: &TestInfrastructure) -> Data<ServerDeviceGrantService> {
-    Data::new(ServerDeviceGrantService::new(
+    Data::new(ServerDeviceGrantService::new(std::sync::Arc::new(
         nazo_valkey::DeviceStore::new(&state.valkey_connection()),
-    ))
+    )))
 }
 
 fn token_management_limiter(state: &TestInfrastructure) -> Data<TokenManagementRequestLimiter> {
     let rate_limit = &state.settings.identity.rate_limit;
     let endpoint = &state.settings.endpoint;
     Data::new(TokenManagementRequestLimiter::new(
-        nazo_valkey::RateLimitStore::new(&state.valkey_connection()),
+        std::sync::Arc::new(nazo_valkey::RateLimitStore::new(&state.valkey_connection())),
         rate_limit.window_seconds,
         rate_limit.token_management_max_requests,
         ClientIpConfig::new(
@@ -260,7 +260,7 @@ async fn call_device_token_for_test(
     let connection = state.valkey_connection();
     let token_service = ServerTokenService::new(
         crate::test_support::token_issuance_repository(state.diesel_db.clone()),
-        nazo_valkey::TokenIssuanceStateAdapter::new(&connection),
+        std::sync::Arc::new(nazo_valkey::TokenIssuanceStateAdapter::new(&connection)),
         state.keyset.clone(),
     );
     let issuance_config = TokenIssuanceConfig::from(state.settings.as_ref());
@@ -271,7 +271,9 @@ async fn call_device_token_for_test(
         modules: &modules,
         authorization: &authorization,
     };
-    let device_service = ServerDeviceGrantService::new(nazo_valkey::DeviceStore::new(&connection));
+    let device_service = ServerDeviceGrantService::new(std::sync::Arc::new(
+        nazo_valkey::DeviceStore::new(&connection),
+    ));
     let request = TestRequest::post().uri("/token").to_http_request();
     token_device_code_with_service(
         &token_service,
@@ -532,8 +534,9 @@ async fn device_denial_consumes_pending_request_after_audited_user_decision() {
         issued_at: now,
         expires_at: now + Duration::minutes(10),
     };
-    let device_service =
-        ServerDeviceGrantService::new(nazo_valkey::DeviceStore::new(&state.valkey_connection()));
+    let device_service = ServerDeviceGrantService::new(std::sync::Arc::new(
+        nazo_valkey::DeviceStore::new(&state.valkey_connection()),
+    ));
     let device_code = format!("device-code-{}", Uuid::now_v7());
     let user_code = format!("DEVICE-{}", Uuid::now_v7().simple());
     let (_, stored_user_code) = device_service
@@ -553,10 +556,10 @@ async fn device_denial_consumes_pending_request_after_audited_user_decision() {
     let handles = Data::new(DeviceDecisionHandles::new(
         device_authorization_service(&state_data),
         Data::new(device_service),
-        Data::new(nazo_postgres::AuthorizationFlowRepository::new(
+        Data::from(Arc::new(nazo_postgres::AuthorizationFlowRepository::new(
             state.diesel_db.clone(),
             DEFAULT_TENANT_ID,
-        )),
+        )) as Arc<dyn nazo_auth::DeviceGrantRepositoryPort>),
         Data::new(crate::http::sessions::test_support::profile_session_handles(&state)),
         Data::new(DeviceHttpConfig::from(state.settings.as_ref())),
         Data::from(runtime),
@@ -585,8 +588,9 @@ async fn device_denial_consumes_pending_request_after_audited_user_decision() {
     .await;
 
     assert_eq!(response.status(), StatusCode::OK);
-    let state_after =
-        ServerDeviceGrantService::new(nazo_valkey::DeviceStore::new(&state.valkey_connection()));
+    let state_after = ServerDeviceGrantService::new(std::sync::Arc::new(
+        nazo_valkey::DeviceStore::new(&state.valkey_connection()),
+    ));
     assert!(
         state_after
             .pending_request_for_user_code(&stored_user_code, Utc::now)
@@ -607,7 +611,7 @@ async fn device_token_rejects_client_policy_before_polling_state() {
     let connection = state.valkey_connection();
     let token_service = ServerTokenService::new(
         crate::test_support::token_issuance_repository(state.diesel_db.clone()),
-        nazo_valkey::TokenIssuanceStateAdapter::new(&connection),
+        std::sync::Arc::new(nazo_valkey::TokenIssuanceStateAdapter::new(&connection)),
         state.keyset.clone(),
     );
     let issuance_config = TokenIssuanceConfig::from(state.settings.as_ref());

@@ -12,14 +12,14 @@ deployment can satisfy.
 | --- | --- | --- |
 | `oauth2-baseline` | General OAuth authorization server profile for authorization code, refresh token, client credentials, revocation, introspection, metadata, and JWKS. | Implemented and covered by local matrix tests |
 | `oauth2-security-bcp` | OAuth baseline constrained by RFC 9700-style security defaults. | Policy defined; enforced through baseline controls and client/profile policy |
-| `oidc-basic-op` | OpenID Connect Authorization Code OP with discovery, ID Token, JWKS, and JSON or per-client protected UserInfo. | OIDF-tested baseline; response crypto has local negative coverage |
-| `oidc-config` | OIDC discovery/server metadata verification. | OIDF-tested |
-| `fapi2-security` | Per-client FAPI2 assurance without forcing a message-signing option. | Versioned client policy implemented; OIDF-tested for recorded matrix variants |
-| `fapi2-message-signing-authz-request` | FAPI2 assurance plus signed authorization requests at PAR. | Composable client-policy option implemented; OIDF-tested for recorded matrix variants |
-| `fapi2-message-signing-jarm` | FAPI2 Message Signing authorization response signing option. | Composable client-policy option implemented; OIDF-tested for recorded matrix variant |
+| `oidc-basic-op` | OpenID Connect Authorization Code OP with discovery, ID Token, JWKS, and JSON or per-client protected UserInfo. | Protocol-tested baseline; response crypto has local negative coverage |
+| `oidc-config` | OIDC discovery/server metadata verification. | Protocol-tested |
+| `fapi2-security` | Per-client FAPI2 assurance without forcing a message-signing option. | Versioned client policy implemented and protocol-tested |
+| `fapi2-message-signing-authz-request` | FAPI2 assurance plus signed authorization requests at PAR. | Composable client-policy option implemented and protocol-tested |
+| `fapi2-message-signing-jarm` | FAPI2 Message Signing authorization response signing option. | Composable client-policy option implemented and protocol-tested |
 | `fapi2-message-signing-introspection` | FAPI2 Message Signing signed and optionally encrypted introspection response option. | Composable client-policy option implemented and advertised as a supported response capability |
-| `fapi-ciba-id1` | OIDF FAPI-CIBA AS compatibility profile with orthogonal `private_key_jwt / mTLS` client authentication and `poll / ping` delivery. | CIBA server support is active by default on new databases; client grant, metadata, and cross-device policy are still required. Push and `user_code` are not implemented |
-| `fapi2-ciba` | Internal CIBA hardening profile: CIBA Core + FAPI-CIBA compatibility + applicable FAPI2 Security controls. | Runtime CIBA security switch implemented; not an official OIDF certification profile name |
+| `fapi-ciba-id1` | FAPI-CIBA ID1 compatibility profile with orthogonal `private_key_jwt / mTLS` client authentication and `poll / ping` delivery. | CIBA server support is active by default on new databases; client grant, metadata, and cross-device policy are still required. Push and `user_code` are not implemented |
+| `fapi2-ciba` | Internal CIBA hardening profile: CIBA Core + FAPI-CIBA compatibility + applicable FAPI2 Security controls. | Runtime CIBA security switch implemented; not advertised as a standard profile name |
 
 ## `oauth2-baseline`
 
@@ -170,11 +170,11 @@ Required negative tests:
 | Field | Policy |
 | --- | --- |
 | Clients | Confidential clients only |
-| Grants | Authorization code and client credentials variants covered by the OIDF plan set |
+| Grants | Authorization code and client credentials variants covered by protocol tests |
 | Response types | `code` |
 | Client auth | `private_key_jwt` or mTLS |
 | Token binding | DPoP or mTLS sender-constrained access tokens |
-| DPoP nonce | Authorization-server and token endpoints remain governed by `DPOP_NONCE_POLICY` and default to required. The protected resource endpoint is governed separately by `FAPI_RESOURCE_DPOP_NONCE_POLICY`; its default is optional for OIDF FAPI2 DPoP resource conformance while DPoP `jti` replay protection remains required. |
+| DPoP nonce | Authorization-server and token endpoints remain governed by `DPOP_NONCE_POLICY` and default to required. The protected resource endpoint is governed separately by `FAPI_RESOURCE_DPOP_NONCE_POLICY`; its default is optional while DPoP `jti` replay protection remains required. |
 | PAR | Required; authorization requests that do not use PAR must be rejected |
 | PKCE | S256 required for authorization code flow |
 | Authorization code TTL | 60 seconds or less |
@@ -211,12 +211,11 @@ Required negative tests:
 The CIBA runtime module enables the OpenID Connect CIBA poll/ping endpoint and
 grant and is active by default on new databases. A client must still have CIBA
 grant/metadata and `security_policy.allow_cross_device_flows=true`. CIBA uses
-`CIBA_SECURITY_PROFILE` for CIBA-specific assurance because there is no
-official OIDF profile named `FAPI2-CIBA`.
+`CIBA_SECURITY_PROFILE` for CIBA-specific assurance.
 
 | Profile | Policy |
 | --- | --- |
-| `fapi-ciba-id1` | Implements the OIDF FAPI-CIBA ID1 behavior across `private_key_jwt / mTLS` × `poll / ping`: signed backchannel authentication requests, endpoint-audience policy where explicitly registered, mTLS holder-of-key tokens, and authenticated ping carrying only `auth_req_id`. Other profile names are rejected. |
+| `fapi-ciba-id1` | Implements FAPI-CIBA ID1 behavior across `private_key_jwt / mTLS` × `poll / ping`: signed backchannel authentication requests, endpoint-audience policy where explicitly registered, mTLS holder-of-key tokens, and authenticated ping carrying only `auth_req_id`. Other profile names are rejected. |
 | `fapi2-ciba` | Requires confidential clients, `private_key_jwt` or mTLS client authentication, issuer-only private_key_jwt audience policy, signed backchannel authentication requests, strong CIBA JWT algorithms, and DPoP or mTLS sender-constrained access tokens. |
 
 The internal `fapi2-ciba` profile applies only CIBA-applicable FAPI2 Security
@@ -233,7 +232,7 @@ standard CIBA and token endpoint capabilities, not the internal profile name.
 | PAR | Signed request object accepted and required at PAR |
 | JAR claims | `aud` required, `nbf` required, `exp` required with lifetime <= 60 minutes |
 | JAR header | Accept `typ=oauth-authz-req+jwt` |
-| Request object `jti` | Optional by default for OIDF/FAPI compatibility; `REQUEST_OBJECT_JTI_POLICY=required-for-signed-jar` enables stricter product hardening |
+| Request object `jti` | Optional by default for FAPI compatibility; `REQUEST_OBJECT_JTI_POLICY=required-for-signed-jar` enables stricter product hardening |
 
 Runtime enforcement is composed with
 `security_policy.assurance=fapi2` and
@@ -309,8 +308,8 @@ baseline capability after their entry gate is complete; this paragraph does
 not override the implemented RFC 9865, RFC 9967, bounded HTTP Signatures, or
 separately admitted OpenID4VC Issuer/Verifier surfaces described below.
 
-The dated M8 governance review, retained with NazoAuthCtl's external Suite artifacts,
-defines the admission and isolation requirements for FAPI HTTP Signatures,
+The dated M8 governance review defines the admission and isolation requirements
+for FAPI HTTP Signatures,
 RFC 9865/9967, browser-based application guidance, client attestation,
 Transaction Tokens, Grant Management, and the historical OpenID4VC entry gate.
 OpenID4VCI Issuer and OpenID4VP Verifier subsequently completed that separate
@@ -338,10 +337,9 @@ FAPI HTTP Signatures is the second bounded M8 implementation candidate. It is
 available only while the persisted `http_message_signatures` module is enabled on `/fapi/resource`;
 it is not an authorization-server profile, emits no metadata, and leaves every
 existing profile unchanged while disabled. The implementation is pinned to the
-OIDF working draft built 2026-06-26 and the RFC 9421/RFC 9530 primitives listed
-in the [dated audit](fapi-http-signatures-draft-audit.md). No dedicated OIDF
-plan exists, so local Rust vectors and real-HTTP positive/negative coverage are
-evidence, not certification. A newer draft or Final Specification triggers a
+working draft built 2026-06-26 and the RFC 9421/RFC 9530 primitives listed in
+the [dated audit](fapi-http-signatures-draft-audit.md). Local Rust vectors and
+real-HTTP positive/negative coverage are implementation evidence. A newer draft or Final Specification triggers a
 fresh delta audit before any version claim changes.
 
 RFC 9967 is the third admitted M8 candidate. It is a separate default-closed

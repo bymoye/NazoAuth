@@ -4,8 +4,12 @@ use actix_web::http::StatusCode;
 use actix_web::{HttpRequest, HttpResponse};
 use chrono::Utc;
 use nazo_http_actix::oauth_error;
-use nazo_identity::PublicAccount;
+use nazo_identity::{
+    PublicAccount, SessionId,
+    ports::{RepositoryError, SessionAccountPort, SessionStorePort},
+};
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 use uuid::Uuid;
 // 只处理从请求 Cookie 到当前用户/管理员身份的解析。
@@ -14,9 +18,6 @@ use nazo_http_actix::{
     authorization_error_response, clear_cookie, cookie_value, has_valid_csrf_token_for_cookies,
     with_cookie_headers,
 };
-
-use nazo_postgres::UserRepository;
-use nazo_valkey::SessionStore;
 
 #[derive(Clone, Deserialize, Serialize)]
 pub(crate) struct SessionPayload {
@@ -46,24 +47,24 @@ const AUTH_TIME_CLOCK_SKEW_SECONDS: i64 = 30;
 
 /// Runtime-admin authentication dependencies, assembled once at the composition root.
 ///
-/// This deliberately owns concrete repository/store handles instead of exposing the
-/// application database pool, Valkey connection, or complete server settings to HTTP handlers.
+/// This deliberately owns backend-neutral ports instead of exposing database pools,
+/// transient-state connections, or complete server settings to HTTP handlers.
 pub(crate) struct AdminSessionHandles {
-    sessions: SessionStore,
-    users: UserRepository,
+    sessions: Arc<dyn SessionStorePort>,
+    users: Arc<dyn SessionAccountPort>,
     tenant_id: nazo_identity::TenantId,
     http: SessionHttpConfig,
 }
 
 /// Profile session endpoint dependencies assembled at the composition root.
 ///
-/// The profile transport only receives the concrete session/user stores and the
-/// small amount of HTTP/runtime configuration it consumes. It cannot reach the
-/// application database pool, raw Valkey connection, keyset, or complete settings.
+/// The profile transport only receives the session/account ports and the small amount
+/// of HTTP/runtime configuration it consumes. It cannot reach raw storage connections,
+/// the keyset, or complete settings.
 #[derive(Clone)]
 pub(crate) struct SessionProfileHandles {
-    sessions: SessionStore,
-    users: UserRepository,
+    sessions: Arc<dyn SessionStorePort>,
+    users: Arc<dyn SessionAccountPort>,
     tenant_id: nazo_identity::TenantId,
     http: SessionHttpConfig,
 }
@@ -102,9 +103,9 @@ impl SessionHttpConfig {
 }
 
 impl AdminSessionHandles {
-    pub(crate) fn new(
-        sessions: SessionStore,
-        users: UserRepository,
+    pub(crate) fn from_port(
+        sessions: Arc<dyn SessionStorePort>,
+        users: Arc<dyn SessionAccountPort>,
         tenant_id: nazo_identity::TenantId,
         http: SessionHttpConfig,
     ) -> Self {
@@ -125,8 +126,8 @@ impl AdminSessionHandles {
         req: &HttpRequest,
     ) -> anyhow::Result<Option<CurrentSession>> {
         current_session_from_handles(
-            &self.sessions,
-            &self.users,
+            self.sessions.as_ref(),
+            self.users.as_ref(),
             self.tenant_id,
             self.http.session_cookie_name(),
             req,
@@ -151,9 +152,9 @@ impl AdminSessionHandles {
 }
 
 impl SessionProfileHandles {
-    pub(crate) fn new(
-        sessions: SessionStore,
-        users: UserRepository,
+    pub(crate) fn from_port(
+        sessions: Arc<dyn SessionStorePort>,
+        users: Arc<dyn SessionAccountPort>,
         tenant_id: nazo_identity::TenantId,
         http: SessionHttpConfig,
     ) -> Self {
@@ -222,16 +223,24 @@ impl SessionProfileHandles {
         }
     }
 
-    pub(crate) async fn delete_session(&self, session_id: &str) -> Result<(), nazo_valkey::Error> {
-        self.sessions.delete(session_id).await.map(|_| ())
+    pub(crate) async fn delete_session(&self, session_id: &str) -> Result<(), RepositoryError> {
+        self.sessions
+            .delete(&SessionId::new(session_id))
+            .await
+            .map(|_| ())
     }
 
     pub(crate) async fn current_session_by_id(
         &self,
         session_id: &str,
     ) -> anyhow::Result<Option<CurrentSession>> {
-        current_session_by_id_from_handles(&self.sessions, &self.users, self.tenant_id, session_id)
-            .await
+        current_session_by_id_from_handles(
+            self.sessions.as_ref(),
+            self.users.as_ref(),
+            self.tenant_id,
+            session_id,
+        )
+        .await
     }
 
     pub(crate) async fn current_session(
@@ -258,8 +267,8 @@ impl SessionPayload {
 }
 
 pub(crate) async fn current_session_from_handles(
-    sessions: &SessionStore,
-    users: &UserRepository,
+    sessions: &dyn SessionStorePort,
+    users: &dyn SessionAccountPort,
     tenant_id: nazo_identity::TenantId,
     session_cookie_name: &str,
     req: &HttpRequest,
@@ -271,16 +280,17 @@ pub(crate) async fn current_session_from_handles(
 }
 
 async fn current_session_by_id_from_handles(
-    sessions: &SessionStore,
-    users: &UserRepository,
+    sessions: &dyn SessionStorePort,
+    users: &dyn SessionAccountPort,
     tenant_id: nazo_identity::TenantId,
     session_id: &str,
 ) -> anyhow::Result<Option<CurrentSession>> {
-    let stored = match sessions.load(session_id).await {
+    let session_id = SessionId::new(session_id);
+    let stored = match sessions.load(&session_id).await {
         Ok(stored) => stored,
-        Err(error) if error.kind() == nazo_valkey::ErrorKind::CorruptData => {
+        Err(error @ RepositoryError::Consistency(_)) => {
             tracing::warn!(%error, "session payload is malformed");
-            let _ = sessions.delete(session_id).await;
+            let _ = sessions.delete(&session_id).await;
             return Ok(None);
         }
         Err(error) => return Err(error.into()),
@@ -289,13 +299,13 @@ async fn current_session_by_id_from_handles(
         return Ok(None);
     };
     let now = Utc::now().timestamp();
-    let logged_in_client_ids = stored.value().logged_in_client_ids().to_vec();
-    let payload = SessionPayload::from_record(stored.value());
+    let logged_in_client_ids = stored.record().logged_in_client_ids().to_vec();
+    let payload = SessionPayload::from_record(stored.record());
     let payload = if valid_session_payload(&payload, now) {
         payload
     } else {
         tracing::warn!("session payload contains invalid authentication metadata");
-        let _ = sessions.delete(session_id).await;
+        let _ = sessions.delete(&session_id).await;
         return Ok(None);
     };
     if payload.pending_mfa {
@@ -305,7 +315,7 @@ async fn current_session_by_id_from_handles(
         sessions,
         users,
         tenant_id,
-        session_id,
+        &session_id,
         payload,
         logged_in_client_ids,
     )
@@ -313,10 +323,10 @@ async fn current_session_by_id_from_handles(
 }
 
 async fn session_from_payload(
-    sessions: &SessionStore,
-    users: &UserRepository,
+    sessions: &dyn SessionStorePort,
+    users: &dyn SessionAccountPort,
     tenant_id: nazo_identity::TenantId,
-    session_id: &str,
+    session_id: &SessionId,
     payload: SessionPayload,
     logged_in_client_ids: Vec<String>,
 ) -> anyhow::Result<Option<CurrentSession>> {

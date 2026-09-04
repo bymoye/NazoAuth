@@ -160,12 +160,11 @@ diesel::table! {
 }
 
 diesel::table! {
-    initial_admin_bootstrap_receipts (singleton) {
-        singleton -> Bool,
-        token_hash -> Varchar,
-        request_id -> Varchar,
-        request_email_hash -> Varchar,
-        claimed_user_id -> Uuid,
+    admin_provision_receipts (operation_id) {
+        operation_id -> Varchar,
+        deployment_id -> Varchar,
+        tenant_id -> Uuid,
+        user_id -> Uuid,
         created_at -> Timestamptz,
     }
 }
@@ -442,7 +441,8 @@ diesel::table! {
 }
 
 diesel::table! {
-    runtime_module_desired_states (module_id) {
+    runtime_module_desired_states (tenant_id, module_id) {
+        tenant_id -> Uuid,
         module_id -> Varchar,
         desired_mode -> Varchar,
         revision -> Int8,
@@ -453,7 +453,8 @@ diesel::table! {
 }
 
 diesel::table! {
-    runtime_module_instance_states (instance_id, module_id) {
+    runtime_module_instance_states (tenant_id, instance_id, module_id) {
+        tenant_id -> Uuid,
         instance_id -> Varchar,
         module_id -> Varchar,
         actual_state -> Varchar,
@@ -468,6 +469,7 @@ diesel::table! {
 diesel::table! {
     runtime_module_state_events (event_id) {
         event_id -> Uuid,
+        tenant_id -> Uuid,
         module_id -> Varchar,
         event_type -> Varchar,
         revision -> Int8,
@@ -537,7 +539,7 @@ diesel::allow_tables_to_appear_in_same_query!(
     realms,
     organizations,
     users,
-    initial_admin_bootstrap_receipts,
+    admin_provision_receipts,
     user_totp_credentials,
     user_mfa_backup_codes,
     user_mfa_remembered_devices,

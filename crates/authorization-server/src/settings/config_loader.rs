@@ -1,5 +1,44 @@
 use super::*;
 
+struct TenantOverride {
+    context: nazo_identity::TenantContext,
+    issuer: String,
+    host: String,
+}
+
+impl TenantOverride {
+    fn from_issuer(context: nazo_identity::TenantContext, issuer: String) -> anyhow::Result<Self> {
+        let issuer = issuer.trim().to_owned();
+        validate_issuer_url(&issuer)?;
+        let parsed = Url::parse(&issuer)?;
+        let issuer_host = parsed
+            .host()
+            .ok_or_else(|| anyhow::anyhow!("tenant issuer must include a host"))?;
+        let host = match issuer_host {
+            url::Host::Domain(domain) => canonical_tenant_host(domain)?,
+            url::Host::Ipv4(address) => canonical_tenant_host(&address.to_string())?,
+            url::Host::Ipv6(address) => canonical_tenant_host(&format!("[{address}]"))?,
+        };
+        Ok(Self {
+            context,
+            issuer,
+            host,
+        })
+    }
+
+    fn from_directory(binding: &nazo_identity::TenantDirectoryBinding) -> anyhow::Result<Self> {
+        let override_ = Self::from_issuer(binding.tenant, binding.issuer.clone())?;
+        let external_host = canonical_tenant_host(&binding.external_host)?;
+        if override_.host != external_host {
+            bail!(
+                "tenant directory issuer host {} does not match external_host {external_host}",
+                override_.host
+            );
+        }
+        Ok(override_)
+    }
+}
+
 pub(crate) fn credential_configurations_from_config(
     config: &ConfigSource,
 ) -> anyhow::Result<BTreeMap<String, nazo_openid4vci::CredentialConfiguration>> {
@@ -14,44 +53,122 @@ pub(crate) fn credential_configurations_from_config(
     Ok(configurations)
 }
 
+fn derive_tenant_secret(
+    root: &[u8],
+    tenant_id: nazo_identity::TenantId,
+    purpose: &'static [u8],
+) -> [u8; 32] {
+    nazo_operator_protocol::hkdf_sha256_v1(root, tenant_id.as_uuid().as_bytes(), purpose, 32)
+        .try_into()
+        .expect("HKDF output length is fixed to 32 bytes")
+}
+
+fn derive_tenant_management_token(
+    root: String,
+    tenant_id: nazo_identity::TenantId,
+    purpose: &'static [u8],
+) -> String {
+    URL_SAFE_NO_PAD.encode(derive_tenant_secret(root.as_bytes(), tenant_id, purpose))
+}
+
 impl Settings {
     pub(crate) fn from_config(config: &ConfigSource) -> anyhow::Result<Self> {
-        let tenant = nazo_identity::TenantContext {
-            tenant_id: nazo_identity::TenantId::new(
-                config.parse("TENANT_ID", nazo_identity::DEFAULT_TENANT_ID)?,
-            )?,
-            realm_id: nazo_identity::RealmId::new(
-                config.parse("REALM_ID", nazo_identity::DEFAULT_REALM_ID)?,
-            )?,
-            organization_id: nazo_identity::OrganizationId::new(
-                config.parse("ORGANIZATION_ID", nazo_identity::DEFAULT_ORGANIZATION_ID)?,
-            )?,
-        };
+        Self::from_config_for_tenant(config, None)
+    }
+
+    pub(crate) fn initial_tenant_directory_binding(
+        config: &ConfigSource,
+    ) -> anyhow::Result<nazo_identity::TenantDirectoryBinding> {
+        let tenant = nazo_identity::TenantContext::default_system();
         let public_base_url = config.string("PUBLIC_BASE_URL", "http://127.0.0.1:8000");
+        let override_ =
+            TenantOverride::from_issuer(tenant, config.string("ISSUER", &public_base_url))?;
+        Ok(nazo_identity::TenantDirectoryBinding {
+            tenant,
+            runtime_revision: 1,
+            issuer: override_.issuer,
+            external_host: override_.host,
+        })
+    }
+
+    /// Builds one tenant snapshot from the authoritative runtime directory.
+    /// All non-routing policy remains in the process configuration; the
+    /// directory only selects the tenant boundary and public issuer.
+    pub(crate) fn from_directory_binding(
+        config: &ConfigSource,
+        binding: &nazo_identity::TenantDirectoryBinding,
+    ) -> anyhow::Result<Self> {
+        if config.get("JWK_KEYS_DIR").is_some() {
+            bail!(
+                "JWK_KEYS_DIR must not be configured for a directory-managed tenant; tenant key directories are derived from DATA_DIR"
+            );
+        }
+        if config.get("AVATAR_STORAGE_DIR").is_some() {
+            bail!(
+                "AVATAR_STORAGE_DIR must not be configured for a directory-managed tenant; tenant avatar directories are derived from DATA_DIR"
+            );
+        }
+        Self::from_config_for_tenant(config, Some(TenantOverride::from_directory(binding)?))
+    }
+
+    fn from_config_for_tenant(
+        config: &ConfigSource,
+        tenant_override: Option<TenantOverride>,
+    ) -> anyhow::Result<Self> {
+        let tenant_specific = tenant_override.is_some();
+        let public_base_url = tenant_override
+            .as_ref()
+            .map(|tenant| tenant.issuer.clone())
+            .unwrap_or_else(|| config.string("PUBLIC_BASE_URL", "http://127.0.0.1:8000"));
         validate_issuer_url(&public_base_url)?;
         let public_origin = url_origin(&public_base_url)?;
 
-        let issuer = config.string("ISSUER", &public_base_url);
+        let issuer = tenant_override
+            .as_ref()
+            .map(|tenant| tenant.issuer.clone())
+            .unwrap_or_else(|| config.string("ISSUER", &public_base_url));
         validate_issuer_url(&issuer)?;
-        let mtls_endpoint_base_url = config
-            .optional_string("MTLS_ENDPOINT_BASE_URL")
-            .unwrap_or_else(|| issuer.clone());
+        let tenant = match tenant_override {
+            Some(tenant) => TenantSettings {
+                context: tenant.context,
+            },
+            None => TenantSettings {
+                context: nazo_identity::TenantContext::default_system(),
+            },
+        };
+        let mtls_endpoint_base_url = if tenant_specific {
+            issuer.clone()
+        } else {
+            config
+                .optional_string("MTLS_ENDPOINT_BASE_URL")
+                .unwrap_or_else(|| issuer.clone())
+        };
         validate_issuer_url(&mtls_endpoint_base_url)?;
-        let frontend_base_url =
-            config.string("FRONTEND_BASE_URL", &format!("{}/ui/", public_base_url));
+        let frontend_base_url = if tenant_specific {
+            format!("{}/ui/", public_base_url.trim_end_matches('/'))
+        } else {
+            config.string(
+                "FRONTEND_BASE_URL",
+                &format!("{}/ui/", public_base_url.trim_end_matches('/')),
+            )
+        };
         validate_frontend_base_url(&frontend_base_url)?;
-        let cors_allowed_origins = config
-            .get("CORS_ALLOWED_ORIGINS")
-            .map(|value| {
-                value
-                    .split(',')
-                    .map(str::trim)
-                    .filter(|value| !value.is_empty())
-                    .map(ToOwned::to_owned)
-                    .collect()
-            })
-            .filter(|values: &Vec<String>| !values.is_empty())
-            .unwrap_or_else(|| vec![public_origin]);
+        let cors_allowed_origins = if tenant_specific {
+            vec![public_origin]
+        } else {
+            config
+                .get("CORS_ALLOWED_ORIGINS")
+                .map(|value| {
+                    value
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                        .map(ToOwned::to_owned)
+                        .collect()
+                })
+                .filter(|values: &Vec<String>| !values.is_empty())
+                .unwrap_or_else(|| vec![public_origin])
+        };
         for origin in &cors_allowed_origins {
             validate_cors_origin(origin)?;
         }
@@ -162,10 +279,30 @@ impl Settings {
             .unwrap_or_default();
         let _ = mfa_totp_key_ring(config)?;
         validate_optional_token_issuance_response_key_config(config)?;
-        let enable_openid4vci_issuer = config.bool("ENABLE_OPENID4VCI_ISSUER", false)?;
-        let enable_openid4vp_verifier = config.bool("ENABLE_OPENID4VP_VERIFIER", false)?;
+        let enable_directory_openid4vci_issuer = config.bool(
+            "ENABLE_DIRECTORY_OPENID4VCI_ISSUER",
+            config.bool("ENABLE_OPENID4VCI_ISSUER", false)?,
+        )?;
+        let enable_openid4vci_issuer = if tenant_specific {
+            enable_directory_openid4vci_issuer
+        } else {
+            config.bool("ENABLE_OPENID4VCI_ISSUER", false)?
+        };
+        let enable_directory_openid4vp_verifier = config.bool(
+            "ENABLE_DIRECTORY_OPENID4VP_VERIFIER",
+            config.bool("ENABLE_OPENID4VP_VERIFIER", false)?,
+        )?;
+        let enable_openid4vp_verifier = if tenant_specific {
+            enable_directory_openid4vp_verifier
+        } else {
+            config.bool("ENABLE_OPENID4VP_VERIFIER", false)?
+        };
+        let register_openid4vci_routes =
+            enable_openid4vci_issuer || enable_directory_openid4vci_issuer;
+        let register_openid4vp_routes =
+            enable_openid4vp_verifier || enable_directory_openid4vp_verifier;
         let openid4vc_enabled = enable_openid4vci_issuer || enable_openid4vp_verifier;
-        let openid4vc_data_encryption_key = config
+        let mut openid4vc_data_encryption_key = config
             .optional_string("OPENID4VC_DATA_ENCRYPTION_KEY")
             .map(|value| URL_SAFE_NO_PAD.decode(value).map_err(anyhow::Error::from))
             .transpose()?
@@ -199,7 +336,7 @@ impl Settings {
                     .collect::<std::collections::BTreeSet<_>>()
             })
             .unwrap_or_default();
-        let openid4vci_issuer_management_token =
+        let mut openid4vci_issuer_management_token =
             config.optional_string("OPENID4VCI_ISSUER_MANAGEMENT_TOKEN");
         if openid4vci_issuer_management_token
             .as_ref()
@@ -229,7 +366,7 @@ impl Settings {
         for origin in &wallet_authorization_origins {
             validate_cors_origin(origin)?;
         }
-        let openid4vp_verifier_management_token =
+        let mut openid4vp_verifier_management_token =
             config.optional_string("OPENID4VP_VERIFIER_MANAGEMENT_TOKEN");
         if openid4vp_verifier_management_token
             .as_ref()
@@ -244,14 +381,14 @@ impl Settings {
                 "OPENID4VCI_ISSUER_MANAGEMENT_TOKEN and OPENID4VP_VERIFIER_MANAGEMENT_TOKEN must differ"
             );
         }
-        let openid4vc_signing_certificate_chain_file = config
+        let mut openid4vc_signing_certificate_chain_file = config
             .optional_string("OPENID4VC_SIGNING_CERTIFICATE_CHAIN_FILE")
             .map(PathBuf::from);
-        let openid4vc_trust_anchors_file = config
+        let mut openid4vc_trust_anchors_file = config
             .optional_string("OPENID4VC_TRUST_ANCHORS_FILE")
             .map(PathBuf::from);
         let openid4vc_revocation_policy = Openid4vcRevocationPolicy::from_config(config)?;
-        let openid4vc_revocation_snapshot_file = config
+        let mut openid4vc_revocation_snapshot_file = config
             .optional_string("OPENID4VC_REVOCATION_SNAPSHOT_FILE")
             .map(PathBuf::from);
         let openid4vc_revocation_reload_interval_seconds = positive_u64(
@@ -260,8 +397,10 @@ impl Settings {
             30,
             "OPENID4VC_REVOCATION_RELOAD_INTERVAL_SECONDS",
         )?;
-        if openid4vc_revocation_policy != Openid4vcRevocationPolicy::Disabled
+        if openid4vc_enabled
+            && openid4vc_revocation_policy != Openid4vcRevocationPolicy::Disabled
             && openid4vc_revocation_snapshot_file.is_none()
+            && !tenant_specific
         {
             bail!(
                 "OPENID4VC_REVOCATION_SNAPSHOT_FILE is required when OPENID4VC_REVOCATION_POLICY is enabled"
@@ -274,11 +413,12 @@ impl Settings {
         }
         if openid4vc_enabled
             && (openid4vc_data_encryption_key.is_none()
-                || openid4vc_signing_certificate_chain_file.is_none()
-                || openid4vc_trust_anchors_file.is_none())
+                || (!tenant_specific
+                    && (openid4vc_signing_certificate_chain_file.is_none()
+                        || openid4vc_trust_anchors_file.is_none())))
         {
             bail!(
-                "OpenID4VC modules require OPENID4VC_DATA_ENCRYPTION_KEY, OPENID4VC_SIGNING_CERTIFICATE_CHAIN_FILE, and OPENID4VC_TRUST_ANCHORS_FILE"
+                "OpenID4VC modules require a data encryption root and, outside the tenant directory, explicit certificate and trust-anchor files"
             );
         }
         if enable_openid4vci_issuer && credential_configurations.is_empty() {
@@ -299,7 +439,8 @@ impl Settings {
                 "OPENID4VC_CLIENT_ATTESTATION_ISSUER requires OPENID4VC_CLIENT_ATTESTATION_JWKS_JSON"
             );
         }
-        if enable_openid4vp_verifier && wallet_authorization_origins.is_empty() {
+        if enable_openid4vp_verifier && wallet_authorization_origins.is_empty() && !tenant_specific
+        {
             bail!(
                 "OPENID4VP_WALLET_AUTHORIZATION_ORIGINS is required when the VP verifier is enabled"
             );
@@ -309,8 +450,18 @@ impl Settings {
                 "OPENID4VP_VERIFIER_MANAGEMENT_TOKEN is required when the VP verifier is enabled"
             );
         }
-        let dynamic_client_registration_initial_access_token =
+        let mut dynamic_client_registration_initial_access_token =
             config.optional_string("DYNAMIC_CLIENT_REGISTRATION_INITIAL_ACCESS_TOKEN");
+        if tenant_specific {
+            dynamic_client_registration_initial_access_token =
+                dynamic_client_registration_initial_access_token.map(|root| {
+                    derive_tenant_management_token(
+                        root,
+                        tenant.context.tenant_id,
+                        b"nazoauth/dynamic-client-registration/initial-access/v1",
+                    )
+                });
+        }
         let email_code_dev_response_enabled =
             config.bool("EMAIL_CODE_DEV_RESPONSE_ENABLED", false)?;
         if email_code_dev_response_enabled
@@ -323,16 +474,65 @@ impl Settings {
         let passkey = PasskeySettings::from_config(config, &issuer)?;
         let email = EmailSettings::from_config(config, &issuer)?;
         let federation = FederationSettings::from_config(config)?;
-        let task_key_settings = key_settings_from_config(config)?;
+        let mut task_key_settings = key_settings_from_config(config)?;
         let fapi_http_signature_max_age_seconds =
             config.parse("FAPI_HTTP_SIGNATURE_MAX_AGE_SECONDS", 60)?;
         if !(1..=300).contains(&fapi_http_signature_max_age_seconds) {
             bail!("FAPI_HTTP_SIGNATURE_MAX_AGE_SECONDS must be between 1 and 300");
         }
         let data_dir = config.persistent_path("DATA_DIR", Some(DEFAULT_DATA_DIR))?;
-        let avatar_storage_dir = match config.optional_string("AVATAR_STORAGE_DIR") {
-            Some(_) => config.persistent_path("AVATAR_STORAGE_DIR", None)?,
-            None => data_dir.join("avatars"),
+        if tenant_specific {
+            if openid4vc_enabled {
+                let tenant_id = tenant.context.tenant_id;
+                let material_dir = data_dir
+                    .join("tenants")
+                    .join(tenant_id.as_uuid().to_string())
+                    .join("openid4vc");
+                let certificate_bundle = material_dir.join("certificate-bundle.pem");
+                openid4vc_signing_certificate_chain_file = Some(certificate_bundle.clone());
+                openid4vc_trust_anchors_file = Some(certificate_bundle);
+                if openid4vc_revocation_policy != Openid4vcRevocationPolicy::Disabled {
+                    openid4vc_revocation_snapshot_file =
+                        Some(material_dir.join("revocation-snapshot.json"));
+                }
+                openid4vc_data_encryption_key = openid4vc_data_encryption_key.map(|root| {
+                    derive_tenant_secret(&root, tenant_id, b"nazoauth/openid4vc/data-encryption/v1")
+                });
+                openid4vci_issuer_management_token =
+                    openid4vci_issuer_management_token.map(|root| {
+                        derive_tenant_management_token(
+                            root,
+                            tenant_id,
+                            b"nazoauth/openid4vci/management/v1",
+                        )
+                    });
+                openid4vp_verifier_management_token =
+                    openid4vp_verifier_management_token.map(|root| {
+                        derive_tenant_management_token(
+                            root,
+                            tenant_id,
+                            b"nazoauth/openid4vp/management/v1",
+                        )
+                    });
+            }
+            task_key_settings.keys_dir = data_dir
+                .join("tenants")
+                .join(tenant.context.tenant_id.as_uuid().to_string())
+                .join("keys");
+        }
+        let avatar_storage_dir = match (
+            tenant_specific,
+            config.optional_string("AVATAR_STORAGE_DIR"),
+        ) {
+            (true, Some(_)) => config
+                .persistent_path("AVATAR_STORAGE_DIR", None)?
+                .join(tenant.context.tenant_id.as_uuid().to_string()),
+            (true, None) => data_dir
+                .join("tenants")
+                .join(tenant.context.tenant_id.as_uuid().to_string())
+                .join("avatars"),
+            (false, Some(_)) => config.persistent_path("AVATAR_STORAGE_DIR", None)?,
+            (false, None) => data_dir.join("avatars"),
         };
         let scim_event_retention_seconds = positive_u64(
             config,
@@ -357,7 +557,7 @@ impl Settings {
         }
 
         Ok(Self {
-            tenant: TenantSettings { context: tenant },
+            tenant,
             endpoint: {
                 let trusted_proxy_cidrs =
                     parse_trusted_proxy_cidrs(config.get("TRUSTED_PROXY_CIDRS"))?;
@@ -380,6 +580,12 @@ impl Settings {
                         MtlsCertificateSourceMode::Disabled
                     }
                     TransportMode::DirectTls => {
+                        if !Url::parse(&mtls_endpoint_base_url)?
+                            .scheme()
+                            .eq_ignore_ascii_case("https")
+                        {
+                            bail!("direct-tls transport requires an HTTPS MTLS_ENDPOINT_BASE_URL");
+                        }
                         if !trusted_proxy_cidrs.is_empty() {
                             bail!("direct-tls transport must not configure TRUSTED_PROXY_CIDRS");
                         }
@@ -486,6 +692,8 @@ impl Settings {
             modules: ModuleSettings {
                 enable_openid4vci_issuer,
                 enable_openid4vp_verifier,
+                register_openid4vci_routes,
+                register_openid4vp_routes,
                 dynamic_client_registration_initial_access_token,
                 remote_client_document_private_origins: config
                     .optional_string("REMOTE_CLIENT_DOCUMENT_PRIVATE_ORIGINS")

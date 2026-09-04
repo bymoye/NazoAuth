@@ -12,6 +12,7 @@ use crate::domain::remote_client_documents::RemoteClientDocumentResolver;
 use crate::http::admin::clients::ServerSectorIdentifierResolver;
 use crate::runtime_modules::ServerRuntimeModuleRegistry;
 use crate::settings::Settings;
+use nazo_auth::{RequestRateLimitBucket, RequestRateLimitPort};
 use nazo_http_actix::{ClientIpHeaderMode, IpCidr};
 
 #[derive(Clone)]
@@ -75,7 +76,7 @@ impl nazo_auth::DynamicRegistrationSecretPort for ServerDynamicRegistrationToken
 
 #[derive(Clone)]
 pub(crate) struct ServerDynamicRegistrationRequestGuard {
-    rate_limits: nazo_valkey::RateLimitStore,
+    rate_limits: Arc<dyn RequestRateLimitPort>,
     window_seconds: u64,
     max_requests: u64,
     runtime_modules: Arc<ServerRuntimeModuleRegistry>,
@@ -83,7 +84,7 @@ pub(crate) struct ServerDynamicRegistrationRequestGuard {
 
 impl ServerDynamicRegistrationRequestGuard {
     pub(crate) fn new(
-        rate_limits: nazo_valkey::RateLimitStore,
+        rate_limits: Arc<dyn RequestRateLimitPort>,
         config: &DynamicRegistrationConfig,
         runtime_modules: Arc<ServerRuntimeModuleRegistry>,
     ) -> Self {
@@ -114,7 +115,7 @@ impl DynamicRegistrationRequestGuard for ServerDynamicRegistrationRequestGuard {
             let count = self
                 .rate_limits
                 .increment(
-                    nazo_valkey::RateDimension::TokenManagement,
+                    RequestRateLimitBucket::TokenManagement,
                     source_ip,
                     self.window_seconds,
                 )
@@ -151,8 +152,8 @@ impl DynamicRegistrationRequestGuard for ServerDynamicRegistrationRequestGuard {
 
 pub(crate) fn dynamic_registration_endpoint(
     config: DynamicRegistrationConfig,
-    clients: nazo_postgres::OAuthClientRepository,
-    rate_limits: nazo_valkey::RateLimitStore,
+    clients: Arc<dyn nazo_auth::DynamicRegistrationClientStore>,
+    rate_limits: Arc<dyn RequestRateLimitPort>,
     keyset: nazo_key_management::KeyManager,
     runtime_modules: Arc<ServerRuntimeModuleRegistry>,
     remote_client_documents: Arc<RemoteClientDocumentResolver>,
@@ -179,7 +180,7 @@ pub(crate) fn dynamic_registration_endpoint(
             request_object_encryption_algs: vec!["RSA-OAEP-256"],
             request_object_encryption_encs: vec!["A256GCM"],
         },
-        Arc::new(clients),
+        clients,
         Arc::new(ServerSectorIdentifierResolver),
         nazo_http_actix::DynamicRegistrationSecurityServices::new(
             remote_client_documents,

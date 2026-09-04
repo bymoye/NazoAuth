@@ -5,7 +5,7 @@
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use sha2::{Digest as _, Sha256};
 
-use super::{RecoveryChallengeRequest, RecoveryRootChangeRequest};
+use super::{RecoveryChallengeRequest, RecoveryRootChangeRequest, ensure_local_deployment};
 
 fn key_text(seed: u8) -> String {
     URL_SAFE_NO_PAD.encode([seed; 32])
@@ -87,4 +87,10 @@ fn answer_material_decodes_only_exact_byte_lengths() {
     assert!(super::decode_fixed::<32>(&URL_SAFE_NO_PAD.encode([7u8; 31]), "nonce").is_err());
     assert!(super::decode_fixed::<64>(&URL_SAFE_NO_PAD.encode([8u8; 63]), "signature").is_err());
     assert!(super::decode_fixed::<32>("not-base64!!", "nonce").is_err());
+}
+
+#[test]
+fn deployment_binding_accepts_local_and_rejects_foreign_callers() {
+    assert!(ensure_local_deployment("deployment-a", "deployment-a").is_ok());
+    assert!(ensure_local_deployment("deployment-a", "deployment-b").is_err());
 }

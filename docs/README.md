@@ -15,7 +15,6 @@ set can be scanned from one place.
 | Change history | [../CHANGELOG.md](../CHANGELOG.md) |
 | Current scope and roadmap | [project/roadmap.md](project/roadmap.md) |
 | Workspace and runtime-module architecture | [project/architecture.md](project/architecture.md) |
-| OpenAI Build Week 2026 engineering record | [project/openai-build-week-2026.md](project/openai-build-week-2026.md) |
 | Deployment | [operations/deployment.md](operations/deployment.md) |
 | Chinese deployment | [operations/deployment.zh-CN.md](operations/deployment.zh-CN.md) |
 | Fresh production activation | [operations/fresh-production-activation.md](operations/fresh-production-activation.md) |
@@ -38,7 +37,7 @@ set can be scanned from one place.
 | Protocol | [protocol](protocol) | OAuth/OIDC/FAPI profile matrices, RFC coverage, protocol self-audits, and implementation backlog. |
 | Features | [features](features) | Feature design and integration notes for ecosystem onboarding, tenancy, SCIM, federation, MFA, passkeys, and resource-server verification. |
 | Security | [security](security) | Threat model, security policy links, and runtime security event taxonomy. |
-| Conformance | [conformance](conformance) | Product-owned black-box regression contracts. External Suite artifacts and orchestration live in NazoAuthCtl. |
+| Conformance | [conformance](conformance) | Product-owned executable protocol regression contracts. |
 | Coverage | [coverage](coverage) | Coverage runbooks and evidence. |
 | Performance | [performance](performance) | NazoAuth-only capacity, stress, and benchmark reports. |
 | Project | [project](project) | Product scope, roadmap, and project-level decision records. |
@@ -173,7 +172,6 @@ These files are text artifacts but are not general reader documentation.
 - Keep benchmark runner instructions in `perf/README.md`; performance entry
   points and summaries belong under `docs/performance/`, while scenario
   reports belong under `docs/performance/reports/`.
-- Keep product-owned black-box regression contracts under `docs/conformance/`.
-  External Suite evidence is owned by NazoAuthCtl.
+- Keep product-owned executable protocol regression contracts under `docs/conformance/`.
 - Keep generated lock files and regression seed corpora out of the reader-facing
   documentation flow; index them only as support artifacts.

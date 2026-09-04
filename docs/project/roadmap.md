@@ -18,11 +18,11 @@ The project separates three surfaces:
 | --- | --- | --- |
 | `oauth2-baseline` | Implemented | Authorization code, PKCE, token, refresh, revocation, introspection, discovery, JWKS |
 | `oauth2-security-bcp` | Implemented | Sender constraints, redirect policy, query-token rejection, replay controls |
-| `oidc-basic-op` | Implemented and OIDF-tested | [profile matrix](../protocol/profile-matrix.md), [2026-06-27 OIDF record](../conformance/2026-06-27-pr15-official-oidf-full-matrix.md) |
-| `oidc-config` | Implemented and OIDF-tested | Runtime discovery metadata and metadata truth tests |
-| `fapi2-security` | Implemented and OIDF-tested | PAR, PKCE S256, confidential clients, DPoP/mTLS-bound tokens |
-| `fapi2-message-signing-authz-request` | Implemented and OIDF-tested | Signed request objects at PAR with `aud`, `nbf`, and bounded `exp` |
-| `fapi2-message-signing-jarm` | Implemented where advertised and OIDF-tested | Signed authorization responses without unsafe fallback |
+| `oidc-basic-op` | Implemented and protocol-tested | [profile matrix](../protocol/profile-matrix.md) |
+| `oidc-config` | Implemented and protocol-tested | Runtime discovery metadata and metadata truth tests |
+| `fapi2-security` | Implemented and protocol-tested | PAR, PKCE S256, confidential clients, DPoP/mTLS-bound tokens |
+| `fapi2-message-signing-authz-request` | Implemented and protocol-tested | Signed request objects at PAR with `aud`, `nbf`, and bounded `exp` |
+| `fapi2-message-signing-jarm` | Implemented where advertised and protocol-tested | Signed authorization responses without unsafe fallback |
 | `fapi2-message-signing-introspection` | Implemented/profile-scoped | RFC 9701 signed and encrypted introspection metadata is advertised only by the signed-introspection runtime profile |
 
 ## Protocol Boundaries
@@ -113,8 +113,7 @@ Each item has a threat-model and acceptance-test entry in
 
 ## Evidence
 
-- Official conformance record:
-  [2026-06-27 PR 15 official OIDF full matrix](../conformance/2026-06-27-pr15-official-oidf-full-matrix.md).
+- Black-box protocol evidence: project-owned protocol tests.
 - OAuth 2.1 and best-practice audit:
   [oauth2-1-self-audit.md](../protocol/oauth2-1-self-audit.md).
 - Negative conformance fixtures:

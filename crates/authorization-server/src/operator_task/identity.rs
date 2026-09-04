@@ -1,15 +1,12 @@
 //! Local identity anchors for the one-shot operator (E04 step 5).
 //!
-//! Three independent fences run after signature verification and before
+//! Two local fences run after signature verification and before
 //! journal acceptance:
 //!
-//! 1. embedded build identity equality (J1): the signed `target.embedded`
-//!    must equal the build identity of *this* executing binary, so an
-//!    operation authorized for artifact A can never execute on runtime B;
-//! 2. deployment binding: the signed `deployment_id` must match the local
+//! 1. deployment binding: the signed `deployment_id` must match the local
 //!    authoritative anchors (server config, persisted instance identity, and
 //!    the operator state anchor);
-//! 3. config_revision fencing: the signed opaque revision must equal the
+//! 2. config_revision fencing: the signed opaque revision must equal the
 //!    local revision marker, constant-time compared through the frozen
 //!    [`nazo_operator_protocol::config_revision_matches`] helper.
 //!
@@ -20,87 +17,11 @@
 use std::{io::Cursor, path::Path};
 
 use anyhow::{Context as _, bail};
-use sha2::{Digest as _, Sha256};
 use yaml_serde::Value as YamlValue;
 
 use super::*;
-use crate::adapters::security::constant_time_eq;
 use crate::control_discovery::read_identifier;
 use nazo_operator_protocol::ControlOperationPayload;
-
-const OCI_IMAGE_DIGEST_ENVIRONMENT: &str = "NAZOAUTH_OPERATOR_OCI_IMAGE_DIGEST";
-
-/// J1: the operation must name exactly this executing binary's build.
-///
-/// The frozen contract expresses build identity as
-/// [`nazo_operator_protocol::ControlBuildIdentity`] `{product, version,
-/// commit}`; this runtime maps it onto the same build environment as the
-/// runtime build identity: `product` is the fixed workspace product name
-/// (`CONTROL_DISCOVERY_PRODUCT`), `version` comes from
-/// `NAZOAUTH_BUILD_RELEASE`, and `commit` from `NAZOAUTH_BUILD_REVISION`.
-/// ctl must construct `target.embedded` from exactly these values (see the
-/// E04 report's ctl-contract notes).
-pub(super) fn validate_embedded_target_identity(
-    target: &nazo_operator_protocol::ControlTarget,
-) -> anyhow::Result<()> {
-    let executable = env::current_exe()
-        .context("failed to resolve the executing binary for artifact identity validation")?;
-    let oci_image_digest = match target {
-        nazo_operator_protocol::ControlTarget::OciImage { .. } => Some(
-            env::var(OCI_IMAGE_DIGEST_ENVIRONMENT)
-                .context("operator OCI image digest authority is unavailable")?,
-        ),
-        nazo_operator_protocol::ControlTarget::HostBinary { .. } => None,
-    };
-    validate_embedded_target_identity_at(target, &executable, oci_image_digest.as_deref())
-}
-
-pub(super) fn validate_embedded_target_identity_at(
-    target: &nazo_operator_protocol::ControlTarget,
-    executable: &Path,
-    oci_image_digest: Option<&str>,
-) -> anyhow::Result<()> {
-    let actual = control_build_identity();
-    if *target.embedded() != actual {
-        bail!("embedded build identity does not match the executing runtime");
-    }
-    match target {
-        nazo_operator_protocol::ControlTarget::HostBinary { sha256, .. } => {
-            let executable = fs::read(executable)
-                .context("failed to measure the executing host binary artifact")?;
-            let actual: String = Sha256::digest(executable)
-                .iter()
-                .map(|byte| format!("{byte:02x}"))
-                .collect();
-            if !constant_time_eq(actual.as_bytes(), sha256.as_bytes()) {
-                bail!("host binary artifact digest does not match the executing runtime");
-            }
-        }
-        nazo_operator_protocol::ControlTarget::OciImage { image_digest, .. } => {
-            let actual =
-                oci_image_digest.context("operator OCI image digest authority is unavailable")?;
-            nazo_operator_protocol::validate_oci_image_digest(actual)
-                .context("operator OCI image digest authority is invalid")?;
-            if !constant_time_eq(actual.as_bytes(), image_digest.as_bytes()) {
-                bail!("OCI image artifact digest does not match the executing runtime");
-            }
-        }
-    }
-    Ok(())
-}
-
-/// This binary's build identity in the frozen contract's shape.
-pub(crate) fn control_build_identity() -> nazo_operator_protocol::ControlBuildIdentity {
-    nazo_operator_protocol::ControlBuildIdentity {
-        product: nazo_operator_protocol::CONTROL_DISCOVERY_PRODUCT.to_owned(),
-        version: option_env!("NAZOAUTH_BUILD_RELEASE")
-            .unwrap_or("development")
-            .to_owned(),
-        commit: option_env!("NAZOAUTH_BUILD_REVISION")
-            .unwrap_or("development")
-            .to_owned(),
-    }
-}
 
 pub(super) fn validate_config_revision(operation: &ControlOperation) -> anyhow::Result<()> {
     let revision_path = configured_path(
@@ -139,8 +60,9 @@ pub(super) fn validate_config_revision_at(
 /// do not need the full server data mount.  The migration task may legitimately
 /// run before the first server start, so the canonical server config is a
 /// bootstrap source for that operation only when both anchors are absent. Once
-/// either anchor exists, all available sources must agree; non-bootstrap
-/// operations also require the operator-state anchor. An explicit
+/// either anchor exists, all available sources must agree. A missing auxiliary
+/// operator-state anchor is rebuilt after admission from the persisted runtime
+/// identity instead of forcing manual bootstrap. An explicit
 /// `NAZOAUTH_OPERATOR_DEPLOYMENT_ID_FILE` always requires that file and is
 /// useful for systemd/container layouts with a separate identity mount.
 pub(super) fn validate_local_operation_identity(
@@ -228,11 +150,6 @@ pub(super) fn validate_local_operation_identity_at(
         bail!("persisted and operator state deployment identities do not match");
     }
     let bootstrap_operation = matches!(operation, ControlOperationPayload::MigrateApply);
-    if state_deployment_id.is_none() && !bootstrap_operation {
-        bail!(
-            "operator state deployment identity is unavailable for a non-bootstrap operator task"
-        );
-    }
     if let Some(state) = state_deployment_id {
         return Ok(state);
     }
@@ -311,17 +228,9 @@ pub(super) fn yaml_mapping_scalar(
     Ok(Some(value.trim().to_owned()).filter(|value| !value.is_empty()))
 }
 
-pub(crate) fn embedded_identity() -> nazo_operator_protocol::EmbeddedIdentity {
-    nazo_operator_protocol::EmbeddedIdentity {
-        release: option_env!("NAZOAUTH_BUILD_RELEASE")
-            .unwrap_or("development")
-            .to_owned(),
-        revision: option_env!("NAZOAUTH_BUILD_REVISION")
-            .unwrap_or("development")
-            .to_owned(),
+pub(crate) fn release_identity() -> nazo_operator_protocol::ReleaseIdentity {
+    nazo_operator_protocol::ReleaseIdentity {
+        release: format!("v{}", env!("CARGO_PKG_VERSION")),
         protocol: nazo_operator_protocol::PROTOCOL_VERSION,
-        build_id: option_env!("NAZOAUTH_BUILD_ID")
-            .unwrap_or("local:development")
-            .to_owned(),
     }
 }

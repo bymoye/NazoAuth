@@ -2450,7 +2450,7 @@ dependencies = [
 [[package]]
 name = "mdoc-rs"
 version = "0.2.0"
-source = "git+https://github.com/nazozero/mdoc-rs?rev=8e3b529ae1be2d9b5c74baa1f7b7e7abcf958020#8e3b529ae1be2d9b5c74baa1f7b7e7abcf958020"
+source = "git+https://github.com/nazozero/mdoc-rs?rev=40e5ac7e1739150870c41544219345c2b6de4c9b#40e5ac7e1739150870c41544219345c2b6de4c9b"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -2549,7 +2549,7 @@ dependencies = [
 
 [[package]]
 name = "nazo-auth"
-version = "0.2.4"
+version = "0.2.9"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -2575,7 +2575,7 @@ dependencies = [
 
 [[package]]
 name = "nazo-digital-credentials"
-version = "0.2.4"
+version = "0.2.9"
 dependencies = [
  "aes-gcm",
  "base64 0.23.1",
@@ -2595,7 +2595,7 @@ dependencies = [
 
 [[package]]
 name = "nazo-http-actix"
-version = "0.2.4"
+version = "0.2.9"
 dependencies = [
  "actix-cors",
  "actix-web",
@@ -2620,7 +2620,7 @@ dependencies = [
 
 [[package]]
 name = "nazo-http-signatures"
-version = "0.2.4"
+version = "0.2.9"
 dependencies = [
  "aws-lc-rs",
  "base64 0.23.1",
@@ -2639,7 +2639,7 @@ dependencies = [
 
 [[package]]
 name = "nazo-identity"
-version = "0.2.4"
+version = "0.2.9"
 dependencies = [
  "argon2",
  "base64 0.23.1",
@@ -2663,7 +2663,7 @@ dependencies = [
 
 [[package]]
 name = "nazo-key-management"
-version = "0.2.4"
+version = "0.2.9"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -2672,6 +2672,7 @@ dependencies = [
  "chrono",
  "der 0.8.1",
  "ed25519-dalek 3.0.0",
+ "fs2",
  "hmac 0.13.0",
  "jsonwebtoken",
  "nazo-auth",
@@ -2695,7 +2696,7 @@ dependencies = [
 
 [[package]]
 name = "nazo-oauth-server"
-version = "0.2.4"
+version = "0.2.9"
 dependencies = [
  "actix-cors",
  "actix-files",
@@ -2735,6 +2736,7 @@ dependencies = [
  "nazo-openid4vci",
  "nazo-openid4vp",
  "nazo-operator-protocol",
+ "nazo-persistence",
  "nazo-postgres",
  "nazo-resource-server",
  "nazo-runtime-modules",
@@ -2770,11 +2772,40 @@ dependencies = [
  "x509-cert 0.3.0",
  "x509-parser",
  "yaml_serde",
+ "zeroize",
+]
+
+[[package]]
+name = "nazo-oauth-server-postgres"
+version = "0.2.9"
+dependencies = [
+ "anyhow",
+ "nazo-auth",
+ "nazo-identity",
+ "nazo-oauth-server",
+ "nazo-openid4vci",
+ "nazo-persistence",
+ "nazo-postgres",
+ "nazo-resource-server",
+ "nazo-scim-events",
+ "uuid",
+]
+
+[[package]]
+name = "nazo-oauth-server-valkey"
+version = "0.2.9"
+dependencies = [
+ "anyhow",
+ "nazo-auth",
+ "nazo-identity",
+ "nazo-oauth-server",
+ "nazo-resource-server",
+ "nazo-valkey",
 ]
 
 [[package]]
 name = "nazo-openid4vc-http-actix"
-version = "0.2.4"
+version = "0.2.9"
 dependencies = [
  "actix-web",
  "chrono",
@@ -2791,7 +2822,7 @@ dependencies = [
 
 [[package]]
 name = "nazo-openid4vci"
-version = "0.2.4"
+version = "0.2.9"
 dependencies = [
  "blake3",
  "chrono",
@@ -2806,7 +2837,7 @@ dependencies = [
 
 [[package]]
 name = "nazo-openid4vp"
-version = "0.2.4"
+version = "0.2.9"
 dependencies = [
  "blake3",
  "chrono",
@@ -2823,7 +2854,7 @@ dependencies = [
 
 [[package]]
 name = "nazo-operator-protocol"
-version = "0.2.4"
+version = "0.2.9"
 dependencies = [
  "base64 0.23.1",
  "chrono",
@@ -2838,8 +2869,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "nazo-persistence"
+version = "0.2.9"
+dependencies = [
+ "anyhow",
+ "base64 0.23.1",
+ "chrono",
+ "futures-util",
+ "nazo-auth",
+ "nazo-identity",
+ "nazo-openid4vci",
+ "nazo-openid4vp",
+ "nazo-operator-protocol",
+ "nazo-runtime-modules",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "uuid",
+]
+
+[[package]]
 name = "nazo-postgres"
-version = "0.2.4"
+version = "0.2.9"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -2858,6 +2909,7 @@ dependencies = [
  "nazo-openid4vci",
  "nazo-openid4vp",
  "nazo-operator-protocol",
+ "nazo-persistence",
  "nazo-resource-server",
  "nazo-runtime-modules",
  "nazo-scim-events",
@@ -2877,7 +2929,7 @@ dependencies = [
 
 [[package]]
 name = "nazo-resource-server"
-version = "0.2.4"
+version = "0.2.9"
 dependencies = [
  "aws-lc-rs",
  "base64 0.23.1",
@@ -2896,7 +2948,7 @@ dependencies = [
 
 [[package]]
 name = "nazo-runtime-modules"
-version = "0.2.4"
+version = "0.2.9"
 dependencies = [
  "arc-swap",
  "futures-util",
@@ -2907,7 +2959,7 @@ dependencies = [
 
 [[package]]
 name = "nazo-scim-events"
-version = "0.2.4"
+version = "0.2.9"
 dependencies = [
  "chrono",
  "serde",
@@ -2919,7 +2971,7 @@ dependencies = [
 
 [[package]]
 name = "nazo-valkey"
-version = "0.2.4"
+version = "0.2.9"
 dependencies = [
  "blake3",
  "chrono",
@@ -2932,7 +2984,27 @@ dependencies = [
  "serde_json",
  "thiserror",
  "tokio",
- "url",
+ "uuid",
+]
+
+[[package]]
+name = "nazoauth"
+version = "0.2.9"
+dependencies = [
+ "anyhow",
+ "base64 0.23.1",
+ "chrono",
+ "diesel",
+ "diesel-async",
+ "ed25519-dalek 3.0.0",
+ "nazo-identity",
+ "nazo-oauth-server",
+ "nazo-oauth-server-postgres",
+ "nazo-oauth-server-valkey",
+ "nazo-operator-protocol",
+ "nazo-postgres",
+ "rand 0.10.2",
+ "tokio",
  "uuid",
 ]
 

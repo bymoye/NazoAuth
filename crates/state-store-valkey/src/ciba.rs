@@ -1,6 +1,6 @@
 use nazo_auth::{
     CibaAtomicResult, CibaPingNotificationStatus, CibaRequestState, CibaStatePortError,
-    CibaStateStorePort, CibaStoredRequest,
+    CibaStateStorePort, CibaStateVersion, CibaStoredRequest,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -166,17 +166,9 @@ pub enum AtomicResult {
     DeadlineElapsed,
 }
 
-#[derive(Clone, Debug)]
-pub struct StoredCibaRequest {
-    value: CibaRequestState,
-    raw: String,
-    deadline: i64,
-}
-impl StoredCibaRequest {
-    pub fn value(&self) -> &CibaRequestState {
-        &self.value
-    }
-}
+/// Backwards-compatible name for the CIBA CAS token now owned by the core
+/// state-store contract.
+pub type StoredCibaRequest = CibaStateVersion;
 
 #[derive(Clone, Debug)]
 pub struct CibaStore {
@@ -240,7 +232,10 @@ impl CibaStore {
         parse_atomic(&reply)
     }
 
-    pub async fn load(&self, auth_req_id: &str) -> Result<Option<StoredCibaRequest>, Error> {
+    pub async fn load(
+        &self,
+        auth_req_id: &str,
+    ) -> Result<Option<CibaStoredRequest<CibaStateVersion>>, Error> {
         let reply = command::eval_string(
             &self.connection,
             SNAPSHOT_SCRIPT,
@@ -267,11 +262,10 @@ impl CibaStore {
                 "CIBA retention deadline disagrees with EXPIRETIME",
             ));
         }
-        Ok(Some(StoredCibaRequest {
+        Ok(Some(CibaStoredRequest::new(
             value,
-            raw,
-            deadline,
-        }))
+            CibaStateVersion::new(raw, deadline),
+        )))
     }
 
     pub async fn replace(
@@ -291,7 +285,7 @@ impl CibaStore {
         replacement: &CibaRequestState,
         authorization_deadline: Option<i64>,
     ) -> Result<AtomicResult, Error> {
-        if replacement.retention_expires_at != expected.deadline {
+        if replacement.retention_expires_at != expected.retention_expires_at() {
             return Err(Error::protocol(
                 "CIBA replacement changed retention deadline",
             ));
@@ -309,9 +303,9 @@ impl CibaStore {
             COMPARE_SET_DEADLINE_SCRIPT,
             vec![keys::ciba(auth_req_id), keys::ciba_ping_queue()],
             vec![
-                expected.raw.clone(),
+                expected.comparison_token().to_owned(),
                 raw,
-                expected.deadline.to_string(),
+                expected.retention_expires_at().to_string(),
                 auth_req_id_hash,
                 due_at,
                 authorization_deadline.map_or_else(String::new, |value| value.to_string()),
@@ -341,8 +335,8 @@ impl CibaStore {
             COMPARE_DELETE_DEADLINE_SCRIPT,
             vec![keys::ciba(auth_req_id), keys::ciba_ping_queue()],
             vec![
-                expected.raw.clone(),
-                expected.deadline.to_string(),
+                expected.comparison_token().to_owned(),
+                expected.retention_expires_at().to_string(),
                 keys::ciba_hash(auth_req_id),
                 authorization_deadline.map_or_else(String::new, |value| value.to_string()),
             ],
@@ -419,20 +413,13 @@ pub enum CibaPingFinishOutcome {
 }
 
 impl CibaStateStorePort for CibaStore {
-    type Version = StoredCibaRequest;
+    type Version = CibaStateVersion;
 
     fn load<'a>(
         &'a self,
         auth_req_id: &'a str,
     ) -> nazo_auth::CibaStateFuture<'a, Option<CibaStoredRequest<Self::Version>>> {
-        Box::pin(async move {
-            CibaStore::load(self, auth_req_id)
-                .await
-                .map_err(port_error)
-                .map(|stored| {
-                    stored.map(|version| CibaStoredRequest::new(version.value().clone(), version))
-                })
-        })
+        Box::pin(async move { CibaStore::load(self, auth_req_id).await.map_err(port_error) })
     }
 
     fn create<'a>(

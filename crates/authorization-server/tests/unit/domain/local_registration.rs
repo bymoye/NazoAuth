@@ -1,11 +1,20 @@
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::Duration,
+};
 
 use actix_web::web::Data;
 use fred::{
-    interfaces::{ClientLike, KeysInterface},
+    interfaces::ClientLike,
     prelude::{
         Builder as ValkeyBuilder, Config as ValkeyConfig, ConnectionConfig, PerformanceConfig,
     },
+};
+use nazo_auth::{
+    RequestRateLimitBucket, RequestRateLimitError, RequestRateLimitFuture, RequestRateLimitPort,
 };
 use nazo_http_actix::{
     AuthenticationRateLimit, AuthenticationRateLimitError, LocalRegistrationOperations,
@@ -32,6 +41,46 @@ use crate::{
 
 struct LiveFixture {
     state: Data<TestInfrastructure>,
+}
+
+struct FakeRateLimiter {
+    count: AtomicU64,
+    unavailable: bool,
+}
+
+impl FakeRateLimiter {
+    fn counting() -> Self {
+        Self {
+            count: AtomicU64::new(0),
+            unavailable: false,
+        }
+    }
+
+    fn unavailable() -> Self {
+        Self {
+            count: AtomicU64::new(0),
+            unavailable: true,
+        }
+    }
+}
+
+impl RequestRateLimitPort for FakeRateLimiter {
+    fn increment<'a>(
+        &'a self,
+        bucket: RequestRateLimitBucket,
+        _subject: &'a str,
+        window_seconds: u64,
+    ) -> RequestRateLimitFuture<'a> {
+        Box::pin(async move {
+            assert_eq!(bucket, RequestRateLimitBucket::Authentication);
+            assert!(window_seconds > 0);
+            if self.unavailable {
+                Err(RequestRateLimitError)
+            } else {
+                Ok(self.count.fetch_add(1, Ordering::SeqCst) + 1)
+            }
+        })
+    }
 }
 
 impl LiveFixture {
@@ -71,8 +120,7 @@ impl LiveFixture {
     fn operations(
         &self,
     ) -> ServerLocalRegistrationOperations<
-        nazo_postgres::UserRepository,
-        nazo_valkey::AuthenticationStore,
+        Arc<dyn EmailVerificationStorePort>,
         crate::bootstrap::RegistrationSecretHasher,
         crate::adapters::email::SmtpVerificationEmailDelivery,
     > {
@@ -176,22 +224,9 @@ async fn concurrent_registration_consumes_once_and_keeps_valkey_key_contract() {
 }
 
 #[actix_web::test]
-async fn unavailable_valkey_rate_limit_fails_closed() {
-    let mut builder = ValkeyBuilder::from_config(
-        ValkeyConfig::from_url("redis://127.0.0.1:1").expect("URL should parse"),
-    );
-    builder.with_performance_config(|config: &mut PerformanceConfig| {
-        config.default_command_timeout = Duration::from_millis(100);
-    });
-    builder.with_connection_config(|config: &mut ConnectionConfig| {
-        config.connection_timeout = Duration::from_millis(100);
-        config.internal_command_timeout = Duration::from_millis(100);
-        config.max_command_attempts = 1;
-    });
-    let connection =
-        nazo_valkey::test_support::scoped_connection(builder.build().expect("client should build"));
+async fn unavailable_rate_limit_dependency_fails_closed() {
     let limiter =
-        ServerAuthenticationRateLimit::new(nazo_valkey::RateLimitStore::new(&connection), 60, 10);
+        ServerAuthenticationRateLimit::new(Arc::new(FakeRateLimiter::unavailable()), 60, 10);
     assert_eq!(
         limiter.enforce("203.0.113.77").await,
         Err(AuthenticationRateLimitError::Unavailable)
@@ -199,17 +234,10 @@ async fn unavailable_valkey_rate_limit_fails_closed() {
 }
 
 #[actix_web::test]
-async fn live_rate_limit_is_atomic_and_preserves_key_and_ttl_contract() {
-    let Some(fixture) = LiveFixture::new().await else {
-        return;
-    };
-    let subject = format!("203.0.113.{}", Uuid::now_v7().as_bytes()[15]);
-    let limiter = ServerAuthenticationRateLimit::new(
-        nazo_valkey::RateLimitStore::new(&fixture.state.valkey_connection()),
-        60,
-        1,
-    );
-    let (first, second) = tokio::join!(limiter.enforce(&subject), limiter.enforce(&subject));
+async fn rate_limit_uses_post_increment_count_and_preserves_threshold() {
+    let subject = "203.0.113.77";
+    let limiter = ServerAuthenticationRateLimit::new(Arc::new(FakeRateLimiter::counting()), 60, 1);
+    let (first, second) = tokio::join!(limiter.enforce(subject), limiter.enforce(subject));
     let outcomes = [first, second];
     assert_eq!(outcomes.iter().filter(|result| result.is_ok()).count(), 1);
     assert_eq!(
@@ -224,16 +252,4 @@ async fn live_rate_limit_is_atomic_and_preserves_key_and_ttl_contract() {
             .count(),
         1
     );
-
-    let key = format!("oauth:rate:auth:{}", blake3_hex(subject.trim()));
-    let storage_key = nazo_valkey::test_support::state_storage_key(&key);
-    assert_eq!(
-        valkey_get(&fixture.state.valkey, &storage_key)
-            .await
-            .unwrap()
-            .as_deref(),
-        Some("2")
-    );
-    let ttl: i64 = fixture.state.valkey.ttl(&storage_key).await.unwrap();
-    assert!((1..=60).contains(&ttl), "unexpected rate-limit TTL: {ttl}");
 }

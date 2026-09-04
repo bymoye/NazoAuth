@@ -106,9 +106,9 @@ fn admin_grant_dependencies(
 ) {
     let session = &state.settings.session;
     (
-        Data::new(AdminSessionHandles::new(
-            nazo_valkey::SessionStore::new(&state.valkey_connection()),
-            nazo_postgres::UserRepository::new(state.diesel_db.clone()),
+        Data::new(AdminSessionHandles::from_port(
+            Arc::new(nazo_valkey::SessionStore::new(&state.valkey_connection())),
+            Arc::new(nazo_postgres::UserRepository::new(state.diesel_db.clone())),
             state.settings.tenant.context.tenant_id,
             SessionHttpConfig::new(
                 &session.session_cookie_name,

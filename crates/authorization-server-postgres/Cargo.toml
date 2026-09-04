@@ -1,0 +1,19 @@
+[package]
+name = "nazo-oauth-server-postgres"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+anyhow.workspace = true
+nazo-auth.workspace = true
+nazo-identity.workspace = true
+nazo-oauth-server.workspace = true
+nazo-openid4vci.workspace = true
+nazo-persistence.workspace = true
+nazo-postgres.workspace = true
+nazo-resource-server.workspace = true
+nazo-scim-events.workspace = true
+uuid.workspace = true

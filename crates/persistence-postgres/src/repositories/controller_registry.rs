@@ -47,6 +47,8 @@ use diesel_async::{AsyncConnection as _, AsyncPgConnection, RunQueryDsl};
 use sha2::{Digest as _, Sha256};
 use uuid::Uuid;
 
+use nazo_persistence::control_plane as contract;
+
 use crate::{DbPool, get_conn};
 
 use super::recovery_root::{
@@ -63,13 +65,13 @@ const ROOT_ALREADY_PRESENT: &str =
 /// Fixed controller key lifetime in seconds: exactly 30 days (04 §2).  Not a
 /// configuration item, never derived from a natural month, never renewed in
 /// place.
-pub const CONTROLLER_KEY_TTL_SECONDS: i64 = 2_592_000;
+pub const CONTROLLER_KEY_TTL_SECONDS: i64 = contract::CONTROLLER_KEY_TTL_SECONDS;
 
 /// Maximum number of concurrently non-revoked controller slots per deployment.
-pub const MAX_ACTIVE_CONTROLLER_SLOTS: usize = 3;
+pub const MAX_ACTIVE_CONTROLLER_SLOTS: usize = contract::MAX_ACTIVE_CONTROLLER_SLOTS;
 
 /// Fresh-2FA approval lifetime in seconds: a fixed 10-minute ceiling (04 §3).
-pub const IDENTITY_APPROVAL_TTL_SECONDS: i64 = 600;
+pub const IDENTITY_APPROVAL_TTL_SECONDS: i64 = contract::IDENTITY_APPROVAL_TTL_SECONDS;
 
 /// Advisory-lock seed namespace for the per-deployment identity lock. Slot
 /// mutations AND Recovery Root/challenge mutations share this single lock so
@@ -971,8 +973,7 @@ impl ControllerRegistryRepository {
 
     /// Single-kid admission lookup used to verify one presented envelope key.
     /// Returns `None` for unknown, revoked, and expired keys alike; callers map
-    /// the outcome onto their closed error taxonomy
-    /// (`CONTROLLER_KEY_UNTRUSTED` / `CONTROLLER_KEY_EXPIRED`).
+    /// the outcome onto the single controller-key authorization rejection.
     pub async fn admitted_controller_by_kid(
         &self,
         deployment_id: &str,
@@ -1206,6 +1207,306 @@ impl ControllerRegistryRepository {
                     .map_err(CommitWithApprovalError::Mutation)
             })
             .await
+    }
+}
+
+fn contract_action(action: contract::ControllerIdentityAction) -> ControllerIdentityAction {
+    match action {
+        contract::ControllerIdentityAction::Bind => ControllerIdentityAction::Bind,
+        contract::ControllerIdentityAction::Add => ControllerIdentityAction::Add,
+        contract::ControllerIdentityAction::Rotate => ControllerIdentityAction::Rotate,
+        contract::ControllerIdentityAction::Revoke => ControllerIdentityAction::Revoke,
+        contract::ControllerIdentityAction::RecoveryRootRotate => {
+            ControllerIdentityAction::RecoveryRootRotate
+        }
+    }
+}
+
+fn contract_status(status: ControllerSlotStatus) -> contract::ControllerSlotStatus {
+    match status {
+        ControllerSlotStatus::Active => contract::ControllerSlotStatus::Active,
+        ControllerSlotStatus::Revoked => contract::ControllerSlotStatus::Revoked,
+    }
+}
+
+pub(crate) fn contract_slot(slot: StoredControllerSlot) -> contract::StoredControllerSlot {
+    contract::StoredControllerSlot {
+        deployment_id: slot.deployment_id,
+        controller_id: slot.controller_id,
+        label: slot.label,
+        kid: slot.kid,
+        public_key: slot.public_key,
+        slot_index: slot.slot_index,
+        issued_at: slot.issued_at,
+        expires_at: slot.expires_at,
+        last_used_at: slot.last_used_at,
+        status: contract_status(slot.status),
+        revoked_at: slot.revoked_at,
+        created_at: slot.created_at,
+        updated_at: slot.updated_at,
+    }
+}
+
+fn contract_summary(summary: ControllerSlotSummary) -> contract::ControllerSlotSummary {
+    contract::ControllerSlotSummary {
+        controller_id: summary.controller_id,
+        label: summary.label,
+        kid: summary.kid,
+        slot_index: summary.slot_index,
+        issued_at: summary.issued_at,
+        expires_at: summary.expires_at,
+        status: contract_status(summary.status),
+    }
+}
+
+fn contract_admitted(controller: AdmittedController) -> contract::AdmittedController {
+    contract::AdmittedController {
+        controller_id: controller.controller_id,
+        kid: controller.kid,
+        public_key: controller.public_key,
+        expires_at: controller.expires_at,
+    }
+}
+
+fn contract_registry_error(error: ControllerRegistryError) -> contract::ControllerRegistryError {
+    match error {
+        ControllerRegistryError::SlotLimit(summaries) => {
+            contract::ControllerRegistryError::SlotLimit(
+                summaries.into_iter().map(contract_summary).collect(),
+            )
+        }
+        ControllerRegistryError::UnknownController => {
+            contract::ControllerRegistryError::UnknownController
+        }
+        ControllerRegistryError::AlreadyRevoked => {
+            contract::ControllerRegistryError::AlreadyRevoked
+        }
+        ControllerRegistryError::DuplicateKid => contract::ControllerRegistryError::DuplicateKid,
+        ControllerRegistryError::InvalidIdentity(reason) => {
+            contract::ControllerRegistryError::InvalidIdentity(reason)
+        }
+        ControllerRegistryError::Transport(error) => {
+            contract::ControllerRegistryError::Transport(error)
+        }
+    }
+}
+
+pub(crate) fn contract_approval_error(
+    error: IdentityApprovalError,
+) -> contract::IdentityApprovalError {
+    match error {
+        IdentityApprovalError::UnknownToken => contract::IdentityApprovalError::UnknownToken,
+        IdentityApprovalError::Replayed => contract::IdentityApprovalError::Replayed,
+        IdentityApprovalError::Expired => contract::IdentityApprovalError::Expired,
+        IdentityApprovalError::ActionMismatch => contract::IdentityApprovalError::ActionMismatch,
+        IdentityApprovalError::Transport(error) => {
+            contract::IdentityApprovalError::Transport(error)
+        }
+    }
+}
+
+fn contract_commit_error(error: CommitWithApprovalError) -> contract::CommitWithApprovalError {
+    match error {
+        CommitWithApprovalError::Approval(error) => {
+            contract::CommitWithApprovalError::Approval(contract_approval_error(error))
+        }
+        CommitWithApprovalError::Mutation(error) => {
+            contract::CommitWithApprovalError::Mutation(contract_registry_error(error))
+        }
+        CommitWithApprovalError::Transport(error) => {
+            contract::CommitWithApprovalError::Transport(error)
+        }
+    }
+}
+
+pub(crate) fn contract_approval(
+    approval: IssuedIdentityApproval,
+) -> contract::IssuedIdentityApproval {
+    contract::IssuedIdentityApproval {
+        approval_id: approval.approval_id,
+        action: match approval.action {
+            ControllerIdentityAction::Bind => contract::ControllerIdentityAction::Bind,
+            ControllerIdentityAction::Add => contract::ControllerIdentityAction::Add,
+            ControllerIdentityAction::Rotate => contract::ControllerIdentityAction::Rotate,
+            ControllerIdentityAction::Revoke => contract::ControllerIdentityAction::Revoke,
+            ControllerIdentityAction::RecoveryRootRotate => {
+                contract::ControllerIdentityAction::RecoveryRootRotate
+            }
+        },
+        action_sha256: approval.action_sha256,
+        token: approval.token,
+        expires_at: approval.expires_at,
+    }
+}
+
+impl contract::ControllerRegistryPort for ControllerRegistryRepository {
+    fn issue_identity_approval<'a>(
+        &'a self,
+        deployment_id: &'a str,
+        action: contract::ControllerIdentityAction,
+        action_sha256: &'a str,
+        admin_user_id: Uuid,
+        now: DateTime<Utc>,
+    ) -> futures_util::future::BoxFuture<
+        'a,
+        Result<contract::IssuedIdentityApproval, contract::IdentityApprovalError>,
+    > {
+        Box::pin(async move {
+            ControllerRegistryRepository::issue_identity_approval(
+                self,
+                deployment_id,
+                contract_action(action),
+                action_sha256,
+                admin_user_id,
+                now,
+            )
+            .await
+            .map(contract_approval)
+            .map_err(contract_approval_error)
+        })
+    }
+
+    fn commit_slot_creation<'a>(
+        &'a self,
+        approval_token: &'a str,
+        expected_action: contract::ControllerIdentityAction,
+        expected_action_sha256: &'a str,
+        slot: contract::NewControllerSlot,
+        initial_root: Option<contract::NewRecoveryRoot>,
+        now: DateTime<Utc>,
+    ) -> futures_util::future::BoxFuture<
+        'a,
+        Result<contract::StoredControllerSlot, contract::CommitWithApprovalError>,
+    > {
+        Box::pin(async move {
+            ControllerRegistryRepository::commit_slot_creation(
+                self,
+                approval_token,
+                contract_action(expected_action),
+                expected_action_sha256,
+                NewControllerSlot {
+                    deployment_id: slot.deployment_id,
+                    label: slot.label,
+                    kid: slot.kid,
+                    public_key: slot.public_key,
+                },
+                initial_root.map(|root| NewRecoveryRoot {
+                    deployment_id: root.deployment_id,
+                    kid: root.kid,
+                    public_key: root.public_key,
+                }),
+                now,
+            )
+            .await
+            .map(contract_slot)
+            .map_err(contract_commit_error)
+        })
+    }
+
+    fn commit_slot_rotation<'a>(
+        &'a self,
+        approval_token: &'a str,
+        expected_deployment_id: &'a str,
+        expected_action_sha256: &'a str,
+        rotation: contract::RotateControllerKey,
+        now: DateTime<Utc>,
+    ) -> futures_util::future::BoxFuture<
+        'a,
+        Result<contract::StoredControllerSlot, contract::CommitWithApprovalError>,
+    > {
+        Box::pin(async move {
+            ControllerRegistryRepository::commit_slot_rotation(
+                self,
+                approval_token,
+                expected_deployment_id,
+                expected_action_sha256,
+                RotateControllerKey {
+                    deployment_id: rotation.deployment_id,
+                    controller_id: rotation.controller_id,
+                    label: rotation.label,
+                    kid: rotation.kid,
+                    public_key: rotation.public_key,
+                },
+                now,
+            )
+            .await
+            .map(contract_slot)
+            .map_err(contract_commit_error)
+        })
+    }
+
+    fn commit_slot_revocation<'a>(
+        &'a self,
+        approval_token: &'a str,
+        expected_deployment_id: &'a str,
+        expected_action_sha256: &'a str,
+        controller_id: &'a str,
+        now: DateTime<Utc>,
+    ) -> futures_util::future::BoxFuture<
+        'a,
+        Result<contract::StoredControllerSlot, contract::CommitWithApprovalError>,
+    > {
+        Box::pin(async move {
+            ControllerRegistryRepository::commit_slot_revocation(
+                self,
+                approval_token,
+                expected_deployment_id,
+                expected_action_sha256,
+                controller_id,
+                now,
+            )
+            .await
+            .map(contract_slot)
+            .map_err(contract_commit_error)
+        })
+    }
+
+    fn list_slots<'a>(
+        &'a self,
+        deployment_id: &'a str,
+    ) -> futures_util::future::BoxFuture<
+        'a,
+        Result<Vec<contract::StoredControllerSlot>, contract::ControllerRegistryError>,
+    > {
+        Box::pin(async move {
+            ControllerRegistryRepository::list_slots(self, deployment_id)
+                .await
+                .map(|slots| slots.into_iter().map(contract_slot).collect())
+                .map_err(contract_registry_error)
+        })
+    }
+
+    fn admitted_controllers<'a>(
+        &'a self,
+        deployment_id: &'a str,
+        now: DateTime<Utc>,
+    ) -> futures_util::future::BoxFuture<
+        'a,
+        Result<Vec<contract::AdmittedController>, contract::ControllerRegistryError>,
+    > {
+        Box::pin(async move {
+            ControllerRegistryRepository::admitted_controllers(self, deployment_id, now)
+                .await
+                .map(|items| items.into_iter().map(contract_admitted).collect())
+                .map_err(contract_registry_error)
+        })
+    }
+
+    fn admitted_controller_by_kid<'a>(
+        &'a self,
+        deployment_id: &'a str,
+        kid: &'a str,
+        now: DateTime<Utc>,
+    ) -> futures_util::future::BoxFuture<
+        'a,
+        Result<Option<contract::AdmittedController>, contract::ControllerRegistryError>,
+    > {
+        Box::pin(async move {
+            ControllerRegistryRepository::admitted_controller_by_kid(self, deployment_id, kid, now)
+                .await
+                .map(|item| item.map(contract_admitted))
+                .map_err(contract_registry_error)
+        })
     }
 }
 

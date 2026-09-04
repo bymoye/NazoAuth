@@ -1,4 +1,5 @@
 use super::*;
+use std::sync::Arc;
 
 pub(crate) struct AuthorizationTestFixture {
     service: ServerAuthorizationService,
@@ -53,13 +54,13 @@ impl AuthorizationTestFixture {
         Self::new(
             ServerAuthorizationService::new(
                 nazo_postgres::AuthorizationFlowRepository::new(database.clone(), self.tenant_id),
-                nazo_valkey::AuthorizationStateAdapter::new(connection),
+                std::sync::Arc::new(nazo_valkey::AuthorizationStateAdapter::new(connection)),
                 keyset,
             ),
             self.config.clone(),
-            AdminSessionHandles::new(
-                nazo_valkey::SessionStore::new(connection),
-                nazo_postgres::UserRepository::new(database),
+            AdminSessionHandles::from_port(
+                Arc::new(nazo_valkey::SessionStore::new(connection)),
+                Arc::new(nazo_postgres::UserRepository::new(database)),
                 nazo_identity::TenantId::new(self.tenant_id).expect("fixture tenant id"),
                 self.sessions.http_config().clone(),
             ),
@@ -85,13 +86,13 @@ impl TestAuthorizationDependencies {
                         state.diesel_db.clone(),
                         state.settings.tenant.context.tenant_id.as_uuid(),
                     ),
-                    nazo_valkey::AuthorizationStateAdapter::new(&connection),
+                    std::sync::Arc::new(nazo_valkey::AuthorizationStateAdapter::new(&connection)),
                     state.keyset.clone(),
                 ),
                 AuthorizationHttpConfig::from(state.settings.as_ref()),
-                AdminSessionHandles::new(
-                    nazo_valkey::SessionStore::new(&connection),
-                    nazo_postgres::UserRepository::new(state.diesel_db.clone()),
+                AdminSessionHandles::from_port(
+                    Arc::new(nazo_valkey::SessionStore::new(&connection)),
+                    Arc::new(nazo_postgres::UserRepository::new(state.diesel_db.clone())),
                     state.settings.tenant.context.tenant_id,
                     crate::http::sessions::SessionHttpConfig::new(
                         &session.session_cookie_name,

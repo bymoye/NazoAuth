@@ -53,7 +53,7 @@ impl CredentialDatasetAdminService {
             .map_err(|_| vci_error(400, "invalid_request", "Credential subject is invalid."))?;
         if !self
             .users
-            .is_active_by_tenant_id(tenant, subject)
+            .is_active(tenant, subject)
             .await
             .map_err(|_| vci_error(503, "server_error", "Credential subject lookup failed."))?
         {
@@ -65,12 +65,12 @@ impl CredentialDatasetAdminService {
         }
         let stored = self
             .datasets
-            .upsert_managed_dataset(nazo_postgres::ManagedCredentialDatasetWrite {
+            .upsert_managed_dataset(nazo_persistence::ManagedCredentialDatasetWrite {
                 tenant_id: self.tenant_id,
                 actor_user_id,
                 subject_id,
-                credential_configuration_id: &configuration_id,
-                claims: &request.claims,
+                credential_configuration_id: configuration_id.clone(),
+                claims: request.claims.clone(),
                 valid_from: request.valid_from,
                 valid_until: request.valid_until,
             })

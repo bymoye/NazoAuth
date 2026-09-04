@@ -1,6 +1,6 @@
 //! E04/E05 unit coverage for the reworked one-shot operator entry:
-//! presentation strictness, Controller Registry admission classification,
-//! J1 target identity, config_revision fencing, deployment anchors, the E05
+//! presentation strictness, Controller Registry admission, config_revision
+//! fencing, deployment anchors, the E05
 //! resume-ownership table, and dispatch precondition mapping.  Database-backed
 //! end-to-end behavior (including crash/failpoint evidence) lives in
 //! `tests/operator_task_process.rs`.
@@ -9,8 +9,8 @@ use std::{fs, path::PathBuf};
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use nazo_operator_protocol::{
-    CONTROL_OPERATION_SCHEMA, ControlBuildIdentity, ControlOperation, ControlOperationPayload,
-    ControlTarget, MAX_CONTROL_OPERATION_BYTES,
+    CONTROL_OPERATION_SCHEMA, ControlOperation, ControlOperationPayload,
+    MAX_CONTROL_OPERATION_BYTES,
 };
 use sha2::{Digest as _, Sha256};
 
@@ -25,14 +25,6 @@ fn temporary_directory() -> PathBuf {
     path
 }
 
-fn build_identity() -> ControlBuildIdentity {
-    ControlBuildIdentity {
-        product: "nazauth".to_owned(),
-        version: "v9.9.9-test".to_owned(),
-        commit: "c".repeat(40),
-    }
-}
-
 fn operation(operation_id: &str) -> ControlOperation {
     ControlOperation {
         schema: CONTROL_OPERATION_SCHEMA,
@@ -40,10 +32,6 @@ fn operation(operation_id: &str) -> ControlOperation {
         // Unpadded base64url SHA-256 shape: exactly 43 characters.
         kid: "kid-controller-test-key-0000000000000000000".to_owned(),
         deployment_id: "deployment-test".to_owned(),
-        target: ControlTarget::HostBinary {
-            sha256: "a".repeat(64),
-            embedded: build_identity(),
-        },
         config_revision: "config-revision-1".to_owned(),
         operation: ControlOperationPayload::MigrateApply,
     }
@@ -73,7 +61,7 @@ fn presentation_rejects_malformed_requests_before_any_authority() {
 
     // Wrong schema tag is a protocol change, never a fallback.
     let mut schema = serde_json::to_value(&valid).unwrap();
-    schema["schema"] = serde_json::json!(2);
+    schema["schema"] = serde_json::json!(CONTROL_OPERATION_SCHEMA + 1);
     assert!(admission::present(&presented(&schema.to_string())).is_err());
 
     // Unknown closed-operation name and unknown typed-payload members are
@@ -119,9 +107,9 @@ fn presentation_rejects_malformed_requests_before_any_authority() {
 
     // Oversized payloads hit the size gate regardless of validity.
     let giant = format!(
-        "{{\"schema\":1,\"operation_id\":\"019c8ca2-30a6-7000-8000-00000000a002\",\"kid\":\"{}\",\"deployment_id\":\"d\",\"target\":{{\"kind\":\"host-binary\",\"sha256\":\"{}\",\"embedded\":{{\"product\":\"p\",\"version\":\"v\",\"commit\":\"c\"}}}},\"config_revision\":\"r\",\"operation\":{{\"name\":\"keys-validate\",\"filler\":\"{}\"}}}}",
+        "{{\"schema\":{},\"operation_id\":\"019c8ca2-30a6-7000-8000-00000000a002\",\"kid\":\"{}\",\"deployment_id\":\"d\",\"config_revision\":\"r\",\"operation\":{{\"name\":\"keys-validate\",\"filler\":\"{}\"}}}}",
+        CONTROL_OPERATION_SCHEMA,
         "k".repeat(43),
-        "a".repeat(64),
         "x".repeat(MAX_CONTROL_OPERATION_BYTES),
     );
     let oversized = presented(&giant);
@@ -131,51 +119,6 @@ fn presentation_rejects_malformed_requests_before_any_authority() {
     // Segment shape and base64url strictness.
     assert!(admission::present("a.b").is_err());
     assert!(admission::present("e30.!!!.c2ln").is_err());
-}
-
-#[test]
-fn unadmitted_controller_keys_are_classified_from_registry_state() {
-    use nazo_postgres::StoredControllerSlot;
-
-    // Unknown kid for this deployment.
-    assert_eq!(
-        admission::classify_unadmitted_key(None),
-        admission::KeyAdmissionFailure::Untrusted
-    );
-
-    // A terminally revoked slot can never admit again; it stays distinct
-    // from expiry in the rejection taxonomy but refuses identically.
-    let slot = StoredControllerSlot {
-        deployment_id: "deployment-test".to_owned(),
-        controller_id: "019c8ca2-30a6-7cc9-9f2a-4f5a6b7c8d90".to_owned(),
-        label: "primary".to_owned(),
-        kid: "kid-controller-test-key-0000000000000000000".to_owned(),
-        public_key: vec![1; 32],
-        slot_index: 0,
-        issued_at: chrono::Utc::now() - chrono::Duration::days(40),
-        expires_at: chrono::Utc::now() - chrono::Duration::days(10),
-        last_used_at: None,
-        status: nazo_postgres::ControllerSlotStatus::Revoked,
-        revoked_at: Some(chrono::Utc::now() - chrono::Duration::days(1)),
-        created_at: chrono::Utc::now(),
-        updated_at: chrono::Utc::now(),
-    };
-    assert_eq!(
-        admission::classify_unadmitted_key(Some(&slot)),
-        admission::KeyAdmissionFailure::Untrusted
-    );
-
-    // An active slot that failed admission has necessarily aged out of its
-    // fixed server-side window.
-    let expired = StoredControllerSlot {
-        status: nazo_postgres::ControllerSlotStatus::Active,
-        revoked_at: None,
-        ..slot
-    };
-    assert_eq!(
-        admission::classify_unadmitted_key(Some(&expired)),
-        admission::KeyAdmissionFailure::Expired
-    );
 }
 
 #[test]
@@ -260,7 +203,7 @@ fn recovery_authority_conflict_is_terminal_while_unavailable_database_is_retryab
 
 #[test]
 fn tenant_resource_executor_error_taxonomy_is_closed_and_explicit() {
-    use crate::tenant_resource_executor::TenantResourceExecutorError;
+    use nazo_persistence::tenant_resources::TenantResourceExecutorError;
 
     for error in [
         TenantResourceExecutorError::Conflict,
@@ -281,7 +224,7 @@ fn tenant_resource_executor_error_taxonomy_is_closed_and_explicit() {
 
 #[tokio::test]
 async fn tenant_resource_unavailable_does_not_publish_a_terminal_failure() {
-    use crate::tenant_resource_executor::TenantResourceExecutorError;
+    use nazo_persistence::tenant_resources::TenantResourceExecutorError;
 
     let directory = temporary_directory();
     let mut tenant_operation = operation("019c8ca2-30a6-7000-8000-00000000a006");
@@ -404,84 +347,6 @@ fn apply_change_sets_are_digest_bound_to_the_signed_identities() {
 }
 
 #[test]
-fn j1_target_identity_binds_operations_to_this_binary() {
-    let this = identity::control_build_identity();
-    let directory = temporary_directory();
-    let executable = directory.join("nazoauth");
-    fs::write(&executable, b"exact executing binary bytes").unwrap();
-    let executable_sha256: String = Sha256::digest(fs::read(&executable).unwrap())
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect();
-
-    let matching = ControlTarget::HostBinary {
-        sha256: executable_sha256.clone(),
-        embedded: this.clone(),
-    };
-    identity::validate_embedded_target_identity_at(&matching, &executable, None).unwrap();
-
-    let wrong_host_digest = ControlTarget::HostBinary {
-        sha256: "a".repeat(64),
-        embedded: this.clone(),
-    };
-    assert!(
-        identity::validate_embedded_target_identity_at(&wrong_host_digest, &executable, None)
-            .is_err()
-    );
-
-    let image_digest = format!("sha256:{}", "b".repeat(64));
-    let oci_matching = ControlTarget::OciImage {
-        image_digest: image_digest.clone(),
-        embedded: this.clone(),
-    };
-    identity::validate_embedded_target_identity_at(&oci_matching, &executable, Some(&image_digest))
-        .unwrap();
-    assert!(
-        identity::validate_embedded_target_identity_at(&oci_matching, &executable, None).is_err()
-    );
-    assert!(
-        identity::validate_embedded_target_identity_at(
-            &oci_matching,
-            &executable,
-            Some("sha256:not-a-digest"),
-        )
-        .is_err()
-    );
-    assert!(
-        identity::validate_embedded_target_identity_at(
-            &oci_matching,
-            &executable,
-            Some(&format!("sha256:{}", "c".repeat(64))),
-        )
-        .is_err()
-    );
-
-    let wrong_version = ControlTarget::HostBinary {
-        sha256: executable_sha256.clone(),
-        embedded: ControlBuildIdentity {
-            version: "other-release".to_owned(),
-            ..this.clone()
-        },
-    };
-    assert!(
-        identity::validate_embedded_target_identity_at(&wrong_version, &executable, None).is_err()
-    );
-
-    let wrong_product = ControlTarget::HostBinary {
-        sha256: executable_sha256,
-        embedded: ControlBuildIdentity {
-            product: "counterfeit".to_owned(),
-            ..this
-        },
-    };
-    assert!(
-        identity::validate_embedded_target_identity_at(&wrong_product, &executable, None).is_err()
-    );
-
-    fs::remove_dir_all(directory).unwrap();
-}
-
-#[test]
 fn config_revision_fencing_against_the_local_marker_is_constant_time() {
     let directory = temporary_directory();
     let marker = directory.join("config-revision");
@@ -524,7 +389,8 @@ fn local_deployment_identity_binds_to_every_available_anchor() {
     let state_directory = directory.join("state");
     fs::create_dir_all(&state_directory).unwrap();
 
-    // Non-bootstrap operations require the operator-state anchor first.
+    // Bootstrap may derive the deployment identity before the operator-state
+    // anchor exists, then persist that auxiliary anchor after admission.
     let bootstrap = ControlOperationPayload::MigrateApply;
     assert!(
         identity::validate_local_operation_identity_at(
@@ -625,16 +491,16 @@ fn local_deployment_identity_rejects_missing_or_conflicting_bootstrap_sources() 
     fs::write(&persisted_identity, b"deployment-test\n").unwrap();
     let state_directory = directory.join("state");
     fs::create_dir_all(&state_directory).unwrap();
-    assert!(
+    assert_eq!(
         identity::validate_local_operation_identity_at(
             &regular,
             &config_path,
             None,
             Some(&state_directory)
         )
-        .unwrap_err()
-        .to_string()
-        .contains("operator state deployment identity is unavailable")
+        .unwrap(),
+        "deployment-test",
+        "the persisted deployment identity is sufficient to rebuild a missing operator-state anchor"
     );
 
     fs::remove_file(&persisted_identity).unwrap();
@@ -762,17 +628,18 @@ async fn dispatch_maps_precondition_failures_to_engine_errors_without_a_database
     };
     // Unsupported signing parameters fail inside the existing engine before
     // any durable state changes.
-    let generated = execution::execute(
+    let generated = execution::execute_inner(
         &ControlOperationPayload::KeysGenerateLocal {
             alg: "unsupported-algorithm".to_owned(),
             purposes: vec!["credential".to_owned()],
         },
         &context,
+        None,
     )
     .await;
     assert!(generated.is_err());
 
-    let external = execution::execute(
+    let external = execution::execute_inner(
         &ControlOperationPayload::KeysRegisterExternal {
             kid: "external-1".to_owned(),
             alg: "ES256".to_owned(),
@@ -780,17 +647,19 @@ async fn dispatch_maps_precondition_failures_to_engine_errors_without_a_database
             public_jwk_sha256: "a".repeat(64),
         },
         &context,
+        None,
     )
     .await;
     assert!(external.is_err());
 
     // The apply delta cannot proceed without its mounted change-set material.
-    let apply = execution::execute(
+    let apply = execution::execute_inner(
         &ControlOperationPayload::TenantResourceApply {
             tenant_id: "019c8ca2-30a6-7cc9-9f2a-4f5a6b7c8d90".to_owned(),
             resources: Vec::new(),
         },
         &context,
+        None,
     )
     .await;
     assert!(apply.is_err());
@@ -798,6 +667,6 @@ async fn dispatch_maps_precondition_failures_to_engine_errors_without_a_database
     // Read-only local keyset dispatches map their typed errors without a
     // database connection; their outcome depends on ambient configuration so
     // only the Ok/Err totality is pinned here.
-    let _ = execution::execute(&ControlOperationPayload::KeysList, &context).await;
-    let _ = execution::execute(&ControlOperationPayload::KeysValidate, &context).await;
+    let _ = execution::execute_inner(&ControlOperationPayload::KeysList, &context, None).await;
+    let _ = execution::execute_inner(&ControlOperationPayload::KeysValidate, &context, None).await;
 }

@@ -6,8 +6,12 @@ members = [
     "crates/openid4vci",
     "crates/openid4vp",
     "crates/openid4vc-http-actix",
+    "crates/persistence",
     "crates/persistence-postgres",
     "crates/authorization-server",
+    "crates/authorization-server-postgres",
+    "crates/authorization-server-valkey",
+    "crates/nazoauth",
     "crates/operator-protocol",
     "crates/http-signatures",
     "crates/http-actix",
@@ -17,12 +21,14 @@ members = [
     "crates/scim-events",
     "crates/state-store-valkey",
 ]
-default-members = ["crates/authorization-server"]
+default-members = [
+    "crates/nazoauth",
+]
 resolver = "3"
 exclude = ["fuzz"]
 
 [workspace.package]
-version = "0.2.4"
+version = "0.2.9"
 edition = "2024"
 license = "AGPL-3.0-or-later"
 repository = "https://github.com/nazozero/NazoAuth"
@@ -66,7 +72,11 @@ nazo-key-management = { version = "0.2.0", path = "crates/key-management" }
 nazo-openid4vci = { version = "0.2.0", path = "crates/openid4vci" }
 nazo-openid4vp = { version = "0.2.0", path = "crates/openid4vp" }
 nazo-openid4vc-http-actix = { version = "0.2.0", path = "crates/openid4vc-http-actix" }
+nazo-oauth-server = { version = "0.2.0", path = "crates/authorization-server" }
+nazo-oauth-server-postgres = { version = "0.2.0", path = "crates/authorization-server-postgres" }
+nazo-oauth-server-valkey = { version = "0.2.0", path = "crates/authorization-server-valkey" }
 nazo-operator-protocol = { version = "0.2.0", path = "crates/operator-protocol" }
+nazo-persistence = { version = "0.2.0", path = "crates/persistence" }
 nazo-postgres = { version = "0.2.0", path = "crates/persistence-postgres" }
 nazo-resource-server = { version = "0.2.0", path = "crates/resource-server" }
 nazo-runtime-modules = { version = "0.2.0", path = "crates/runtime-capabilities" }
@@ -119,4 +129,4 @@ panic = "abort"
 [patch.crates-io]
 actix-http = { git = "https://github.com/nazozero/actix-web", rev = "cad2a2d5fc9a994438021711460673649e27fd1d" }
 # Reviewed mdoc-rs coset 0.4 port, pinned to an immutable upstream fork revision.
-mdoc-rs = { git = "https://github.com/nazozero/mdoc-rs", rev = "8e3b529ae1be2d9b5c74baa1f7b7e7abcf958020" }
+mdoc-rs = { git = "https://github.com/nazozero/mdoc-rs", rev = "40e5ac7e1739150870c41544219345c2b6de4c9b" }

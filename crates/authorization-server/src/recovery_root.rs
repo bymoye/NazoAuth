@@ -1,7 +1,7 @@
 //! Recovery Root service layer (04A D10/D11/D12).
 //!
-//! Typed surface between the admin HTTP plane and the PostgreSQL recovery
-//! repository.  This module owns request-shape validation (identifier
+//! Typed surface between the admin HTTP plane and the selected recovery
+//! persistence adapter. This module owns request-shape validation (identifier
 //! formats, key-material decoding, kid/key binding through the shared
 //! `nazo-operator-protocol` validators) before anything reaches storage.
 //!
@@ -22,12 +22,14 @@ use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use uuid::Uuid;
 
-pub use nazo_postgres::{MAX_RECOVERY_CHALLENGE_ATTEMPTS, RECOVERY_CHALLENGE_TTL_SECONDS};
+pub use nazo_persistence::control_plane::{
+    MAX_RECOVERY_CHALLENGE_ATTEMPTS, RECOVERY_CHALLENGE_TTL_SECONDS,
+};
 
 use nazo_operator_protocol::{RecoveryProposal, RecoveryRootRotation};
-use nazo_postgres::{
+use nazo_persistence::control_plane::{
     IssuedIdentityApproval, NewRecoveryChallenge, NewRecoveryRoot, RecoveredSlotCommit,
-    RecoveryRootError, RecoveryRootRepository, RecoveryRotationError, RecoverySubmission,
+    RecoveryRootError, RecoveryRootPort, RecoveryRotationError, RecoverySubmission,
     StoredRecoveryRoot,
 };
 
@@ -108,13 +110,33 @@ pub struct IssuedRotationApprovalView {
 /// Service facade over the recovery repository.  Cheap to clone.
 #[derive(Clone)]
 pub struct RecoveryRootService {
-    repository: Arc<RecoveryRootRepository>,
+    repository: Arc<dyn RecoveryRootPort>,
+    deployment_id: String,
+}
+
+fn ensure_local_deployment(
+    local_deployment_id: &str,
+    caller_deployment_id: &str,
+) -> Result<(), RecoveryRootServiceError> {
+    if caller_deployment_id != local_deployment_id {
+        return Err(RecoveryRootServiceError::Invalid(
+            "deployment_id 与当前部署不匹配.",
+        ));
+    }
+    Ok(())
 }
 
 impl RecoveryRootService {
     #[must_use]
-    pub fn new(repository: Arc<RecoveryRootRepository>) -> Self {
-        Self { repository }
+    pub fn new(repository: Arc<dyn RecoveryRootPort>, deployment_id: &str) -> Self {
+        Self {
+            repository,
+            deployment_id: deployment_id.to_owned(),
+        }
+    }
+
+    fn ensure_local_deployment(&self, deployment_id: &str) -> Result<(), RecoveryRootServiceError> {
+        ensure_local_deployment(&self.deployment_id, deployment_id)
     }
 
     // -- Views ---------------------------------------------------------------
@@ -124,6 +146,7 @@ impl RecoveryRootService {
         &self,
         deployment_id: &str,
     ) -> Result<Option<StoredRecoveryRoot>, RecoveryRootServiceError> {
+        self.ensure_local_deployment(deployment_id)?;
         Ok(self.repository.current_root(deployment_id).await?)
     }
 
@@ -138,6 +161,7 @@ impl RecoveryRootService {
         request: &RecoveryRootChangeRequest,
         now: DateTime<Utc>,
     ) -> Result<IssuedRotationApprovalView, RecoveryRootServiceError> {
+        self.ensure_local_deployment(&request.deployment_id)?;
         let rotation = validate_rotation_request(request)?;
         let issued: IssuedIdentityApproval = self
             .repository
@@ -162,6 +186,7 @@ impl RecoveryRootService {
         request: &RecoveryRootChangeRequest,
         now: DateTime<Utc>,
     ) -> Result<StoredRecoveryRoot, RecoveryRootServiceError> {
+        self.ensure_local_deployment(&request.deployment_id)?;
         let rotation = validate_rotation_request(request)?;
         Ok(self
             .repository
@@ -187,7 +212,9 @@ impl RecoveryRootService {
         &self,
         request: &RecoveryChallengeRequest,
         now: DateTime<Utc>,
-    ) -> Result<nazo_postgres::IssuedRecoveryChallenge, RecoveryRootServiceError> {
+    ) -> Result<nazo_persistence::control_plane::IssuedRecoveryChallenge, RecoveryRootServiceError>
+    {
+        self.ensure_local_deployment(&request.deployment_id)?;
         let proposal = validate_challenge_request(request)?;
         let next_material = self
             .repository
@@ -203,6 +230,7 @@ impl RecoveryRootService {
         request: &RecoveryAnswerRequest,
         now: DateTime<Utc>,
     ) -> Result<RecoveredSlotCommit, RecoveryRootServiceError> {
+        self.ensure_local_deployment(&request.deployment_id)?;
         let submission = validate_answer_request(request)?;
         Ok(self
             .repository

@@ -2,7 +2,7 @@ use std::{path::Path, time::Duration};
 
 use anyhow::{Context as _, bail};
 use chrono::{DateTime, Utc};
-use nazo_postgres::{SecurityAuditAnchorHealth, SecurityAuditOutboxDelivery};
+use nazo_persistence::{SecurityAuditAnchorHealth, SecurityAuditOutboxDelivery};
 use serde::{Deserialize, Serialize};
 
 use super::{AuditAnchorPreflightConfig, protocol::encode_hash};

@@ -8,10 +8,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 
-use crate::{
-    AuthorizationRepositoryPort, AuthorizationResponseSignerPort, AuthorizationService,
-    AuthorizationStateStorePort,
-};
+use crate::{AuthorizationResponseSignerPort, AuthorizationService, AuthorizationStateStorePort};
 
 pub const DPOP_REPLAY_TTL_SECONDS: u64 = 300;
 pub const DPOP_CLOCK_SKEW_SECONDS: i64 = 30;
@@ -77,6 +74,28 @@ pub trait DpopStateStorePort: Send + Sync {
     fn validate_nonce<'a>(&'a self, nonce: &'a str) -> DpopStateFuture<'a, bool>;
 }
 
+impl<T> DpopStateStorePort for std::sync::Arc<T>
+where
+    T: DpopStateStorePort + ?Sized,
+{
+    fn consume_replay<'a>(
+        &'a self,
+        jkt: &'a str,
+        jti: &'a str,
+        ttl_seconds: u64,
+    ) -> DpopStateFuture<'a, bool> {
+        self.as_ref().consume_replay(jkt, jti, ttl_seconds)
+    }
+
+    fn issue_nonce<'a>(&'a self, nonce: &'a str, ttl_seconds: u64) -> DpopStateFuture<'a, ()> {
+        self.as_ref().issue_nonce(nonce, ttl_seconds)
+    }
+
+    fn validate_nonce<'a>(&'a self, nonce: &'a str) -> DpopStateFuture<'a, bool> {
+        self.as_ref().validate_nonce(nonce)
+    }
+}
+
 #[derive(Debug, Eq, PartialEq)]
 pub struct VerifiedDpopProof {
     pub jkt: String,
@@ -124,9 +143,8 @@ impl DpopProofVerifier {
     }
 }
 
-impl<R, S, K> DpopStateStorePort for AuthorizationService<R, S, K>
+impl<S, K> DpopStateStorePort for AuthorizationService<S, K>
 where
-    R: AuthorizationRepositoryPort,
     S: AuthorizationStateStorePort,
     K: AuthorizationResponseSignerPort,
 {

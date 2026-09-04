@@ -377,9 +377,9 @@ fn concurrent_immutable_publication_rejects_symlink_targets() {
 }
 
 #[test]
-fn changed_public_deployment_claim_preserves_the_previous_signed_statement() {
+fn changed_public_deployment_claim_replaces_signed_statement_and_cleans_temporary_files() {
     let root = temporary_root();
-    let first = ControlDiscoveryEndpoint::initialize(
+    ControlDiscoveryEndpoint::initialize(
         &root,
         None,
         Some("deployment-test"),
@@ -397,50 +397,26 @@ fn changed_public_deployment_claim_preserves_the_previous_signed_statement() {
     .unwrap();
     let identity_dir = root.join(INSTANCE_DIRECTORY);
     let current = fs::read_to_string(identity_dir.join(DEPLOYMENT_STATEMENT_FILE)).unwrap();
-    let previous =
-        fs::read_to_string(identity_dir.join("deployment-statement.previous.jws")).unwrap();
     let current = verify_deployment_statement(
         current.trim(),
         &second.identity.key_id,
         &second.identity.signing_key.verifying_key(),
     )
     .unwrap();
-    let previous = verify_deployment_statement(
-        previous.trim(),
-        &first.identity.key_id,
-        &first.identity.signing_key.verifying_key(),
-    )
-    .unwrap();
     assert_eq!(current.issuer, "https://new-auth.example");
-    assert_eq!(previous.issuer, "https://old-auth.example");
-    fs::remove_dir_all(root).unwrap();
-}
-
-#[test]
-fn stale_previous_statement_is_not_silently_removed_when_it_is_not_a_file() {
-    let root = temporary_root();
-    ControlDiscoveryEndpoint::initialize(
-        &root,
-        None,
-        Some("deployment-test"),
-        Some("runtime-test"),
-        "https://old-auth.example",
-    )
-    .unwrap();
-    let previous = root
-        .join(INSTANCE_DIRECTORY)
-        .join("deployment-statement.previous.jws");
-    fs::create_dir(&previous).unwrap();
-    let error = ControlDiscoveryEndpoint::initialize(
-        &root,
-        None,
-        Some("deployment-test"),
-        Some("runtime-test"),
-        "https://new-auth.example",
-    )
-    .err()
-    .unwrap()
-    .to_string();
-    assert!(error.contains("failed to remove stale statement"));
+    assert_eq!(
+        fs::read_dir(&identity_dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".deployment-statement.")
+            })
+            .count(),
+        0
+    );
+    assert_eq!(fs::read_dir(&identity_dir).unwrap().count(), 5);
     fs::remove_dir_all(root).unwrap();
 }

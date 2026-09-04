@@ -100,7 +100,7 @@ pub(crate) async fn admin_approve_mtls_trust_request(
 ) -> HttpResponse {
     resolve(
         &sessions,
-        &service,
+        service.get_ref(),
         &req,
         path.into_inner(),
         decision.admin_note,
@@ -118,7 +118,7 @@ pub(crate) async fn admin_reject_mtls_trust_request(
 ) -> HttpResponse {
     resolve(
         &sessions,
-        &service,
+        service.get_ref(),
         &req,
         path.into_inner(),
         decision.admin_note,

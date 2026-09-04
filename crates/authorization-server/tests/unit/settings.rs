@@ -7,31 +7,248 @@ const KEY_ATTESTATION_JWKS: &str =
 const ATTESTATION_CREDENTIAL_CONFIGURATIONS: &str = r#"{"pid":{"format":"dc+sd-jwt","scope":"pid","cryptographic_binding_methods_supported":["jwk"],"credential_signing_alg_values_supported":["ES256"],"proof_types_supported":{"attestation":{"proof_signing_alg_values_supported":["ES256"],"key_attestations_required":{"key_storage":["iso_18045_moderate"]}}},"vct":"https://issuer.example/credentials/pid"}}"#;
 
 #[test]
-fn active_tenant_context_is_explicit_and_rejects_nil_identifiers() {
-    let tenant_id = uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000011").unwrap();
-    let realm_id = uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000012").unwrap();
-    let organization_id = uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000013").unwrap();
+fn process_settings_cannot_override_the_system_tenant_context() {
     let configured = ConfigSource::from_pairs_for_test([
         ("TENANT_ID", "00000000-0000-0000-0000-000000000011"),
         ("REALM_ID", "00000000-0000-0000-0000-000000000012"),
         ("ORGANIZATION_ID", "00000000-0000-0000-0000-000000000013"),
     ]);
-    let settings = Settings::from_config(&configured).expect("active tenant context should load");
+    let settings = Settings::from_config(&configured).expect("process settings should load");
+    assert_eq!(
+        settings.tenant.context,
+        nazo_identity::TenantContext::default_system()
+    );
+}
+
+fn directory_binding(issuer: &str, external_host: &str) -> nazo_identity::TenantDirectoryBinding {
+    nazo_identity::TenantDirectoryBinding {
+        tenant: nazo_identity::TenantContext {
+            tenant_id: nazo_identity::TenantId::new(
+                uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000011").unwrap(),
+            )
+            .unwrap(),
+            realm_id: nazo_identity::RealmId::new(
+                uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000012").unwrap(),
+            )
+            .unwrap(),
+            organization_id: nazo_identity::OrganizationId::new(
+                uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000013").unwrap(),
+            )
+            .unwrap(),
+        },
+        runtime_revision: 1,
+        issuer: issuer.to_owned(),
+        external_host: external_host.to_owned(),
+    }
+}
+
+#[test]
+fn initial_directory_binding_uses_the_fixed_system_boundary() {
+    let config = ConfigSource::from_pairs_for_test([
+        ("PUBLIC_BASE_URL", "https://public.example.test"),
+        ("ISSUER", "https://AUTH.example.test/issuer"),
+        ("TENANT_ID", "00000000-0000-0000-0000-000000000099"),
+    ]);
+    let binding = Settings::initial_tenant_directory_binding(&config)
+        .expect("initial directory binding should be valid");
+
+    assert_eq!(
+        binding.tenant,
+        nazo_identity::TenantContext::default_system()
+    );
+    assert_eq!(binding.issuer, "https://AUTH.example.test/issuer");
+    assert_eq!(binding.external_host, "auth.example.test");
+}
+
+#[test]
+fn directory_tenant_uses_the_authoritative_host_and_tenant_storage_roots() {
+    let config = ConfigSource::from_pairs_for_test([
+        ("DATA_DIR", "test-runtime/directory-tenant"),
+        ("TRANSPORT_MODE", "trusted-proxy"),
+        ("TRUSTED_PROXY_CIDRS", "127.0.0.1/32"),
+        ("MTLS_CERTIFICATE_SOURCE", "rfc9440"),
+        ("CLIENT_SECRET_PEPPER", "0123456789abcdef0123456789abcdef"),
+    ]);
+    let settings = Settings::from_directory_binding(
+        &config,
+        &directory_binding("https://AUTH.example.test:8443/issuer", "auth.example.test"),
+    )
+    .expect("directory tenant should build from the process baseline");
+    let data_dir = std::fs::canonicalize(".")
+        .unwrap()
+        .join("test-runtime/directory-tenant");
+
+    assert_eq!(
+        settings.endpoint.issuer,
+        "https://AUTH.example.test:8443/issuer"
+    );
+    assert_eq!(
+        settings.keys.jwk_keys_dir,
+        data_dir.join("tenants/00000000-0000-0000-0000-000000000011/keys")
+    );
+    assert_eq!(
+        settings.storage.avatar_storage_dir,
+        data_dir.join("tenants/00000000-0000-0000-0000-000000000011/avatars")
+    );
+}
+
+#[test]
+fn directory_tenant_rejects_host_mismatch_and_shared_storage_roots() {
+    let base = [
+        ("TRANSPORT_MODE", "trusted-proxy"),
+        ("TRUSTED_PROXY_CIDRS", "127.0.0.1/32"),
+        ("MTLS_CERTIFICATE_SOURCE", "rfc9440"),
+        ("CLIENT_SECRET_PEPPER", "0123456789abcdef0123456789abcdef"),
+    ];
+    let mismatch = ConfigSource::from_pairs_for_test(base);
     assert!(
-        settings
-            .tenant
-            .context
-            .matches_raw(tenant_id, realm_id, organization_id)
+        Settings::from_directory_binding(
+            &mismatch,
+            &directory_binding("https://auth.example.test", "other.example.test"),
+        )
+        .err()
+        .expect("issuer and external host mismatch must fail")
+        .to_string()
+        .contains("does not match external_host")
     );
 
-    for key in ["TENANT_ID", "REALM_ID", "ORGANIZATION_ID"] {
-        let invalid =
-            ConfigSource::from_pairs_for_test([(key, "00000000-0000-0000-0000-000000000000")]);
-        assert_eq!(
-            settings_error(&invalid, "nil tenant boundary identifier must fail").to_string(),
-            "identity ID must not be nil"
-        );
-    }
+    let direct = ConfigSource::from_pairs_for_test([
+        ("TRANSPORT_MODE", "direct-tls"),
+        ("CLIENT_SECRET_PEPPER", "0123456789abcdef0123456789abcdef"),
+    ]);
+    assert_eq!(
+        Settings::from_directory_binding(
+            &direct,
+            &directory_binding("https://auth.example.test", "auth.example.test"),
+        )
+        .expect("directory tenant should use the deployment Direct TLS listener")
+        .endpoint
+        .transport_mode,
+        TransportMode::DirectTls
+    );
+
+    let keys = ConfigSource::from_owned_pairs_for_test([
+        (
+            "JWK_KEYS_DIR".to_owned(),
+            "test-runtime/shared-keys".to_owned(),
+        ),
+        ("TRANSPORT_MODE".to_owned(), "trusted-proxy".to_owned()),
+        ("TRUSTED_PROXY_CIDRS".to_owned(), "127.0.0.1/32".to_owned()),
+        ("MTLS_CERTIFICATE_SOURCE".to_owned(), "rfc9440".to_owned()),
+        (
+            "CLIENT_SECRET_PEPPER".to_owned(),
+            "0123456789abcdef0123456789abcdef".to_owned(),
+        ),
+    ]);
+    assert!(
+        Settings::from_directory_binding(
+            &keys,
+            &directory_binding("https://auth.example.test", "auth.example.test"),
+        )
+        .err()
+        .expect("directory tenant must reject shared key path")
+        .to_string()
+        .contains("JWK_KEYS_DIR must not be configured")
+    );
+
+    let avatars = ConfigSource::from_pairs_for_test([
+        ("AVATAR_STORAGE_DIR", "test-runtime/shared-avatars"),
+        ("TRANSPORT_MODE", "trusted-proxy"),
+        ("TRUSTED_PROXY_CIDRS", "127.0.0.1/32"),
+        ("MTLS_CERTIFICATE_SOURCE", "rfc9440"),
+        ("CLIENT_SECRET_PEPPER", "0123456789abcdef0123456789abcdef"),
+    ]);
+    assert!(
+        Settings::from_directory_binding(
+            &avatars,
+            &directory_binding("https://auth.example.test", "auth.example.test"),
+        )
+        .err()
+        .expect("directory tenant must reject shared avatar path")
+        .to_string()
+        .contains("AVATAR_STORAGE_DIR must not be configured")
+    );
+}
+
+#[test]
+fn directory_openid4vc_derives_tenant_secrets_and_deterministic_material_paths() {
+    let config = ConfigSource::from_pairs_for_test([
+        ("DATA_DIR", "test-runtime/directory-openid4vc"),
+        ("TRANSPORT_MODE", "trusted-proxy"),
+        ("TRUSTED_PROXY_CIDRS", "127.0.0.1/32"),
+        ("MTLS_CERTIFICATE_SOURCE", "rfc9440"),
+        ("CLIENT_SECRET_PEPPER", "0123456789abcdef0123456789abcdef"),
+        ("ENABLE_DIRECTORY_OPENID4VCI_ISSUER", "true"),
+        ("ENABLE_DIRECTORY_OPENID4VP_VERIFIER", "true"),
+        (
+            "OPENID4VC_DATA_ENCRYPTION_KEY",
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        ),
+        (
+            "OPENID4VCI_CREDENTIAL_CONFIGURATIONS_JSON",
+            ATTESTATION_CREDENTIAL_CONFIGURATIONS,
+        ),
+        (
+            "OPENID4VCI_ISSUER_MANAGEMENT_TOKEN",
+            "openid4vci-management-token-at-least-32-bytes",
+        ),
+        (
+            "OPENID4VP_VERIFIER_MANAGEMENT_TOKEN",
+            "openid4vp-management-token-at-least-32-bytes",
+        ),
+        (
+            "OPENID4VP_WALLET_AUTHORIZATION_ORIGINS",
+            "https://wallet.example",
+        ),
+        ("OPENID4VC_REVOCATION_POLICY", "required"),
+    ]);
+    let system = Settings::from_config(&config).unwrap();
+    assert!(!system.modules.enable_openid4vci_issuer);
+    assert!(!system.modules.enable_openid4vp_verifier);
+    assert!(system.modules.register_openid4vci_routes);
+    assert!(system.modules.register_openid4vp_routes);
+    let first_binding = directory_binding("https://one.example", "one.example");
+    let mut second_binding = directory_binding("https://two.example", "two.example");
+    second_binding.tenant.tenant_id = nazo_identity::TenantId::new(
+        uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000021").unwrap(),
+    )
+    .unwrap();
+    let first = Settings::from_directory_binding(&config, &first_binding).unwrap();
+    let second = Settings::from_directory_binding(&config, &second_binding).unwrap();
+
+    assert!(first.modules.enable_openid4vci_issuer);
+    assert!(first.modules.enable_openid4vp_verifier);
+    assert!(first.modules.register_openid4vci_routes);
+    assert!(first.modules.register_openid4vp_routes);
+
+    assert_ne!(
+        first.openid4vc.data_encryption_key,
+        second.openid4vc.data_encryption_key
+    );
+    assert_ne!(
+        first.openid4vc.issuer_management_token,
+        second.openid4vc.issuer_management_token
+    );
+    assert_ne!(
+        first.openid4vc.verifier_management_token,
+        second.openid4vc.verifier_management_token
+    );
+    let first_material = first
+        .storage
+        .data_dir
+        .join("tenants/00000000-0000-0000-0000-000000000011/openid4vc");
+    assert_eq!(
+        first.openid4vc.signing_certificate_chain_file,
+        Some(first_material.join("certificate-bundle.pem"))
+    );
+    assert_eq!(
+        first.openid4vc.trust_anchors_file,
+        Some(first_material.join("certificate-bundle.pem"))
+    );
+    assert_eq!(
+        first.openid4vc.revocation_snapshot_file,
+        Some(first_material.join("revocation-snapshot.json"))
+    );
 }
 
 #[test]
@@ -70,7 +287,7 @@ fn key_attestation_policy_can_defer_trust_to_scoped_runtime_policy() {
     ]);
 
     let settings =
-        Settings::from_config(&config).expect("lease-scoped trust is resolved at request time");
+        Settings::from_config(&config).expect("client-scoped trust is resolved at request time");
     assert!(settings.openid4vc.key_attestation_jwks.is_none());
 }
 
@@ -481,9 +698,8 @@ fn ciba_security_profile_accepts_canonical_fapi2_ciba_value() {
 }
 
 #[test]
-fn ciba_security_profile_rejects_conformance_and_migration_aliases() {
+fn ciba_security_profile_rejects_noncanonical_aliases() {
     for value in [
-        "oidf-fapi-ciba",
         "fapi-ciba-id1-plain-private-key-jwt-poll",
         "experimental-fapi2-ciba",
     ] {
@@ -517,6 +733,8 @@ fn configured_module_dependencies_default_closed_and_accept_explicit_values() {
     let defaults = Settings::from_config(&ConfigSource::default()).unwrap();
     assert!(!defaults.modules.enable_openid4vci_issuer);
     assert!(!defaults.modules.enable_openid4vp_verifier);
+    assert!(!defaults.modules.register_openid4vci_routes);
+    assert!(!defaults.modules.register_openid4vp_routes);
     assert_eq!(defaults.storage.scim_event_retention_seconds, 604_800);
     assert!(
         defaults
@@ -580,7 +798,7 @@ fn configured_module_dependencies_default_closed_and_accept_explicit_values() {
         ("CIBA_POLL_INTERVAL_SECONDS", "6"),
         (
             "CIBA_NOTIFICATION_PRIVATE_ORIGINS",
-            "https://suite.example, https://callback.internal:9443",
+            "https://wallet.example, https://callback.internal:9443",
         ),
         (
             "BACKCHANNEL_LOGOUT_PRIVATE_ORIGINS",
@@ -591,6 +809,8 @@ fn configured_module_dependencies_default_closed_and_accept_explicit_values() {
 
     assert!(settings.modules.enable_openid4vci_issuer);
     assert!(settings.modules.enable_openid4vp_verifier);
+    assert!(settings.modules.register_openid4vci_routes);
+    assert!(settings.modules.register_openid4vp_routes);
     assert_eq!(settings.storage.scim_event_retention_seconds, 86_400);
     assert_eq!(
         settings
@@ -608,7 +828,7 @@ fn configured_module_dependencies_default_closed_and_accept_explicit_values() {
     assert_eq!(settings.ciba.ciba_poll_interval_seconds, 6);
     assert_eq!(
         settings.ciba.ciba_notification_private_origins,
-        ["https://suite.example", "https://callback.internal:9443"]
+        ["https://wallet.example", "https://callback.internal:9443"]
     );
     assert_eq!(
         settings.modules.backchannel_logout_private_origins,
@@ -848,6 +1068,15 @@ fn transport_modes_reject_conflicting_endpoint_ownership() {
         (
             ConfigSource::from_pairs_for_test([("TRANSPORT_MODE", "direct-tls")]),
             "direct-tls transport requires an HTTPS issuer",
+        ),
+        (
+            ConfigSource::from_pairs_for_test([
+                ("PUBLIC_BASE_URL", "https://auth.example.test"),
+                ("CLIENT_SECRET_PEPPER", pepper),
+                ("TRANSPORT_MODE", "direct-tls"),
+                ("MTLS_ENDPOINT_BASE_URL", "http://127.0.0.1:8443"),
+            ]),
+            "direct-tls transport requires an HTTPS MTLS_ENDPOINT_BASE_URL",
         ),
         (
             ConfigSource::from_pairs_for_test([

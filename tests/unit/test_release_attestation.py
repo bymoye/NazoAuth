@@ -37,7 +37,6 @@ class ReleaseAttestationBuilderTests(unittest.TestCase):
                     "schema": 1,
                     "repository": "nazozero/NazoAuthWeb",
                     "version": "v0.2.0",
-                    "commit": "f" * 40,
                     "release_identity": (
                         "https://github.com/nazozero/NazoAuthWeb/"
                         ".github/workflows/release.yml@refs/tags/v0.2.0"
@@ -79,10 +78,6 @@ class ReleaseAttestationBuilderTests(unittest.TestCase):
             "v0.2.2",
             "--target",
             self.target,
-            "--backend-commit",
-            "e" * 40,
-            "--build-id",
-            "github:123:1",
             "--binary",
             str(self.binary),
             "--operator-compatibility",
@@ -98,7 +93,7 @@ class ReleaseAttestationBuilderTests(unittest.TestCase):
             *extra,
         ]
 
-    def test_builds_the_closed_schema_five_server_predicate(self) -> None:
+    def test_builds_the_closed_schema_six_server_predicate(self) -> None:
         subprocess.run(self.command(), cwd=ROOT, check=True, capture_output=True, text=True)
         value = json.loads(self.output.read_text(encoding="utf-8"))
 
@@ -108,9 +103,7 @@ class ReleaseAttestationBuilderTests(unittest.TestCase):
                 "schema",
                 "version",
                 "target",
-                "backend_commit",
                 "release_identity",
-                "embedded",
                 "operator_protocol",
                 "artifacts",
                 "frontend",
@@ -118,7 +111,7 @@ class ReleaseAttestationBuilderTests(unittest.TestCase):
                 "rollback",
             },
         )
-        self.assertEqual(value["schema"], 5)
+        self.assertEqual(value["schema"], 6)
         self.assertEqual(value["target"], self.target)
         self.assertEqual(set(value["artifacts"]), {"binary"})
         self.assertEqual(value["artifacts"]["binary"]["repository"], "nazozero/NazoAuth")
@@ -126,14 +119,11 @@ class ReleaseAttestationBuilderTests(unittest.TestCase):
             value["artifacts"]["binary"]["sha256"],
             hashlib.sha256(b"server-binary").hexdigest(),
         )
-        self.assertEqual(value["embedded"]["release"], "v0.2.2")
-        self.assertEqual(value["embedded"]["revision"], "e" * 40)
-        self.assertEqual(value["embedded"]["protocol"], 2)
         self.assertEqual(
             value["operator_protocol"],
             {
-                "version": 2,
-                "minimum_ctl_version": "0.2.0",
+                "version": 3,
+                "minimum_ctl_version": "0.2.6",
                 "maximum_ctl_version_exclusive": "0.3.0",
             },
         )

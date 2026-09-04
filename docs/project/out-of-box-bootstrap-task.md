@@ -1,4 +1,4 @@
-# Out-of-box secure bootstrap task
+# Out-of-box administrator provisioning task
 
 Status: completed
 
@@ -25,12 +25,14 @@ The effective configuration order is:
   service credentials, proxy trust, CA trust, and KMS ownership remain explicit.
 - A fresh local or official Compose deployment has no published default
   database, Valkey, administrator, or OAuth secret.
-- The initial administrator claim is deployment bound and single use. Its
-  verifier stays in private runtime state; PostgreSQL stores only the committed
-  idempotency receipt. The claim closes permanently after an administrator
-  exists.
-- Concurrent first starts and concurrent administrator claims have one
-  authoritative winner.
+- Administrator creation is available only through the target-local one-shot
+  `nazoauth admin-provision`, invoked by `nazoauthctl admin create`; the
+  authorization server exposes no public setup route or bearer setup secret.
+- The operation and deployment IDs bind one PostgreSQL transaction that creates
+  the administrator, durable receipt, and security audit event. Repeating an
+  operation returns its receipt; a conflicting operation or existing email is
+  rejected without creating a second user.
+- Concurrent administrator creation attempts have one authoritative winner.
 - Existing explicit deployments remain supported.
 
 ## Work items
@@ -41,13 +43,14 @@ The effective configuration order is:
 - [x] Run pending migrations before accepting traffic.
 - [x] Create or load generated secrets before settings validation.
 - [x] Keep automatic signing-key creation in the normal server startup path.
-- [x] Create a one-time initial-administrator claim without printing its value
-      or a token-bearing URL.
-- [x] Add a closed JSON HTTP endpoint that atomically consumes the claim and
-      creates the first administrator without SMTP.
-- [x] Add `nazoauthctl bootstrap-admin`, which verifies and reads the private
-      runtime-owned mount and transports all credentials only through request stdin.
-- [x] Reject the endpoint after consumption or the existence of any administrator.
+- [x] Add the local one-shot `nazoauth admin-provision` command with a strict
+      credential document and deployment/operation binding.
+- [x] Add `nazoauthctl admin create`, which invokes the target-local command
+      through the controller's protected credential path.
+- [x] Atomically create the administrator, idempotency receipt, and durable
+      security audit event in PostgreSQL.
+- [x] Return the same receipt for an operation retry and reject conflicting
+      operation or existing-email attempts without creating a second user.
 
 ### 2. Persistent generated secrets
 
@@ -74,8 +77,8 @@ The effective configuration order is:
 ## Verification
 
 - [x] Focused configuration and CLI unit tests.
-- [x] Initial-administrator repository and HTTP tests, including concurrency
-      and replay.
+- [x] Administrator-provisioning repository and CLI tests, including
+      concurrency and replay.
 
 - [x] Compose configuration validation and container smoke test where the
       container runtime is available.
@@ -85,36 +88,34 @@ The effective configuration order is:
 - [x] Workspace test gate.
 - [x] `git diff --check`.
 
-The public endpoint verifies the possession token before password hashing. A caller that already
-possesses that single-use secret can still deliberately consume password-hashing work while a
-claim remains open or is being replayed. Avoiding that cost would require a separate preflight read
-or a second in-memory protocol state, neither of which is authoritative across concurrent replicas;
-the database transaction therefore remains the only claim/replay decision point. Rate and resource
-limits at the public HTTP boundary remain the mitigation for a compromised bootstrap token.
+The local command validates the strict credential document and deployment binding
+before entering the PostgreSQL transaction. The transaction is the single
+authority for administrator creation, operation replay, and conflict rejection;
+there is no public HTTP setup boundary or bearer setup secret to keep in sync.
 
 The controller derives the request identity from the fresh install operation.
-If the server commits but the response is lost, rerunning the same bootstrap
-command therefore replays the one durable application receipt. The controller
-deletes the runtime token and fresh-install context only after it verifies that
-receipt.
+If the server commits but the response is lost, rerunning the same `admin create`
+command replays the one durable application receipt. Deterministic input and
+conflict rejections are closed outcomes; database or transport uncertainty is
+retried without creating another administrator.
 
 ## Completion evidence
 
 - `cargo test --locked -p nazo-oauth-server --lib`: 1019 passed.
 - `cargo test --locked -p nazo-postgres --lib --tests`: 86 passed.
-- Live PostgreSQL initial-admin concurrency test: 1 passed, with one claim
-  winner and permanent closure.
+- Live PostgreSQL administrator-provisioning concurrency test: 1 passed, with
+  one transaction winner and durable replay.
 - `cargo test --locked --workspace --all-features --lib --tests`: 1959 passed.
 - Workspace Clippy with all targets/features and `-D warnings`: passed.
 - Static contracts, formatting, diff whitespace, and Compose config: passed.
 - Isolated Compose smoke deployment: generated credentials, authenticated
-  Valkey, migrations, health, Discovery, initial-admin HTTP 201, token removal,
-  restart stability, and no bootstrap reopening all verified. The isolated
-  containers and volumes were removed after the test.
+  Valkey, migrations, health, Discovery, administrator provisioning receipt,
+  restart stability, and the absence of a public setup route were verified.
+  The isolated containers and volumes were removed after the test.
 - Direct binary smoke deployment from an empty working directory: `.env.yaml`,
-  generated secrets, bootstrap token, automatic migrations, and live health
-  were verified before the isolated process and dependency containers were
-  removed.
+  generated secrets, automatic migrations, live health, and the local
+  administrator-provisioning boundary were verified before the isolated
+  process and dependency containers were removed.
 
 ## Out of scope
 

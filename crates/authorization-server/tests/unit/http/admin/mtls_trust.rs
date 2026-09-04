@@ -87,7 +87,10 @@ fn trust_bundle_digest_is_stable_and_redaction_safe() {
 async fn mtls_trust_handlers_fail_closed_before_touching_storage_for_anonymous_requests() {
     let state = test_state();
     let sessions = web::Data::new(admin_session_handles(&state));
-    let service = web::Data::new(super::MtlsTrustAnchorService::new(state.diesel_db.clone()));
+    let service: web::Data<super::MtlsTrustAnchorService> = web::Data::from(std::sync::Arc::new(
+        nazo_postgres::MtlsTrustAnchorRepository::new(state.diesel_db.clone()),
+    )
+        as std::sync::Arc<dyn nazo_identity::ports::MtlsTrustAnchorStore>);
     let anonymous = TestRequest::default().to_http_request();
 
     let list = super::admin_mtls_trust_requests(
@@ -142,7 +145,10 @@ async fn mtls_trust_handlers_fail_closed_before_touching_storage_for_anonymous_r
 async fn mtls_trust_mutations_reject_missing_csrf_before_admin_lookup() {
     let state = test_state();
     let sessions = web::Data::new(admin_session_handles(&state));
-    let service = web::Data::new(super::MtlsTrustAnchorService::new(state.diesel_db.clone()));
+    let service: web::Data<super::MtlsTrustAnchorService> = web::Data::from(std::sync::Arc::new(
+        nazo_postgres::MtlsTrustAnchorRepository::new(state.diesel_db.clone()),
+    )
+        as std::sync::Arc<dyn nazo_identity::ports::MtlsTrustAnchorStore>);
     let request = request_with_session_cookie(&state);
     let response = super::admin_approve_mtls_trust_request(
         sessions,

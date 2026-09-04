@@ -99,7 +99,10 @@ struct EventCount {
 }
 
 async fn event_count(connection: &mut AsyncPgConnection, module_id: &str) -> i64 {
-    sql_query("SELECT COUNT(*) AS count FROM runtime_module_state_events WHERE module_id = $1")
+    sql_query("SELECT COUNT(*) AS count FROM runtime_module_state_events WHERE tenant_id = $1 AND module_id = $2")
+        .bind::<diesel::sql_types::Uuid, _>(
+            nazo_identity::TenantContext::default_system().tenant_id.as_uuid(),
+        )
         .bind::<diesel::sql_types::Text, _>(module_id)
         .get_result::<EventCount>(connection)
         .await
@@ -113,7 +116,10 @@ async fn event_type_count(
     event_type: &str,
 ) -> i64 {
     sql_query(
-        "SELECT COUNT(*) AS count FROM runtime_module_state_events WHERE module_id = $1 AND event_type = $2",
+        "SELECT COUNT(*) AS count FROM runtime_module_state_events WHERE tenant_id = $1 AND module_id = $2 AND event_type = $3",
+    )
+    .bind::<diesel::sql_types::Uuid, _>(
+        nazo_identity::TenantContext::default_system().tenant_id.as_uuid(),
     )
     .bind::<diesel::sql_types::Text, _>(module_id)
     .bind::<diesel::sql_types::Text, _>(event_type)
@@ -155,16 +161,28 @@ async fn clear_module(database_url: &str, module_id: &str) {
         "runtime_module_instance_states",
         "runtime_module_desired_states",
     ] {
-        sql_query(format!("DELETE FROM {table} WHERE module_id = $1"))
-            .bind::<diesel::sql_types::Text, _>(module_id)
-            .execute(&mut connection)
-            .await
-            .expect("runtime module fixture should clear");
+        sql_query(format!(
+            "DELETE FROM {table} WHERE tenant_id = $1 AND module_id = $2"
+        ))
+        .bind::<diesel::sql_types::Uuid, _>(
+            nazo_identity::TenantContext::default_system()
+                .tenant_id
+                .as_uuid(),
+        )
+        .bind::<diesel::sql_types::Text, _>(module_id)
+        .execute(&mut connection)
+        .await
+        .expect("runtime module fixture should clear");
     }
     sql_query(
         "INSERT INTO runtime_module_desired_states \
-         (module_id, desired_mode, revision, actor_id, reason, updated_at) \
-         VALUES ($1, 'enabled', 1, NULL, 'explicit test fixture', CURRENT_TIMESTAMP)",
+         (tenant_id, module_id, desired_mode, revision, actor_id, reason, updated_at) \
+         VALUES ($1, $2, 'enabled', 1, NULL, 'explicit test fixture', CURRENT_TIMESTAMP)",
+    )
+    .bind::<diesel::sql_types::Uuid, _>(
+        nazo_identity::TenantContext::default_system()
+            .tenant_id
+            .as_uuid(),
     )
     .bind::<diesel::sql_types::Text, _>(module_id)
     .execute(&mut connection)
@@ -633,7 +651,7 @@ async fn desired_revision_change_commits_before_old_completion_and_forces_stale_
         connection
             .transaction::<(), diesel::result::Error, _>(async |connection| {
                 let updated = sql_query(
-                    "UPDATE runtime_module_desired_states SET desired_mode = 'disabled', revision = 8, updated_at = CURRENT_TIMESTAMP WHERE module_id = 'native_sso'",
+                    "UPDATE runtime_module_desired_states SET desired_mode = 'disabled', revision = 8, updated_at = CURRENT_TIMESTAMP WHERE tenant_id = '00000000-0000-0000-0000-000000000001' AND module_id = 'native_sso'",
                 )
                 .execute(connection)
                 .await?;

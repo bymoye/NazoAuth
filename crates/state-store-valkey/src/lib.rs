@@ -13,6 +13,7 @@ mod keys;
 mod rate_limit;
 mod replay;
 mod session;
+mod tenant_directory;
 #[doc(hidden)]
 pub mod test_support;
 mod token_issuance;
@@ -25,7 +26,7 @@ pub use ciba::{
     AtomicResult, CibaPingDelivery, CibaPingFinishOutcome, CibaPingFinishResult, CibaStore,
     StoredCibaRequest,
 };
-pub use connection::ValkeyConnection;
+pub use connection::{ValkeyClient, ValkeyConnection};
 pub use delivery::{DeliveryConsume, DeliveryStore, StoredDelivery};
 pub use device::{DeviceCreateResult, DeviceStore, StoredDeviceState};
 pub use error::{Error, ErrorKind};
@@ -46,5 +47,6 @@ pub(crate) fn identity_repository_error(error: Error) -> nazo_identity::ports::R
 pub use rate_limit::{LoginFailureDimension, RateDimension, RateLimitStore};
 pub use replay::ReplayStore;
 pub use session::{SessionRotationResult, SessionStore, StoredSession};
+pub use tenant_directory::TenantDirectoryCache;
 pub use token_issuance::TokenIssuanceStateAdapter;
 pub use token_state::TokenStateStore;

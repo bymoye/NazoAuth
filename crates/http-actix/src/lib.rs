@@ -42,8 +42,11 @@ pub use authorization_request_object::{
 };
 pub use cookies::{clear_cookie, cookie_value, make_cookie, with_cookie_headers};
 pub use cors::{
-    cors_admin, cors_auth_api, cors_browser_token_management, cors_browser_userinfo, cors_scim,
-    cors_well_known,
+    cors_admin, cors_admin_with_origin_predicate, cors_auth_api,
+    cors_auth_api_with_origin_predicate, cors_browser_token_management,
+    cors_browser_token_management_with_origin_predicate, cors_browser_userinfo,
+    cors_browser_userinfo_with_origin_predicate, cors_scim, cors_scim_with_origin_predicate,
+    cors_well_known, cors_well_known_with_origin_predicate,
 };
 pub use csrf::{csrf_error, has_valid_csrf_token_for_cookies};
 pub use dpop::{

@@ -1,5 +1,5 @@
 use chrono::Utc;
-use nazo_postgres::SecurityAuditOutboxDelivery;
+use nazo_persistence::SecurityAuditOutboxDelivery;
 
 use super::{
     AuditAnchorWorkerConfig,

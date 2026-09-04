@@ -58,10 +58,7 @@ impl nazo_identity::ports::PasskeyAuditPort for TracingPasskeyAudit {
 }
 
 pub(crate) type LocalPasskeyService = nazo_identity::PasskeyService<
-    nazo_postgres::UserRepository,
-    nazo_postgres::PasskeyRepository,
-    nazo_valkey::AuthenticationStore,
-    nazo_postgres::MfaRepository,
-    nazo_valkey::SessionStore,
+    std::sync::Arc<dyn nazo_identity::ports::PasskeyCeremonyPort>,
+    std::sync::Arc<dyn nazo_identity::ports::LoginSessionPort>,
     TracingPasskeyAudit,
 >;

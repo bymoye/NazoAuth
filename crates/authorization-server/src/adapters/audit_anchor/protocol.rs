@@ -1,7 +1,7 @@
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{DateTime, Utc};
 use hmac::{Hmac, KeyInit, Mac};
-use nazo_postgres::SecurityAuditOutboxDelivery;
+use nazo_persistence::SecurityAuditOutboxDelivery;
 use serde::Serialize;
 use serde_json::Value;
 use sha2::Sha256;

@@ -2,7 +2,6 @@
   "schema": 1,
   "repository": "nazozero/NazoAuthWeb",
   "version": "v0.2.10",
-  "commit": "4c71c8f04a8226e2d5e9649330bc628e3e56ccd9",
   "release_identity": "https://github.com/nazozero/NazoAuthWeb/.github/workflows/release.yml@refs/tags/v0.2.10",
   "artifact": {
     "repository": "nazozero/NazoAuthWeb",

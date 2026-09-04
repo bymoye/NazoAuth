@@ -5,10 +5,10 @@ use super::*;
 #[actix_web::test]
 async fn unauthenticated_challenge_hides_root_presence() {
     let missing = challenge_error_response(crate::recovery_root::RecoveryRootServiceError::Root(
-        nazo_postgres::RecoveryRootError::RootMissing,
+        nazo_persistence::control_plane::RecoveryRootError::RootMissing,
     ));
     let invalid = challenge_error_response(crate::recovery_root::RecoveryRootServiceError::Root(
-        nazo_postgres::RecoveryRootError::InvalidAllocationProof,
+        nazo_persistence::control_plane::RecoveryRootError::InvalidAllocationProof,
     ));
     assert_eq!(missing.status(), StatusCode::BAD_REQUEST);
     assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);

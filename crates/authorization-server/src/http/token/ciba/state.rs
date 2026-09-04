@@ -18,7 +18,9 @@ pub(crate) fn ciba_grant_key(
     format!("ciba:{}", blake3_hex(&binding.to_string()))
 }
 
-pub(crate) type ServerCibaService = CibaService<CibaStore>;
+pub(crate) type ServerCibaService = CibaService<
+    std::sync::Arc<dyn nazo_auth::CibaStateStorePort<Version = nazo_auth::CibaStateVersion>>,
+>;
 
 #[derive(Clone)]
 pub(crate) struct CibaHttpConfig {
@@ -64,14 +66,14 @@ impl From<&Settings> for CibaHttpConfig {
 
 pub(crate) struct CibaTokenHandles {
     pub(crate) service: Data<ServerCibaService>,
-    pub(crate) users: Data<nazo_postgres::UserRepository>,
+    pub(crate) users: Data<dyn nazo_persistence::CibaAccountStore>,
     pub(crate) config: Data<CibaHttpConfig>,
 }
 
 impl CibaTokenHandles {
     pub(crate) fn new(
         service: Data<ServerCibaService>,
-        users: Data<nazo_postgres::UserRepository>,
+        users: Data<dyn nazo_persistence::CibaAccountStore>,
         config: Data<CibaHttpConfig>,
     ) -> Self {
         Self {

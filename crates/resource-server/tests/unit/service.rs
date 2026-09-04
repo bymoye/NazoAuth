@@ -170,10 +170,12 @@ fn bearer_authorization_returns_typed_verified_result() {
 async fn bearer_authorization_returns_typed_verified_result_async() {
     let fixture = fixture();
     let access_token = token(&fixture, json!({}), None);
+    let revocations: Arc<dyn AccessTokenRevocationLookup> =
+        Arc::new(TestRevocations::returning(Ok(false)));
     let service = ProtectedResourceAuthorizationService::new(
         fixture.verifier,
         DpopProofVerifier::new(DpopProofVerifierConfig::default()),
-        TestRevocations::returning(Ok(false)),
+        revocations,
         AtomicReplayStore::default(),
     );
 
@@ -349,11 +351,12 @@ async fn dpop_authorization_consumes_replay_marker_atomically_async() {
         None,
         None,
     );
+    let replay: Arc<dyn ProtectedResourceDpopStateStore> = Arc::new(AtomicReplayStore::default());
     let service = ProtectedResourceAuthorizationService::new(
         fixture.verifier,
         DpopProofVerifier::new(DpopProofVerifierConfig::default()),
         TestRevocations::returning(Ok(false)),
-        AtomicReplayStore::default(),
+        replay,
     );
 
     service

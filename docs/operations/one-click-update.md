@@ -60,7 +60,7 @@ the current allowlisted data, signing keys, and application secrets plus the
 MFA key. It does not read an old DeploymentState, controller state, bootstrap
 state, UI cache, or command format.
 
-## Controller binding and initial administrator
+## Controller binding and administrator provisioning
 
 Bind a Controller Key before normal mutations:
 
@@ -78,7 +78,7 @@ operator's back.
 Create the first administrator interactively:
 
 ```sh
-nazoauthctl bootstrap-admin --instance production
+nazoauthctl admin create --instance production
 ```
 
 Automation supplies a strict JSON object containing exactly `email` and
@@ -86,17 +86,19 @@ Automation supplies a strict JSON object containing exactly `email` and
 
 ```sh
 printf '%s' '{"email":"admin@example.com","password":"..."}' | \
-  nazoauthctl bootstrap-admin --instance production --credentials-stdin
+  nazoauthctl admin create --instance production --credentials-stdin
 ```
 
-The bootstrap token is single-use and deployment-bound. Neither credentials
-nor the token enter argv, ordinary environment variables, Registry, or logs.
+The command invokes the target's local `nazoauth admin-provision` one-shot
+command. Credentials are delivered through the controller's protected
+credential path; they do not enter argv, ordinary environment variables,
+Registry, or logs.
 
 ## Update and rollback
 
 ```sh
-nazoauthctl update --instance production --to v0.2.3 --yes
-nazoauthctl rollback --instance production --yes
+nazoauthctl update --instance production --to v0.2.6
+nazoauthctl rollback --instance production
 ```
 
 Update resolves and verifies one immutable artifact, signs one canonical
@@ -124,7 +126,7 @@ nazoauthctl backup show --instance production
 ```
 
 A snapshot binds the PostgreSQL custom-format dump, deployment data, secrets,
-configuration, runtime artifact/build identity, schema, MFA/JWKS facts, and a
+configuration, runtime artifact digest, release version, schema, MFA/JWKS facts, and a
 database sentinel in one immutable manifest. A restore test uses an isolated
 database and runtime. `require` blocks update unless the exact restore-tested
 manifest remains present and is no older than the configured maximum. Off-host
@@ -136,15 +138,15 @@ evidence.
 ## Disaster recovery
 
 ```sh
-nazoauthctl recover --instance production --yes
+nazoauthctl recover --instance production
 ```
 
-If the restored Controller Registry rejects the current key with the exact
-`CONTROLLER_KEY_UNTRUSTED` or `CONTROLLER_KEY_EXPIRED` code, provide the offline
-secret through an owner-only file:
+If the restored Controller Registry rejects the current key with
+`CONTROLLER_KEY_UNAUTHORIZED`, provide the offline secret through an owner-only
+file:
 
 ```sh
-nazoauthctl recover --instance production --recovery-secret-file ./recovery-secret --yes
+nazoauthctl recover --instance production --recovery-secret-file ./recovery-secret
 ```
 
 The secret is read only after that stable identity rejection. Network errors,
@@ -173,9 +175,8 @@ writer manually or flush shared Valkey.
 
 Release bytes, attestations, Sigstore identity, manifest metadata, and the OCI
 digest are verified before activation. The application independently validates
-the signed ControlOperation and embedded build target, while NazoAuthCtl owns
-the actual runtime digest observation. Neither side claims a proof it cannot
-produce.
+the signed ControlOperation against the executing binary or image digest, while
+NazoAuthCtl observes the same content identity from the runtime.
 
 Public bootstrap is fail-closed on the attested Release reader and accepts only
 a public non-draft Release. The operator host therefore needs GitHub CLI plus

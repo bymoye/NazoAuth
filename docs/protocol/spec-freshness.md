@@ -42,12 +42,10 @@ suites are not version authorities.
 | FAPI-CIBA | working draft `fapi-ciba-03` dated 2026-06-26; implemented compatibility target remains stable `ID1` / draft 02 |
 | Grant Management | working draft `oauth-v2-grant-management-03` built 2026-06-26; approved stable snapshot `ID1` |
 | OpenID Connect Native SSO | draft 07 / Second Implementer's Draft |
-| OpenID conformance-suite | `release-v5.2.0` at `dee9a25160e789f0f80517674693ef7989ab9fa1` |
 
 The inventory also verifies the canonical pages and status markers for OIDC,
 FAPI 2.0, OpenID4VC, OpenID Federation, and every immutable RFC used by active
-protocol documentation. Dated result records intentionally retain the exact
-older source or suite revision that produced those results.
+protocol documentation.
 
 ## Checks
 
@@ -57,8 +55,7 @@ Offline schema and active-document validation:
 python scripts/check_spec_freshness.py --offline
 ```
 
-Online validation against IETF Datatracker, RFC Editor, OpenID Foundation, and
-the official OIDF GitLab release API:
+Online validation against IETF Datatracker, RFC Editor, and upstream specification publishers:
 
 ```powershell
 python scripts/check_spec_freshness.py

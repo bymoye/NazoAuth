@@ -35,13 +35,12 @@ GitHub Actions、容器/Compose 输入、锁定的 Python 输入、精确 Rust s
   policy 任务
 - tag commit 必须可达 `main`，并具有精确 SHA 的成功 `main` push 质量门。任意其他
   子分支以及未经精确门禁验证的 tag 都会失败
-- 对可达 `main` 的提交执行 `workflow_dispatch` 是不发布的原生矩阵演练：它使用
-  `sha-<commit>` 作为 release identity，执行 policy、原生测试、二进制构建和 OCI
-  组装，同时跳过所有仅限 tag 的证明与发布任务
+- 对可达 `main` 的提交执行 `workflow_dispatch` 是不发布的原生矩阵演练：它执行
+  policy、原生测试、二进制构建和 OCI 组装，同时跳过所有仅限 tag 的证明与发布任务
 - 在原生 x86-64 和 Arm64 Linux、Windows、macOS runner 上使用固定 Rust
   toolchain 构建八个平台目标
 - 在每个原生目标上实际执行 server 二进制
-- 验证 server 二进制内嵌的 tag、commit、协议版本和 build ID
+- 验证 server 二进制的包版本和 operator protocol 版本
 - 从唯一源码打包一次 `nazo-operator-protocol`，校验包构建与 digest，并为精确
   `.crate` 生成标准 build provenance
 - 对精确 tag 再次运行 `cargo audit` 和 `cargo deny`
@@ -49,7 +48,7 @@ GitHub Actions、容器/Compose 输入、锁定的 Python 输入、精确 Rust s
 - 使用 Trivy 扫描精确 OCI archive，并且不二次构建，直接发布同一 archive
 - 为 server Rust 依赖生成 CycloneDX SBOM
 - 使用自定义 `https://nazo.run/attestations/release-manifest/v1` GitHub attestation，
-  将每个 server 二进制绑定到封闭的 schema-5 ReleaseManifest
+  将每个 server 二进制绑定到封闭的 schema-6 ReleaseManifest
 - 声明 operator protocol 版本与受支持的 NazoAuthCtl SemVer 范围
 - 绑定独立发布并经过证明的 NazoAuthWeb descriptor，不嵌入或重新发布 UI 文件
 - 签名 OCI index；重跑时仅当现有 tag 指向精确的已扫描 digest 才接受，否则拒绝

@@ -16,7 +16,7 @@ enum GuardedCibaCreation {
 pub(crate) async fn backchannel_authentication(
     authorization_service: Data<ServerAuthorizationService>,
     ciba_service: Data<ServerCibaService>,
-    users: Data<nazo_postgres::UserRepository>,
+    users: Data<dyn nazo_persistence::CibaAccountStore>,
     config: Data<CibaHttpConfig>,
     runtime: Data<ServerRuntimeModuleRegistry>,
     req: HttpRequest,
@@ -169,7 +169,7 @@ pub(crate) async fn backchannel_authentication(
         );
     };
     let user = match users
-        .public_account_by_email(
+        .by_email(
             nazo_identity::TenantId::new(config.tenant_id)
                 .expect("configured CIBA tenant ID is non-nil"),
             login_hint,

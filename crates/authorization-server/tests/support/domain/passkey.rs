@@ -24,7 +24,7 @@ pub(crate) fn test_login_endpoint(
     actix_web::web::Data::new(nazo_http_actix::PasskeyLoginEndpoint::new(
         test_operations(state),
         std::sync::Arc::new(crate::domain::ServerAuthenticationRateLimit::new(
-            nazo_valkey::RateLimitStore::new(&state.valkey_connection()),
+            std::sync::Arc::new(nazo_valkey::RateLimitStore::new(&state.valkey_connection())),
             identity.rate_limit.window_seconds,
             identity.rate_limit.auth_max_requests,
         )),

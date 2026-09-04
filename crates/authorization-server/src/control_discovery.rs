@@ -9,7 +9,7 @@ use actix_web::{HttpResponse, web};
 use anyhow::{Context as _, bail};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::Utc;
-use ed25519_dalek::{SigningKey, VerifyingKey};
+use ed25519_dalek::SigningKey;
 use nazo_operator_protocol::{
     CONTROL_DISCOVERY_PRODUCT, CONTROL_DISCOVERY_SCHEMA, DeploymentStatement, DiscoveryRequest,
     DiscoveryResponse, DiscoveryStatement, PROTOCOL_VERSION, decode_instance_public_key,
@@ -17,7 +17,7 @@ use nazo_operator_protocol::{
     sign_discovery_statement, validate_discovery_request, verify_deployment_statement,
 };
 
-use crate::{config::read_or_create_instance_identity_key, operator_task::embedded_identity};
+use crate::{config::read_or_create_instance_identity_key, operator_task::release_identity};
 
 const INSTANCE_DIRECTORY: &str = "instance";
 const IDENTITY_KEY_FILE: &str = "identity.key";
@@ -83,7 +83,7 @@ impl ControlDiscoveryEndpoint {
         let public_key = encode_instance_public_key(&signing_key.verifying_key());
         publish_public_key(&identity_dir.join(IDENTITY_PUBLIC_FILE), &public_key)?;
         let key_id = instance_key_id(&signing_key.verifying_key());
-        let embedded = embedded_identity();
+        let embedded = release_identity();
         let deployment = DeploymentStatement {
             schema: CONTROL_DISCOVERY_SCHEMA,
             product: CONTROL_DISCOVERY_PRODUCT.to_owned(),
@@ -91,8 +91,6 @@ impl ControlDiscoveryEndpoint {
             runtime_instance_id,
             issuer: issuer.to_owned(),
             release: embedded.release,
-            revision: embedded.revision,
-            build_id: embedded.build_id,
             control_protocol_versions: vec![CONTROL_DISCOVERY_SCHEMA],
             operator_protocol_versions: vec![PROTOCOL_VERSION],
             instance_key_id: key_id.clone(),
@@ -122,36 +120,6 @@ impl ControlDiscoveryEndpoint {
         &self.identity.deployment.deployment_id
     }
 
-    pub(crate) fn instance_key_id(&self) -> &str {
-        &self.identity.key_id
-    }
-
-    pub(crate) fn instance_verifying_key(&self) -> VerifyingKey {
-        self.identity.signing_key.verifying_key()
-    }
-
-    pub(crate) fn sign_openid4vp_verification_receipt(
-        &self,
-        receipt: &nazo_operator_protocol::Openid4vpVerificationReceipt,
-    ) -> Result<String, nazo_operator_protocol::ProtocolError> {
-        nazo_operator_protocol::sign_openid4vp_verification_receipt(
-            receipt,
-            &self.identity.key_id,
-            &self.identity.signing_key,
-        )
-    }
-
-    pub(crate) fn sign_openid4vp_verification_intent(
-        &self,
-        intent: &nazo_operator_protocol::Openid4vpVerificationIntent,
-    ) -> Result<String, nazo_operator_protocol::ProtocolError> {
-        nazo_operator_protocol::sign_openid4vp_verification_intent(
-            intent,
-            &self.identity.key_id,
-            &self.identity.signing_key,
-        )
-    }
-
     fn respond(&self, request: DiscoveryRequest) -> anyhow::Result<DiscoveryResponse> {
         validate_discovery_request(&request)?;
         let issued_at = Utc::now().timestamp();
@@ -163,8 +131,6 @@ impl ControlDiscoveryEndpoint {
             runtime_instance_id: deployment.runtime_instance_id.clone(),
             issuer: deployment.issuer.clone(),
             release: deployment.release.clone(),
-            revision: deployment.revision.clone(),
-            build_id: deployment.build_id.clone(),
             control_protocol_versions: deployment.control_protocol_versions.clone(),
             operator_protocol_versions: deployment.operator_protocol_versions.clone(),
             instance_key_id: deployment.instance_key_id.clone(),
@@ -274,8 +240,6 @@ fn deployment_identity_matches(left: &DeploymentStatement, right: &DeploymentSta
         && left.runtime_instance_id == right.runtime_instance_id
         && left.issuer == right.issuer
         && left.release == right.release
-        && left.revision == right.revision
-        && left.build_id == right.build_id
         && left.control_protocol_versions == right.control_protocol_versions
         && left.operator_protocol_versions == right.operator_protocol_versions
         && left.instance_key_id == right.instance_key_id
@@ -350,21 +314,25 @@ fn publish_replaceable_file(path: &Path, contents: &[u8]) -> anyhow::Result<()> 
     ));
     publish_new_file(&temporary, contents)?;
     if path.exists() {
-        let previous = parent.join("deployment-statement.previous.jws");
-        if previous.exists() {
-            fs::remove_file(&previous).with_context(|| {
-                format!("failed to remove stale statement {}", previous.display())
-            })?;
-        }
-        fs::rename(path, &previous)
-            .with_context(|| format!("failed to preserve previous statement {}", path.display()))?;
+        // Windows cannot replace an existing file with `rename`. Move the
+        // current statement to a unique temporary name first so the new
+        // statement can be activated with the same atomic rename sequence.
+        // The old statement is only a rollback temporary; it is never a
+        // second persisted deployment identity.
+        let rollback = parent.join(format!(
+            ".deployment-statement.{}.rollback.tmp",
+            URL_SAFE_NO_PAD.encode(rand::random::<[u8; 12]>()),
+        ));
+        fs::rename(path, &rollback)
+            .with_context(|| format!("failed to stage deployment statement {}", path.display()))?;
         if let Err(error) = fs::rename(&temporary, path) {
-            let _ = fs::rename(&previous, path);
+            let _ = fs::rename(&rollback, path);
             let _ = fs::remove_file(&temporary);
             return Err(error).with_context(|| {
                 format!("failed to activate deployment statement {}", path.display())
             });
         }
+        let _ = fs::remove_file(&rollback);
         return Ok(());
     }
     fs::rename(&temporary, path)

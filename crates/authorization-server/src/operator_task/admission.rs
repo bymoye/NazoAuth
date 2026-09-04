@@ -8,12 +8,10 @@
 //! touch signatures — key material is not known yet.
 //!
 //! Stage 2 resolves the controller kid/public key **by deployment_id** from
-//! the D01/D02 Controller Registry (PostgreSQL). NazoAuth is the only
-//! authority that answers "does this controller key exist, is it revoked, has
-//! it expired".  Stage 4 falls out of the same lookup, because admission
-//! requires an `active` slot with `expires_at > now`; the extra registry read
-//! only separates `CONTROLLER_KEY_EXPIRED` from
-//! `CONTROLLER_KEY_UNTRUSTED` for the closed rejection taxonomy.
+//! the D01/D02 Controller Registry persistence port. NazoAuth is the only
+//! authority that answers whether this controller key is currently admitted.
+//! Stage 4 falls out of the same lookup, because admission requires an
+//! `active` slot with `expires_at > now`.
 
 use anyhow::{Context as _, bail};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -23,9 +21,7 @@ use nazo_operator_protocol::{
     ControlOperation, MAX_COMPACT_JWS_BYTES, MAX_CONTROL_OPERATION_BYTES,
     validate_control_operation,
 };
-use nazo_postgres::{
-    AdmittedController, ControllerRegistryRepository, ControllerSlotStatus, StoredControllerSlot,
-};
+use nazo_persistence::{AdmittedController, ControllerRegistryPort};
 
 /// Stage 1: bounded, strict parse of the presented operation.
 ///
@@ -59,9 +55,9 @@ pub(super) fn present(compact: &str) -> anyhow::Result<ControlOperation> {
     if payload_bytes.len() > MAX_CONTROL_OPERATION_BYTES {
         bail!("control operation payload exceeds the maximum size");
     }
-    // deny_unknown_fields applies to the envelope, both target variants, and
-    // every typed operation payload; unknown operations are rejected here as
-    // protocol changes rather than passed through.
+    // deny_unknown_fields applies to the envelope and every typed operation
+    // payload; unknown operations are rejected here as protocol changes rather
+    // than passed through.
     let operation: ControlOperation =
         serde_json::from_slice(&payload_bytes).context("control operation payload is invalid")?;
     validate_control_operation(&operation).context("control operation violates protocol policy")?;
@@ -75,42 +71,17 @@ pub(super) struct AdmittedControllerIdentity {
     pub(super) verifying_key: VerifyingKey,
 }
 
-/// Closed classification of an admission refusal (E01 taxonomy).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum KeyAdmissionFailure {
-    /// Active slot whose fixed server-side TTL has passed.
-    Expired,
-    /// Unknown kid for this deployment, or a terminally revoked slot.
-    Untrusted,
-}
-
 /// Typed admission failures.  Transport failures are infrastructure faults;
 /// they never classify an operation outcome.
 #[derive(Debug)]
 pub(super) enum AdmissionError {
-    Rejected(KeyAdmissionFailure),
+    Unauthorized,
     Transport(anyhow::Error),
-}
-
-/// Pure stage-4 classifier for a kid that the admission lookup refused: the
-/// raw stored slot (if any) decides whether it aged out of its fixed window
-/// (`Expired`) or was never trusted / is terminally revoked (`Untrusted`).
-/// An active slot can only fail admission by expiry, so no clock is needed
-/// here — the registry already made that decision.
-pub(super) fn classify_unadmitted_key(
-    stored: Option<&StoredControllerSlot>,
-) -> KeyAdmissionFailure {
-    match stored {
-        Some(slot) if slot.status == ControllerSlotStatus::Active => KeyAdmissionFailure::Expired,
-        // Revoked slots are terminal and stay distinct from unknown kids only
-        // in the rejection taxonomy; both refuse identically.
-        _ => KeyAdmissionFailure::Untrusted,
-    }
 }
 
 /// Stage 2+4: resolve and admit the presenting controller key by deployment.
 pub(super) async fn admit_controller(
-    repository: &ControllerRegistryRepository,
+    repository: &dyn ControllerRegistryPort,
     deployment_id: &str,
     kid: &str,
     now: DateTime<Utc>,
@@ -124,24 +95,14 @@ pub(super) async fn admit_controller(
             )
         })?;
     if let Some(admitted) = admitted {
-        return build_identity(admitted).map_err(AdmissionError::Transport);
+        return decode_admitted_identity(admitted).map_err(AdmissionError::Transport);
     }
-    // Not admissible right now.  One more authoritative read separates "the
-    // key aged out of its fixed 30-day window" from "never trusted / revoked"
-    // purely for the rejection taxonomy; both refuse identically.
-    let slots = repository
-        .list_slots(deployment_id)
-        .await
-        .map_err(|error| {
-            AdmissionError::Transport(
-                anyhow::Error::new(error).context("controller registry history lookup failed"),
-            )
-        })?;
-    let failure = classify_unadmitted_key(slots.iter().find(|slot| slot.kid == kid));
-    Err(AdmissionError::Rejected(failure))
+    Err(AdmissionError::Unauthorized)
 }
 
-fn build_identity(admitted: AdmittedController) -> anyhow::Result<AdmittedControllerIdentity> {
+fn decode_admitted_identity(
+    admitted: AdmittedController,
+) -> anyhow::Result<AdmittedControllerIdentity> {
     let bytes: [u8; 32] =
         admitted.public_key.as_slice().try_into().map_err(|_| {
             anyhow::anyhow!("controller registry holds an invalid public key length")

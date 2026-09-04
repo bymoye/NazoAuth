@@ -11,6 +11,7 @@ use nazo_key_management::{
     validate_client_jwks, validate_self_signed_mtls_jwks,
 };
 use serde_json::Value;
+use std::sync::Arc;
 
 pub(crate) use nazo_auth::{
     AdminClientError as InsertClientError, CreateClientRequest, PreparedClientRegistration,
@@ -22,9 +23,9 @@ pub(crate) fn admin_session_handles(
     settings: &Settings,
 ) -> actix_web::web::Data<crate::http::sessions::AdminSessionHandles> {
     let session = &settings.session;
-    actix_web::web::Data::new(crate::http::sessions::AdminSessionHandles::new(
-        nazo_valkey::SessionStore::new(&valkey),
-        nazo_postgres::UserRepository::new(database),
+    actix_web::web::Data::new(crate::http::sessions::AdminSessionHandles::from_port(
+        Arc::new(nazo_valkey::SessionStore::new(&valkey)),
+        Arc::new(nazo_postgres::UserRepository::new(database)),
         settings.tenant.context.tenant_id,
         crate::http::sessions::SessionHttpConfig::new(
             &session.session_cookie_name,
@@ -40,7 +41,8 @@ pub(crate) fn admin_client_service(
     settings: &Settings,
 ) -> actix_web::web::Data<ServerAdminClientService> {
     actix_web::web::Data::new(ServerAdminClientService::new(
-        nazo_postgres::OAuthClientRepository::new(database),
+        std::sync::Arc::new(nazo_postgres::OAuthClientRepository::new(database))
+            as std::sync::Arc<dyn nazo_auth::AdminClientRepositoryPort>,
         ServerSectorIdentifierResolver,
         ServerAdminClientCrypto::new(keyset),
         admin_client_policy(settings),

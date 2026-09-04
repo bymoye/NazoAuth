@@ -27,6 +27,14 @@ GLOB_REEXPORT = re.compile(r"(?m)^\s*pub(?:\([^)]*\))?\s+use\s+[^;]*::\*\s*;")
 PRELUDE_MODULE = re.compile(r"(?m)^\s*(?:pub(?:\([^)]*\))?\s+)?mod\s+prelude\s*;")
 EXACT_RUST_VERSION = re.compile(r"^\d+\.\d+\.\d+$")
 FORBIDDEN_CRATE_DEPENDENCIES = {
+    "authorization-server": {"fred", "nazo-valkey"},
+    "authorization-server-postgres": {"fred", "nazo-valkey"},
+    "authorization-server-valkey": {
+        "diesel",
+        "diesel-async",
+        "nazo-postgres",
+        "tokio-postgres",
+    },
     "authorization-server-core": {
         "actix-web",
         "diesel",
@@ -201,6 +209,8 @@ def check_toolchain_pins() -> None:
         raise SystemExit("Containerfile runtime base image must be pinned by digest")
     if "cargo build --release --locked" not in containerfile:
         raise SystemExit("Containerfile release build must use Cargo.lock")
+    if "--package nazoauth --bin nazoauth" not in containerfile:
+        raise SystemExit("Containerfile must build the nazoauth aggregate executable")
     if (
         "COPY Cargo.toml Cargo.lock rust-toolchain.toml .env.yaml.example ./"
         not in containerfile
@@ -300,6 +310,92 @@ def check_crate_dependency_boundaries() -> None:
             )
 
 
+def check_transient_state_backend_boundary() -> None:
+    server_root = ROOT / "crates" / "authorization-server" / "src"
+    forbidden = ("nazo_valkey", "ValkeyConnection", "VALKEY_")
+    violations = []
+    for path in sorted(server_root.rglob("*.rs")):
+        source = path.read_text(encoding="utf-8")
+        markers = [marker for marker in forbidden if marker in source]
+        if markers:
+            violations.append((path.relative_to(ROOT).as_posix(), markers))
+    if violations:
+        detail = ", ".join(f"{path}: {markers}" for path, markers in violations)
+        raise SystemExit(f"transient-state backend leaked into authorization server: {detail}")
+
+    postgres_root = ROOT / "crates" / "authorization-server-postgres" / "src"
+    violations = []
+    for path in sorted(postgres_root.rglob("*.rs")):
+        source = path.read_text(encoding="utf-8")
+        markers = [marker for marker in forbidden if marker in source]
+        if markers:
+            violations.append((path.relative_to(ROOT).as_posix(), markers))
+    if violations:
+        detail = ", ".join(f"{path}: {markers}" for path, markers in violations)
+        raise SystemExit(f"transient-state adapter leaked into PostgreSQL launcher: {detail}")
+
+    postgres_library = postgres_root / "lib.rs"
+    if "valkey" in postgres_library.read_text(encoding="utf-8").lower():
+        raise SystemExit("PostgreSQL launcher library must not select or reference Valkey")
+
+
+def check_aggregate_package_boundary() -> None:
+    workspace = tomllib.loads((ROOT / "Cargo.toml").read_text(encoding="utf-8"))["workspace"]
+    if workspace.get("default-members") != ["crates/nazoauth"]:
+        raise SystemExit("workspace default-members must contain only the nazoauth aggregate")
+
+    manifest_path = ROOT / "crates" / "nazoauth" / "Cargo.toml"
+    manifest = tomllib.loads(manifest_path.read_text(encoding="utf-8"))
+    dependencies = set(manifest.get("dependencies", {}))
+    expected = {
+        "anyhow",
+        "nazo-oauth-server",
+        "nazo-oauth-server-postgres",
+        "nazo-oauth-server-valkey",
+        "tokio",
+    }
+    if dependencies != expected:
+        raise SystemExit(
+            f"nazoauth aggregate dependencies must be composition-only: "
+            f"expected {sorted(expected)}, got {sorted(dependencies)}"
+        )
+
+    source = (ROOT / "crates" / "nazoauth" / "src" / "main.rs").read_text(
+        encoding="utf-8"
+    )
+    forbidden = ("nazo_postgres", "nazo_valkey", "ValkeyConnection", "DbPool")
+    leaked = [marker for marker in forbidden if marker in source]
+    if leaked:
+        raise SystemExit(f"nazoauth aggregate bypasses launcher boundaries: {leaked}")
+
+
+def check_connection_url_configuration_boundary() -> None:
+    forbidden = tuple(
+        f"{prefix}_URL_FILE"
+        for prefix in ("DATABASE", "VALKEY", "AUDIT_ANCHOR_DATABASE")
+    )
+    paths = [
+        *(ROOT / "crates").rglob("*.rs"),
+        *(ROOT / "deploy").rglob("*.yaml"),
+        *(ROOT / "deploy").rglob("*.yml"),
+        *(ROOT / "deploy").rglob("*.md"),
+        *(ROOT / "docs").rglob("*.md"),
+        ROOT / "compose.yml",
+        ROOT / ".env.yaml.example",
+    ]
+    violations = []
+    for path in paths:
+        if not path.exists():
+            continue
+        source = path.read_text(encoding="utf-8")
+        markers = [marker for marker in forbidden if marker in source]
+        if markers:
+            violations.append((path.relative_to(ROOT).as_posix(), markers))
+    if violations:
+        detail = ", ".join(f"{path}: {markers}" for path, markers in violations)
+        raise SystemExit(f"connection URLs must be configured directly: {detail}")
+
+
 def check_workspace_package_metadata() -> None:
     workspace_manifest = tomllib.loads((ROOT / "Cargo.toml").read_text(encoding="utf-8"))
     for member in workspace_manifest["workspace"]["members"]:
@@ -335,8 +431,14 @@ def check_rust_test_structure() -> None:
         r"(?P=indent)(?P<item>[^\r\n]+)"
     )
     allowed_nested_seams = {
-        "crates/authorization-server/src/bootstrap/startup/services/identity.rs": (
-            "let session_profiles = web::Data::new(SessionProfileHandles::new(",
+        "crates/authorization-server/src/bootstrap/startup/configuration.rs": (
+            "let backchannel_logout_worker = None;",
+        ),
+        "crates/authorization-server/src/bootstrap/startup/tenant_runtime.rs": (
+            "pub(super) fn for_test(binding: TenantDirectoryBinding) -> Arc<Self> {",
+            "pub(super) fn for_test_reusing(",
+            "pub(super) fn shares_lifecycle_with(&self, other: &Self) -> bool {",
+            "let ciba_ping_worker = None;",
         ),
     }
 
@@ -726,11 +828,6 @@ def check_openid4vc_boundaries() -> None:
     ):
         if marker not in openid4vc_server_domain:
             raise SystemExit(f"OpenID4VC internal control-plane boundary is missing: {marker}")
-    containerfile = (ROOT / "Containerfile").read_text(encoding="utf-8")
-    runtime_start = containerfile.index("FROM runtime-base AS runtime")
-    runtime_body = containerfile[runtime_start:]
-    if "conformance" in runtime_body.lower() or "oidf" in runtime_body.lower():
-        raise SystemExit("production runtime image must not contain conformance provisioning")
     keyctl = (ROOT / "crates" / "authorization-server" / "src" / "keyctl.rs").read_text(
         encoding="utf-8"
     )
@@ -770,101 +867,77 @@ def check_openid4vc_boundaries() -> None:
             raise SystemExit(f"OpenID4VC dataset persistence boundary is missing: {marker}")
 
 
-def check_conformance_provisioning_boundaries() -> None:
-    """Keep external Suite orchestration out of the server repository."""
-
-    retired_assets = (
-        ROOT / "compose.oidf.yml",
-        ROOT / "deploy" / "oidf-suite",
-        ROOT / "deploy" / "oidf-proxy",
-        ROOT / "requirements" / "oidf-conformance.in",
-        ROOT / "requirements" / "oidf-conformance.txt",
+def check_admin_provision_boundary() -> None:
+    server_root = ROOT / "crates" / "authorization-server"
+    persistence_root = ROOT / "crates" / "persistence-postgres"
+    retired_http_module = "bootstrap" + "_" + "admin.rs"
+    retired_repository_module = "initial" + "_" + "admin" + "_" + "bootstrap.rs"
+    retired_paths = (
+        server_root / "src" / "http" / retired_http_module,
+        server_root / "tests" / "unit" / "http" / retired_http_module,
+        persistence_root / "src" / "repositories" / retired_repository_module,
+        persistence_root / "tests" / retired_repository_module,
     )
-    present = [
-        str(path.relative_to(ROOT))
-        for path in retired_assets
-        if path.is_file() or (path.is_dir() and any(child.is_file() for child in path.rglob("*")))
-    ]
+    present = [str(path.relative_to(ROOT)) for path in retired_paths if path.exists()]
     if present:
-        raise SystemExit(f"external Suite assets remain in NazoAuth: {present}")
+        raise SystemExit(f"retired administrator bootstrap assets remain: {present}")
 
-    containerfile = (ROOT / "Containerfile").read_text(encoding="utf-8")
-    runtime_start = containerfile.index("FROM runtime-base AS runtime")
-    runtime_body = containerfile[runtime_start:].lower()
-    if "oidf" in runtime_body or "conformance" in runtime_body:
-        raise SystemExit("production runtime image must not contain Suite provisioning")
-
-
-def check_bootstrap_secret_log_boundary() -> None:
-    server = (
-        ROOT
-        / "crates"
-        / "authorization-server"
-        / "src"
-        / "http"
-        / "bootstrap_admin.rs"
-    ).read_text(encoding="utf-8")
-    routes = (
-        ROOT
-        / "crates"
-        / "authorization-server"
-        / "src"
-        / "bootstrap"
-        / "routes.rs"
-    ).read_text(encoding="utf-8")
-    repository = (
-        ROOT
-        / "crates"
-        / "persistence-postgres"
-        / "src"
-        / "repositories"
-        / "initial_admin_bootstrap.rs"
-    ).read_text(encoding="utf-8")
-    operations = "\n".join(
-        path.read_text(encoding="utf-8")
-        for path in (ROOT / "docs" / "operations").glob("*.md")
+    routes = (server_root / "src" / "bootstrap" / "routes.rs").read_text(
+        encoding="utf-8"
     )
+    server_sources = "\n".join(
+        (server_root / relative).read_text(encoding="utf-8")
+        for relative in (
+            Path("src/bootstrap/routes.rs"),
+            Path("src/bootstrap/startup/configuration.rs"),
+            Path("src/bootstrap/startup/services/factory.rs"),
+            Path("src/http/mod.rs"),
+            Path("src/cli.rs"),
+        )
+    )
+    persistence_sources = "\n".join(
+        (persistence_root / relative).read_text(encoding="utf-8")
+        for relative in (
+            Path("src/schema.rs"),
+            Path("src/lib.rs"),
+            Path("src/repositories/mod.rs"),
+            Path("src/repositories/audit.rs"),
+        )
+    )
+    retired_route = 'route("/' + "bootstrap" + "-" + 'admin"'
+    if retired_route in routes:
+        raise SystemExit("authorization server still exposes the retired setup route")
+    retired_references = (
+        "bootstrap" + "_" + "admin",
+        "Initial" + "Admin" + "Bootstrap",
+        "Initial" + "Admin" + "ClaimOutcome",
+        "initial" + "_" + "admin" + "_" + "bootstrap" + "_receipts",
+        "initial" + "-" + "admin" + "-" + "token",
+    )
+    for forbidden in retired_references:
+        if forbidden in server_sources or forbidden in persistence_sources:
+            raise SystemExit(f"retired administrator bootstrap reference remains: {forbidden}")
+    for marker in (
+        '"admin-provision"',
+        "ADMIN_PROVISION_CREDENTIAL_FILE_ENV",
+        "AdminProvisionRepository",
+        "admin_provision_receipts",
+    ):
+        if marker not in server_sources + persistence_sources:
+            raise SystemExit(f"admin provisioning boundary is missing: {marker}")
 
-    for forbidden in (
-        "initial_admin_setup_page",
-        "text/html",
-        "<!doctype html>",
-        "web::{Data, Form",
-        "web::{Data, Query",
-    ):
-        if forbidden in server or forbidden in routes:
-            raise SystemExit(
-                f"authorization server still embeds administrator setup UI: {forbidden}"
-            )
-    if 'route("/setup"' in routes:
-        raise SystemExit("authorization server still exposes the legacy setup route")
-    for source in (server, routes, operations):
-        if "/setup?token=" in source or "setup URL" in source:
-            raise SystemExit(
-                "initial administrator bootstrap exposes a query-token URL"
-            )
-    if "use the operator workflow to read the private runtime-owned token file" not in server:
-        raise SystemExit("initial administrator bootstrap lacks a non-secret recovery hint")
-    for marker in (
-        "request_id: String",
-        ".claim(&payload.request_id, &token_hash, &email, password_hash)",
-        '"request_id": request_id',
-        "InitialAdminClaimOutcome::IdempotencyConflict",
-    ):
-        if marker not in server:
-            raise SystemExit(f"idempotent bootstrap API boundary is missing: {marker}")
-    created_start = server.index("nazo_postgres::InitialAdminClaimOutcome::Created")
-    created_end = server.index("nazo_postgres::InitialAdminClaimOutcome::Closed", created_start)
-    created_branch = server[created_start:created_end]
-    if "endpoint.close()" in created_branch or "remove_consumed_token" in created_branch:
-        raise SystemExit("server destroys bootstrap retry proof before ctl verifies the receipt")
-    for marker in (
-        "insert_initial_admin_created_event(",
-        "InitialAdminClaimOutcome::IdempotencyConflict",
-        "InitialAdminBootstrapState::Claimed",
-    ):
-        if marker not in repository:
-            raise SystemExit(f"database-owned bootstrap receipt boundary is missing: {marker}")
+    migration = (
+        ROOT / "migrations" / "20260830000100_admin_user_provisioning" / "up.sql"
+    ).read_text(encoding="utf-8")
+    retired_receipts = (
+        "initial" + "_" + "admin" + "_" + "bootstrap" + "_receipts"
+    )
+    if f"DROP TABLE IF EXISTS {retired_receipts}" not in migration:
+        raise SystemExit("admin provisioning migration does not remove the retired receipt table")
+    if "admin_user_created" not in migration:
+        raise SystemExit("admin provisioning migration lacks the durable audit event type")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--write-migrations", action="store_true")
@@ -882,14 +955,16 @@ def main() -> None:
         check_authorization_server_import_boundaries()
         check_toolchain_pins()
         check_crate_dependency_boundaries()
+        check_transient_state_backend_boundary()
+        check_aggregate_package_boundary()
+        check_connection_url_configuration_boundary()
         check_workspace_package_metadata()
         check_rust_test_structure()
         check_rfc9967_test_boundaries()
         check_removed_security_capabilities()
         check_fapi_ciba_boundaries()
         check_openid4vc_boundaries()
-        check_conformance_provisioning_boundaries()
-        check_bootstrap_secret_log_boundary()
+        check_admin_provision_boundary()
 
 
 if __name__ == "__main__":

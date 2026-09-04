@@ -13,6 +13,7 @@ use nazo_auth::{
     evaluate_ciba_decision, evaluate_ciba_poll,
 };
 use nazo_valkey::AtomicResult as ValkeyAtomicResult;
+use nazo_valkey::CibaStore;
 use nazo_valkey::test_support::ciba_request_storage_key;
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -761,14 +762,14 @@ async fn ciba_compare_set_preserves_current_retention_deadline() {
         .unwrap()
         .unwrap();
     let CibaPollTransition::AuthorizationPending(next) =
-        evaluate_ciba_poll(stored.value(), now + 1)
+        evaluate_ciba_poll(stored.state(), now + 1)
     else {
         panic!("poll should remain pending")
     };
 
     assert_eq!(
         CibaStore::new(&connection)
-            .replace(&auth_req_id, &stored, &next)
+            .replace(&auth_req_id, stored.version(), &next)
             .await
             .unwrap(),
         ValkeyAtomicResult::Applied
@@ -1047,11 +1048,11 @@ async fn ciba_poll_conflict_retry_consumes_assertion_once() {
         .await
         .unwrap()
         .unwrap();
-    let mut winner = winner_version.value().clone();
+    let mut winner = winner_version.state().clone();
     winner.interval_seconds = 6;
     assert_eq!(
         CibaStore::new(&connection)
-            .replace(&auth_req_id, &winner_version, &winner)
+            .replace(&auth_req_id, winner_version.version(), &winner)
             .await
             .unwrap(),
         ValkeyAtomicResult::Applied

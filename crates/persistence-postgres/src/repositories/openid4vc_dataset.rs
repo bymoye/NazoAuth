@@ -366,6 +366,94 @@ impl Openid4vciDatasetRepository {
     }
 }
 
+impl nazo_persistence::Openid4vciDatasetStore for Openid4vciDatasetRepository {
+    fn dataset<'a>(
+        &'a self,
+        tenant_id: Uuid,
+        subject_id: Uuid,
+        credential_configuration_id: &'a str,
+    ) -> futures_util::future::BoxFuture<'a, Result<Option<serde_json::Value>, CredentialStoreError>>
+    {
+        Box::pin(async move {
+            Openid4vciDatasetRepository::dataset(
+                self,
+                tenant_id,
+                subject_id,
+                credential_configuration_id,
+            )
+            .await
+        })
+    }
+
+    fn managed_dataset<'a>(
+        &'a self,
+        tenant_id: Uuid,
+        subject_id: Uuid,
+        credential_configuration_id: &'a str,
+    ) -> futures_util::future::BoxFuture<
+        'a,
+        Result<Option<nazo_persistence::ManagedCredentialDataset>, CredentialStoreError>,
+    > {
+        Box::pin(async move {
+            Openid4vciDatasetRepository::managed_dataset(
+                self,
+                tenant_id,
+                subject_id,
+                credential_configuration_id,
+            )
+            .await
+            .map(|dataset| {
+                dataset.map(|dataset| nazo_persistence::ManagedCredentialDataset {
+                    claims: dataset.claims,
+                    valid_from: dataset.valid_from,
+                    valid_until: dataset.valid_until,
+                    updated_at: dataset.updated_at,
+                })
+            })
+        })
+    }
+
+    fn upsert_managed_dataset(
+        &self,
+        write: nazo_persistence::ManagedCredentialDatasetWrite,
+    ) -> futures_util::future::BoxFuture<'_, Result<bool, CredentialStoreError>> {
+        Box::pin(async move {
+            Openid4vciDatasetRepository::upsert_managed_dataset(
+                self,
+                ManagedCredentialDatasetWrite {
+                    tenant_id: write.tenant_id,
+                    actor_user_id: write.actor_user_id,
+                    subject_id: write.subject_id,
+                    credential_configuration_id: &write.credential_configuration_id,
+                    claims: &write.claims,
+                    valid_from: write.valid_from,
+                    valid_until: write.valid_until,
+                },
+            )
+            .await
+        })
+    }
+
+    fn delete_managed_dataset<'a>(
+        &'a self,
+        tenant_id: Uuid,
+        actor_user_id: Uuid,
+        subject_id: Uuid,
+        credential_configuration_id: &'a str,
+    ) -> futures_util::future::BoxFuture<'a, Result<bool, CredentialStoreError>> {
+        Box::pin(async move {
+            Openid4vciDatasetRepository::delete_managed_dataset(
+                self,
+                tenant_id,
+                actor_user_id,
+                subject_id,
+                credential_configuration_id,
+            )
+            .await
+        })
+    }
+}
+
 fn dataset_aad(tenant_id: Uuid, subject_id: Uuid, credential_configuration_id: &str) -> Vec<u8> {
     let configuration = credential_configuration_id.as_bytes();
     let mut aad = Vec::with_capacity(16 + 16 + 8 + configuration.len());

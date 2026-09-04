@@ -1,3 +1,6 @@
+use std::sync::Arc;
+
+use nazo_auth::{RequestRateLimitBucket, RequestRateLimitPort};
 use nazo_http_actix::{
     AuthenticationRateLimit, AuthenticationRateLimitError, LocalRegistrationFuture,
     LocalRegistrationOperations,
@@ -5,27 +8,23 @@ use nazo_http_actix::{
 use nazo_identity::{
     RegisterLocalAccountError, RegisterLocalAccountInput, RegistrationService,
     SendVerificationCodeError, SendVerificationCodeOutcome,
-    ports::{
-        EmailVerificationStorePort, RegistrationAccountRepositoryPort, SecretHashPort,
-        VerificationEmailDeliveryPort,
-    },
+    ports::{EmailVerificationStorePort, SecretHashPort, VerificationEmailDeliveryPort},
     registration::RegisteredAccount,
 };
 
 #[derive(Clone)]
-pub(crate) struct ServerLocalRegistrationOperations<A, V, H, E> {
-    service: RegistrationService<A, V, H, E>,
+pub(crate) struct ServerLocalRegistrationOperations<V, H, E> {
+    service: RegistrationService<V, H, E>,
 }
 
-impl<A, V, H, E> ServerLocalRegistrationOperations<A, V, H, E> {
-    pub(crate) fn new(service: RegistrationService<A, V, H, E>) -> Self {
+impl<V, H, E> ServerLocalRegistrationOperations<V, H, E> {
+    pub(crate) fn new(service: RegistrationService<V, H, E>) -> Self {
         Self { service }
     }
 }
 
-impl<A, V, H, E> LocalRegistrationOperations for ServerLocalRegistrationOperations<A, V, H, E>
+impl<V, H, E> LocalRegistrationOperations for ServerLocalRegistrationOperations<V, H, E>
 where
-    A: RegistrationAccountRepositoryPort + 'static,
     V: EmailVerificationStorePort + 'static,
     H: SecretHashPort + 'static,
     E: VerificationEmailDeliveryPort + 'static,
@@ -68,20 +67,20 @@ where
     }
 }
 
-/// Infrastructure adapter for the authentication fixed-window limiter.
+/// Application adapter for the authentication fixed-window limiter.
 ///
-/// Business-independent Valkey failures and counters are converted to a small
-/// typed boundary; HTTP rendering remains in `nazo-http-actix`.
+/// Backend failures and counters are converted to the HTTP-facing typed
+/// boundary; response rendering remains in `nazo-http-actix`.
 #[derive(Clone)]
 pub(crate) struct ServerAuthenticationRateLimit {
-    store: nazo_valkey::RateLimitStore,
+    store: Arc<dyn RequestRateLimitPort>,
     window_seconds: u64,
     max_requests: u64,
 }
 
 impl ServerAuthenticationRateLimit {
     pub(crate) fn new(
-        store: nazo_valkey::RateLimitStore,
+        store: Arc<dyn RequestRateLimitPort>,
         window_seconds: u64,
         max_requests: u64,
     ) -> Self {
@@ -102,7 +101,7 @@ impl AuthenticationRateLimit for ServerAuthenticationRateLimit {
             let count = self
                 .store
                 .increment(
-                    nazo_valkey::RateDimension::Auth,
+                    RequestRateLimitBucket::Authentication,
                     subject,
                     self.window_seconds,
                 )

@@ -1,12 +1,15 @@
 //! 结构化安全审计日志。
 
-use std::{sync::OnceLock, time::Duration};
+use std::{
+    sync::{Arc, OnceLock},
+    time::Duration,
+};
 
 use chrono::Utc;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
-use nazo_postgres::{AuditLedgerRepository, SecurityAuditEvent};
+use nazo_persistence::{SecurityAuditEvent, SecurityAuditLedger};
 
 use super::audit_anchor::AuditAnchorPreflight;
 
@@ -101,7 +104,7 @@ static PERSISTENT_AUDIT_SINK: OnceLock<mpsc::Sender<QueuedAuditEvent>> = OnceLoc
 static REQUIRED_AUDIT_REPOSITORY: OnceLock<RequiredAuditRepository> = OnceLock::new();
 
 struct RequiredAuditRepository {
-    repository: AuditLedgerRepository,
+    repository: Arc<dyn SecurityAuditLedger>,
     require_least_privilege: bool,
     preflight: AuditAnchorPreflight,
 }
@@ -126,7 +129,7 @@ struct QueuedAuditEvent {
 /// fail-closed semantics; this sink is the durable evidence/export path for
 /// the broader application audit vocabulary.
 pub(crate) fn install_persistent_audit_sink(
-    repository: AuditLedgerRepository,
+    repository: Arc<dyn SecurityAuditLedger>,
     require_least_privilege: bool,
     preflight: AuditAnchorPreflight,
 ) -> anyhow::Result<()> {
@@ -221,7 +224,7 @@ pub(crate) async fn ensure_audit_storage() -> anyhow::Result<()> {
     };
     required
         .repository
-        .check_available_with_policy(required.require_least_privilege)
+        .check_available(required.require_least_privilege)
         .await
         .map_err(|error| {
             anyhow::anyhow!("durable security audit repository unavailable: {error}")
@@ -345,7 +348,7 @@ fn prepare_event(
     let payload_size = serde_json::to_vec(&payload)
         .map_err(|_| "payload_serialization_failed")?
         .len();
-    if payload_size > nazo_postgres::MAX_SECURITY_AUDIT_PAYLOAD_BYTES {
+    if payload_size > nazo_persistence::MAX_SECURITY_AUDIT_PAYLOAD_BYTES {
         return Err("payload_too_large");
     }
     Ok(QueuedAuditEvent {

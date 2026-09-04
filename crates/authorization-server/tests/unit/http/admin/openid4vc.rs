@@ -165,12 +165,16 @@ impl LiveOpenid4vcAdminFixture {
         });
         let token_service = Arc::new(ServerTokenService::new(
             crate::test_support::token_issuance_repository(diesel_db.clone()),
-            nazo_valkey::TokenIssuanceStateAdapter::new(&state.valkey_connection()),
+            Arc::new(nazo_valkey::TokenIssuanceStateAdapter::new(
+                &state.valkey_connection(),
+            )),
             key_manager.clone(),
         ));
         let authorization = Arc::new(ServerAuthorizationService::new(
             nazo_postgres::AuthorizationFlowRepository::new(diesel_db.clone(), DEFAULT_TENANT_ID),
-            nazo_valkey::AuthorizationStateAdapter::new(&state.valkey_connection()),
+            Arc::new(nazo_valkey::AuthorizationStateAdapter::new(
+                &state.valkey_connection(),
+            )),
             key_manager.clone(),
         ));
         let mut active_modules = crate::test_support::persisted_runtime_modules_fixture();
@@ -186,9 +190,19 @@ impl LiveOpenid4vcAdminFixture {
         .expect("runtime module fixture should build");
         let proof_validator = Openid4vcProofValidator::new(json!({"keys": []}))
             .expect("proof validator fixture should build");
+        let store: Arc<dyn nazo_persistence::Openid4vciStore> = Arc::new(
+            nazo_postgres::Openid4vciRepository::new(diesel_db.clone(), [0x51; 32]),
+        );
+        let users: Arc<dyn nazo_persistence::Openid4vcSubjectStore> =
+            Arc::new(nazo_postgres::UserRepository::new(diesel_db.clone()));
+        let datasets: Arc<dyn nazo_persistence::Openid4vciDatasetStore> = Arc::new(
+            nazo_postgres::Openid4vciDatasetRepository::new(diesel_db, [0x51; 32]),
+        );
         let operations = Arc::new(
             ServerCredentialIssuerOperations::new(
-                diesel_db,
+                store,
+                users,
+                datasets,
                 DEFAULT_TENANT_ID,
                 [0x51; 32],
                 token_service,
@@ -272,9 +286,13 @@ impl LiveOpenid4vcAdminFixture {
 
     fn sessions(&self) -> Data<AdminSessionHandles> {
         let session = &self.state.settings.session;
-        Data::new(AdminSessionHandles::new(
-            nazo_valkey::SessionStore::new(&self.state.valkey_connection()),
-            nazo_postgres::UserRepository::new(self.state.diesel_db.clone()),
+        Data::new(AdminSessionHandles::from_port(
+            Arc::new(nazo_valkey::SessionStore::new(
+                &self.state.valkey_connection(),
+            )),
+            Arc::new(nazo_postgres::UserRepository::new(
+                self.state.diesel_db.clone(),
+            )),
             self.state.settings.tenant.context.tenant_id,
             SessionHttpConfig::new(
                 &session.session_cookie_name,
@@ -316,7 +334,9 @@ impl LiveOpenid4vcAdminFixture {
         settings.modules.enable_openid4vci_issuer = enabled;
         let token_service = Arc::new(ServerTokenService::new(
             crate::test_support::token_issuance_repository(self.state.diesel_db.clone()),
-            nazo_valkey::TokenIssuanceStateAdapter::new(&self.state.valkey_connection()),
+            Arc::new(nazo_valkey::TokenIssuanceStateAdapter::new(
+                &self.state.valkey_connection(),
+            )),
             self.state.keyset.clone(),
         ));
         let authorization = Arc::new(ServerAuthorizationService::new(
@@ -324,7 +344,9 @@ impl LiveOpenid4vcAdminFixture {
                 self.state.diesel_db.clone(),
                 DEFAULT_TENANT_ID,
             ),
-            nazo_valkey::AuthorizationStateAdapter::new(&self.state.valkey_connection()),
+            Arc::new(nazo_valkey::AuthorizationStateAdapter::new(
+                &self.state.valkey_connection(),
+            )),
             self.state.keyset.clone(),
         ));
         let mut active_modules = crate::test_support::persisted_runtime_modules_fixture();
@@ -342,8 +364,21 @@ impl LiveOpenid4vcAdminFixture {
         .expect("runtime module fixture should build");
         let proof_validator = Openid4vcProofValidator::new(json!({"keys": []}))
             .expect("proof validator fixture should build");
+        let store: Arc<dyn nazo_persistence::Openid4vciStore> = Arc::new(
+            nazo_postgres::Openid4vciRepository::new(self.state.diesel_db.clone(), [0x51; 32]),
+        );
+        let users: Arc<dyn nazo_persistence::Openid4vcSubjectStore> = Arc::new(
+            nazo_postgres::UserRepository::new(self.state.diesel_db.clone()),
+        );
+        let datasets: Arc<dyn nazo_persistence::Openid4vciDatasetStore> =
+            Arc::new(nazo_postgres::Openid4vciDatasetRepository::new(
+                self.state.diesel_db.clone(),
+                [0x51; 32],
+            ));
         let operations = ServerCredentialIssuerOperations::new(
-            self.state.diesel_db.clone(),
+            store,
+            users,
+            datasets,
             DEFAULT_TENANT_ID,
             [0x51; 32],
             token_service,

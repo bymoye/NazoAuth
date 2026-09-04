@@ -27,7 +27,6 @@ struct FrontendDescriptor {
     schema: u32,
     repository: String,
     version: String,
-    commit: String,
     release_identity: String,
     artifact: FrontendArtifact,
 }
@@ -76,7 +75,6 @@ impl FrontendDescriptor {
         if self.schema != 1
             || self.repository != "nazozero/NazoAuthWeb"
             || !semantic_tag(&self.version)
-            || !lower_hex(&self.commit, 40)
             || self.release_identity != expected_identity
             || self.artifact.repository != self.repository
             || self.artifact.name != "nazoauth-web.tar.gz"

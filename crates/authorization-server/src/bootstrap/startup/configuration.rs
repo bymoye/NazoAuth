@@ -1,30 +1,41 @@
 use super::*;
-use uuid::Uuid;
-
 use crate::config::DEFAULT_DATA_DIR;
 
-/// Values initialized once for the process and shared by all service
-/// adapters.  The pool, Valkey client, settings, runtime registry, and keyset
-/// have one owner here; service assembly borrows or clones their handles.
+use super::tenant_runtime::{
+    ProcessRuntime, TenantDirectoryRefreshOutcome, TenantRuntimeBuilder, TenantRuntimeRefresher,
+    TenantRuntimeRegistry,
+};
+
+/// Tenant-scoped values used to assemble one immutable request graph.
 pub(super) struct StartupConfiguration {
     pub(super) config: ConfigSource,
-    pub(super) perf_metrics_enabled: bool,
-    pub(super) diesel_db: nazo_postgres::DbPool,
-    pub(super) valkey_connection: nazo_valkey::ValkeyConnection,
+    pub(super) persistence: super::super::ServerPersistenceBindings,
+    pub(super) transient_state: super::super::ServerTransientStateBindings,
     pub(super) settings: Arc<Settings>,
-    pub(super) token_issuance_response_keys: nazo_postgres::TokenIssuanceResponseKeyRing,
+    pub(super) token_issuance_response_keys: nazo_persistence::TokenIssuanceResponseKeyRing,
     pub(super) control_discovery: web::Data<crate::control_discovery::ControlDiscoveryEndpoint>,
     pub(super) mtls_certificate_source: web::Data<crate::http::mtls::MtlsCertificateSource>,
     pub(super) readiness_dependencies: web::Data<crate::http::well_known::ReadinessDependencies>,
-    pub(super) initial_admin_bootstrap:
-        web::Data<crate::http::bootstrap_admin::InitialAdminBootstrapEndpoint>,
     pub(super) remote_client_documents:
         Arc<crate::domain::remote_client_documents::RemoteClientDocumentResolver>,
     pub(super) runtime_modules: web::Data<RuntimeModules>,
     pub(super) keyset: nazo_key_management::KeyManager,
 }
 
-pub(super) async fn load(config: ConfigSource) -> anyhow::Result<StartupConfiguration> {
+/// Values which survive process startup. Tenant request graphs live only in
+/// the immutable registry and can be replaced without restarting the server.
+pub(super) struct StartupRuntime {
+    pub(super) process: Arc<ProcessRuntime>,
+    pub(super) registry: TenantRuntimeRegistry,
+    pub(super) refresher: Arc<TenantRuntimeRefresher>,
+    pub(super) backchannel_logout_worker: Option<tokio::task::JoinHandle<()>>,
+}
+
+pub(super) async fn load(
+    config: ConfigSource,
+    persistence: super::super::ServerPersistenceBindings,
+    transient_state_launcher: &dyn crate::cli::TransientStateLauncher,
+) -> anyhow::Result<StartupRuntime> {
     let perf_metrics_enabled = config.bool("PERF_METRICS_ENABLED", false)?;
     let password_hash_max_concurrency = config.parse::<usize>(
         "PASSWORD_HASH_MAX_CONCURRENCY",
@@ -40,9 +51,27 @@ pub(super) async fn load(config: ConfigSource) -> anyhow::Result<StartupConfigur
     )?;
     initialize_dummy_password_hash()?;
 
-    // 配置只在启动阶段读取；运行期只向 handler 注入其所需的 focused handles。
-    let settings = Arc::new(Settings::from_config(&config)?);
-    let database_url = database_url(&config);
+    // Always read the authoritative snapshot first. The shared cache is never
+    // trusted for a cold start, so a stale cache cannot resurrect a tenant.
+    let directory = persistence.provider().tenant_directory();
+    let database_snapshot = directory
+        .load_active()
+        .await
+        .map_err(|error| anyhow::anyhow!("tenant directory initial read failed: {error}"))?;
+    if database_snapshot.revision == 0 {
+        anyhow::bail!(
+            "tenant runtime directory is not initialized; run `nazoauth tenant-bootstrap` before starting the server"
+        );
+    }
+
+    // This baseline is process identity only (static route set, module catalog,
+    // control discovery). It never supplies request tenant settings or CORS.
+    // Its issuer therefore remains stable when directory ordering changes.
+    let route_settings = Arc::new(Settings::from_config(&config)?);
+    // Deployment-global control routes never follow directory ordering. The
+    // fixed system tenant is the only authority for deployment-level control.
+    let control_tenant_id = nazo_identity::TenantContext::default_system().tenant_id;
+
     let audit_anchor_data_dir = config.persistent_path("DATA_DIR", Some(DEFAULT_DATA_DIR))?;
     let audit_anchor_preflight = crate::adapters::audit_anchor::AuditAnchorPreflight::new(
         crate::adapters::audit_anchor::preflight_config_from_source(
@@ -52,7 +81,7 @@ pub(super) async fn load(config: ConfigSource) -> anyhow::Result<StartupConfigur
     )?;
     let control_discovery = web::Data::new(
         crate::control_discovery::ControlDiscoveryEndpoint::initialize(
-            &settings.storage.data_dir,
+            &route_settings.storage.data_dir,
             config
                 .optional_string("INSTANCE_IDENTITY_DIR")
                 .map(|_| config.persistent_path("INSTANCE_IDENTITY_DIR", None))
@@ -60,33 +89,15 @@ pub(super) async fn load(config: ConfigSource) -> anyhow::Result<StartupConfigur
                 .as_deref(),
             config.optional_string("DEPLOYMENT_ID").as_deref(),
             config.optional_string("RUNTIME_INSTANCE_ID").as_deref(),
-            &settings.endpoint.issuer,
+            &route_settings.endpoint.issuer,
         )?,
     );
-    let valkey_state_epoch = config.required_string("VALKEY_STATE_EPOCH")?;
-    let valkey_state_epoch = Uuid::parse_str(&valkey_state_epoch)
-        .map_err(|_| anyhow::anyhow!("VALKEY_STATE_EPOCH must be a UUID"))?;
-    if valkey_state_epoch.get_version_num() != 7 {
-        anyhow::bail!("VALKEY_STATE_EPOCH must be a UUIDv7");
-    }
-    let valkey_url = config.string("VALKEY_URL", "redis://127.0.0.1:6379/0");
-    let valkey_command_timeout_ms = config.parse::<u64>("VALKEY_COMMAND_TIMEOUT_MS", 1_000)?;
-    if valkey_command_timeout_ms == 0 {
-        anyhow::bail!("VALKEY_COMMAND_TIMEOUT_MS must be greater than zero");
-    }
-    let valkey_command_timeout = Duration::from_millis(valkey_command_timeout_ms);
 
-    // 数据库和 Valkey 客户端在 server factory 外创建，避免每个 worker 重复初始化。
-    let diesel_db = create_pool(database_url.clone(), database_max_connections(&config)?)?;
-    nazo_postgres::ActiveTenantBoundaryRepository::new(diesel_db.clone())
-        .preflight(settings.tenant.context)
-        .await
-        .map_err(|error| anyhow::anyhow!("active tenant boundary preflight failed: {error}"))?;
     let require_audit_least_privilege =
         config.bool("SECURITY_AUDIT_REQUIRE_LEAST_PRIVILEGE", true)?;
-    let audit_repository = nazo_postgres::AuditLedgerRepository::new(diesel_db.clone());
+    let audit_repository = persistence.provider().security_audit_ledger();
     audit_repository
-        .check_available_with_policy(require_audit_least_privilege)
+        .check_available(require_audit_least_privilege)
         .await
         .map_err(|error| anyhow::anyhow!("security audit writer preflight failed: {error}"))?;
     crate::adapters::audit::install_persistent_audit_sink(
@@ -94,70 +105,64 @@ pub(super) async fn load(config: ConfigSource) -> anyhow::Result<StartupConfigur
         require_audit_least_privilege,
         audit_anchor_preflight,
     )?;
-    let valkey_connection = nazo_valkey::ValkeyConnection::connect(
-        &valkey_url,
-        valkey_command_timeout,
-        control_discovery.deployment_id(),
-        valkey_state_epoch,
-    )
-    .await?;
-    valkey_connection
-        .bind_tenant_owner(settings.tenant.context.tenant_id)
-        .await
-        .map_err(|error| anyhow::anyhow!("Valkey tenant ownership preflight failed: {error}"))?;
 
     let token_issuance_response_keys = token_issuance_response_key_ring(&config)?;
-    let mtls_certificate_source = web::Data::new(crate::http::mtls::MtlsCertificateSource::new(
-        settings.endpoint.mtls_certificate_source,
-    ));
-    let keyset = nazo_key_management::KeyManager::load_or_create(settings.key_settings()).await?;
-    let readiness_dependencies =
-        web::Data::new(crate::http::well_known::ReadinessDependencies::new(
-            diesel_db.clone(),
-            valkey_connection.clone(),
-            keyset.clone(),
-        ));
-    let initial_admin_bootstrap = web::Data::new(
-        crate::http::bootstrap_admin::InitialAdminBootstrapEndpoint::initialize(
-            diesel_db.clone(),
-            &settings.storage.data_dir,
-            &settings.endpoint.issuer,
-            control_discovery.deployment_id(),
-            settings.tenant.context,
-        )
-        .await?,
-    );
-    let remote_client_documents = Arc::new(
-        crate::domain::remote_client_documents::RemoteClientDocumentResolver::new(
-            &settings.modules.remote_client_document_private_origins,
-        )
-        .map_err(anyhow::Error::msg)?,
-    );
-    let runtime_modules = web::Data::new(
-        RuntimeModules::initialize(
-            diesel_db.clone(),
-            &settings,
-            control_discovery.runtime_instance_id(),
-        )
-        .await?,
-    );
-    background::spawn_runtime_reconciler(runtime_modules.clone());
-    tokio::fs::create_dir_all(&settings.storage.avatar_storage_dir).await?;
-    background::spawn_key_lifecycle(keyset.clone());
+    let state_backend = transient_state_launcher
+        .server_bindings(&config, control_discovery.deployment_id())
+        .await
+        .map_err(|error| anyhow::anyhow!("transient-state deployment preflight failed: {error}"))?;
 
-    Ok(StartupConfiguration {
+    let directory_cache = state_backend.tenant_directory_cache();
+    let database_pool_metrics: web::Data<dyn nazo_persistence::DatabasePoolMetricsPort> =
+        web::Data::from(persistence.provider().database_pool_metrics());
+    let process = Arc::new(ProcessRuntime {
         config,
         perf_metrics_enabled,
-        diesel_db,
-        valkey_connection,
-        settings,
+        control_tenant_id,
+        persistence,
+        state_backend,
         token_issuance_response_keys,
         control_discovery,
-        mtls_certificate_source,
-        readiness_dependencies,
-        initial_admin_bootstrap,
-        remote_client_documents,
-        runtime_modules,
-        keyset,
+        database_pool_metrics,
+        route_settings,
+    });
+
+    let registry = TenantRuntimeRegistry::empty();
+    let refresher = Arc::new(TenantRuntimeRefresher::new(
+        registry.clone(),
+        directory,
+        directory_cache.clone(),
+        TenantRuntimeBuilder::production(process.clone()),
+    ));
+    let outcome = refresher.install_initial(database_snapshot.clone()).await?;
+    if matches!(outcome, TenantDirectoryRefreshOutcome::Applied { .. })
+        && let Err(error) = directory_cache
+            .publish_authoritative(&database_snapshot)
+            .await
+    {
+        tracing::warn!(%error, "tenant directory cache initial publish failed");
+    }
+
+    // The queue is process-global, so exactly one worker claims it. Start it
+    // only after every initial tenant graph has been built successfully.
+    #[cfg(not(test))]
+    let backchannel_logout_worker = match background::spawn_backchannel_logout_worker(
+        process.persistence.provider().logout_delivery_store(),
+        &process.route_settings,
+    ) {
+        Ok(worker) => Some(worker),
+        Err(error) => {
+            refresher.shutdown().await;
+            return Err(error);
+        }
+    };
+    #[cfg(test)]
+    let backchannel_logout_worker = None;
+
+    Ok(StartupRuntime {
+        process,
+        registry,
+        refresher,
+        backchannel_logout_worker,
     })
 }

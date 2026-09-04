@@ -6,10 +6,12 @@ mod cors;
 mod federation_services;
 mod observability;
 mod passkey_services;
+mod persistence;
 mod profile_services;
 mod registration_services;
 pub(crate) mod routes;
 mod startup;
+mod transient_state;
 mod transport;
 mod ui_release;
 pub(crate) use authentication_services::{
@@ -21,14 +23,22 @@ pub(crate) use federation_services::{
 pub(crate) use passkey_services::{
     LocalPasskeyService, PASSKEY_CEREMONY_TTL_SECONDS, TracingPasskeyAudit,
 };
+pub use persistence::{ServerPersistenceBindings, ServerPersistenceProvider};
 pub(crate) use profile_services::{
     AccountProfileService, AvatarProfileService, ClientAccessProfileService,
     FederationProfileService, MtlsTrustAnchorService,
 };
 pub(crate) use registration_services::{LocalRegistrationService, RegistrationSecretHasher};
-pub(crate) use startup::run;
+pub use startup::run;
+pub(crate) use startup::tenant_runtime::TenantRuntimeRegistry;
 #[cfg(test)]
 pub(crate) use startup::{load_revocation_policy, read_revocation_snapshot};
+pub use transient_state::{
+    CibaPingDelivery, CibaPingDeliveryPort, CibaPingFinishOutcome, CibaPingFinishResult,
+    ServerStateBackendBindings, ServerTransientStateBindings, ServerTransientStateProvider,
+    TenantDirectoryCachePort, TenantTransientStateFactory, TransientStateError,
+    TransientStateFuture, TransientStateHealthPort,
+};
 
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
@@ -37,17 +47,17 @@ use crate::adapters::security::{
     configure_password_hash_limits, default_password_hash_max_concurrency,
     default_password_hash_queue_timeout_ms, dummy_password_hash, initialize_dummy_password_hash,
 };
-use crate::config::{ConfigSource, database_max_connections, database_url};
+use crate::config::ConfigSource;
 #[cfg(not(test))]
 use crate::domain::{
-    BackchannelLogoutWorker, CibaPingDeliveryWorker, ServerTokenManagementOperations,
-    ServerTokenManagementRequestGuard, spawn_backchannel_logout_delivery_worker,
-    spawn_ciba_ping_delivery_worker,
+    BackchannelLogoutWorker, ServerTokenManagementOperations, ServerTokenManagementRequestGuard,
+    spawn_backchannel_logout_delivery_worker,
 };
 use crate::domain::{
-    CredentialDatasetAdminService, Openid4vcClientAttestationValidator, Openid4vcCredentialCrypto,
-    Openid4vcProofValidator, PresentationVerifierConfig, ServerCredentialIssuerOperations,
-    ServerPresentationOperations,
+    CibaPingDeliveryWorker, CredentialDatasetAdminService, Openid4vcClientAttestationValidator,
+    Openid4vcCredentialCrypto, Openid4vcProofValidator, PresentationVerifierConfig,
+    ServerCredentialIssuerOperations, ServerPresentationOperations,
+    spawn_ciba_ping_delivery_worker,
 };
 use crate::domain::{
     DynamicRegistrationConfig, ServerUserinfoOperations, dynamic_registration_endpoint,
@@ -113,7 +123,6 @@ use nazo_http_actix::{
     SessionLogoutEndpoint, SessionManagementConfig, SessionManagementEndpoint, security_headers,
 };
 use nazo_openid4vc_http_actix::{CredentialIssuerEndpoint, PresentationEndpoint};
-use nazo_postgres::create_pool;
 #[cfg(test)]
 use transport::DirectTlsReload;
 use transport::{direct_tls_listeners, spawn_direct_tls_reloader};

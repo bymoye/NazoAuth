@@ -27,6 +27,7 @@ from argon2 import PasswordHasher
 
 
 BASE_URL = os.environ.get("E2E_BASE_URL", "http://nazo-oauth-e2e-server:8000")
+TENANT_HEADERS = {"Host": os.environ.get("E2E_TENANT_HOST", urlparse(BASE_URL).netloc)}
 DATABASE_URL = os.environ.get(
     "E2E_DATABASE_URL",
     "postgresql://postgres:postgres@nazo-oauth-e2e-postgres:5432/oauth",
@@ -79,7 +80,7 @@ def wait_for_service() -> None:
     deadline = time.time() + 30
     while time.time() < deadline:
         try:
-            response = requests.get(f"{BASE_URL}/health", timeout=2)
+            response = requests.get(f"{BASE_URL}/health", headers=TENANT_HEADERS, timeout=2)
             if response.status_code == 200:
                 return
         except requests.RequestException:
@@ -139,6 +140,7 @@ def totp_code(secret_base32: str) -> str:
 
 def create_load_client() -> tuple[str, str]:
     admin = requests.Session()
+    admin.headers.update(TENANT_HEADERS)
     login = admin.post(
         f"{BASE_URL}/auth/login",
         json={"email": ADMIN_EMAIL, "password": ADMIN_PASSWORD},
@@ -367,18 +369,21 @@ def run_load_gate() -> None:
     client_id, client_secret = create_load_client()
 
     def health() -> None:
-        response = requests.get(f"{BASE_URL}/health", timeout=10)
+        response = requests.get(f"{BASE_URL}/health", headers=TENANT_HEADERS, timeout=10)
         if response.status_code != 200:
             fail(f"health failed: {response.status_code}")
 
     def discovery() -> None:
-        response = requests.get(f"{BASE_URL}/.well-known/openid-configuration", timeout=10)
+        response = requests.get(
+            f"{BASE_URL}/.well-known/openid-configuration", headers=TENANT_HEADERS, timeout=10
+        )
         if response.status_code != 200:
             fail(f"discovery failed: {response.status_code}")
 
     def token() -> None:
         response = requests.post(
             f"{BASE_URL}/token",
+            headers=TENANT_HEADERS,
             data={
                 "grant_type": "client_credentials",
                 "client_id": client_id,
@@ -393,6 +398,7 @@ def run_load_gate() -> None:
     def token_introspect() -> None:
         token_response = requests.post(
             f"{BASE_URL}/token",
+            headers=TENANT_HEADERS,
             data={
                 "grant_type": "client_credentials",
                 "client_id": client_id,
@@ -406,6 +412,7 @@ def run_load_gate() -> None:
         access_token = token_response.json()["access_token"]
         introspect = requests.post(
             f"{BASE_URL}/introspect",
+            headers=TENANT_HEADERS,
             data={
                 "token": access_token,
                 "client_id": client_id,

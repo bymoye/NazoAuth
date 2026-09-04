@@ -67,10 +67,8 @@ impl nazo_identity::ports::AuthenticationAuditPort for TracingAuthenticationAudi
 }
 
 pub(crate) type LocalAuthenticationService = nazo_identity::AuthenticationService<
-    nazo_postgres::UserRepository,
-    nazo_valkey::RateLimitStore,
+    std::sync::Arc<dyn nazo_identity::ports::LoginThrottlePort>,
     LoginPasswordVerifier,
-    nazo_postgres::MfaRepository,
-    nazo_valkey::SessionStore,
+    std::sync::Arc<dyn nazo_identity::ports::LoginSessionPort>,
     TracingAuthenticationAudit,
 >;

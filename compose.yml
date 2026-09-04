@@ -1,16 +1,6 @@
 name: nazo-oauth
 
 services:
-  secrets-init:
-    build:
-      context: .
-      dockerfile: Containerfile
-      target: compose-secrets-init
-    volumes:
-      - runtime_secrets:/run/nazoauth-secrets
-    networks:
-      nazo_oauth_net:
-
   runtime-init:
     image: docker.io/library/alpine:3.22@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce
     user: "0:0"
@@ -31,15 +21,11 @@ services:
       context: .
       dockerfile: Containerfile
       target: development-runtime
-      args:
-        NAZOAUTH_BUILD_RELEASE: ${NAZOAUTH_BUILD_RELEASE:-development}
-        NAZOAUTH_BUILD_REVISION: ${NAZOAUTH_BUILD_REVISION:-development}
-        NAZOAUTH_BUILD_ID: ${NAZOAUTH_BUILD_ID:-local:development}
     restart: unless-stopped
     environment:
       DATA_DIR: /var/lib/nazo_oauth
-      DATABASE_URL_FILE: /run/nazoauth-secrets/database-url
-      VALKEY_URL_FILE: /run/nazoauth-secrets/valkey-url
+      DATABASE_URL: "postgresql://nazoauth:${NAZOAUTH_POSTGRES_PASSWORD:?set the URL-safe PostgreSQL runtime password using only RFC 3986 unreserved characters}@postgres:5432/oauth"
+      VALKEY_URL: "redis://default:${NAZOAUTH_VALKEY_PASSWORD:?set a URL-safe Valkey password using only RFC 3986 unreserved characters}@valkey:6379/0"
       VALKEY_STATE_EPOCH: ${NAZOAUTH_VALKEY_STATE_EPOCH:?set a new UUID for first deployment and every restored Valkey state boundary}
       PUBLIC_BASE_URL: ${NAZOAUTH_PUBLIC_BASE_URL:-http://127.0.0.1:8000}
       TRANSPORT_MODE: ${NAZOAUTH_TRANSPORT_MODE:-loopback-http}
@@ -52,19 +38,16 @@ services:
       - bootstrap_data:/var/lib/nazo_oauth/bootstrap
       - instance_data:/var/lib/nazo_oauth/instance
       - ui_releases:/var/lib/nazo_oauth/ui-releases
-      - runtime_secrets:/run/nazoauth-secrets:ro
     ports:
       - "${NAZOAUTH_BIND_ADDRESS:-127.0.0.1}:${NAZOAUTH_PORT:-8000}:8000"
     depends_on:
-      secrets-init:
-        condition: service_completed_successfully
       runtime-init:
         condition: service_completed_successfully
       postgres:
         condition: service_healthy
       valkey:
         condition: service_healthy
-      migrate:
+      tenant-bootstrap:
         condition: service_completed_successfully
     networks:
       nazo_oauth_net:
@@ -75,45 +58,47 @@ services:
       context: .
       dockerfile: Containerfile
       target: development-runtime
-      args:
-        NAZOAUTH_BUILD_RELEASE: ${NAZOAUTH_BUILD_RELEASE:-development}
-        NAZOAUTH_BUILD_REVISION: ${NAZOAUTH_BUILD_REVISION:-development}
-        NAZOAUTH_BUILD_ID: ${NAZOAUTH_BUILD_ID:-local:development}
     environment:
-      DATABASE_URL_FILE: /run/nazoauth-secrets/database-url
+      DATABASE_URL: "postgresql://nazoauth_lifecycle:${NAZOAUTH_POSTGRES_LIFECYCLE_PASSWORD:?set the URL-safe PostgreSQL lifecycle password using only RFC 3986 unreserved characters}@postgres:5432/oauth"
+      NAZOAUTH_MIGRATION_RUNTIME_ROLE: nazoauth
       PUBLIC_BASE_URL: ${NAZOAUTH_PUBLIC_BASE_URL:-http://127.0.0.1:8000}
-      NAZOAUTH_EXPECTED_BUILD_RELEASE: ${NAZOAUTH_BUILD_RELEASE:-development}
-      NAZOAUTH_EXPECTED_BUILD_REVISION: ${NAZOAUTH_BUILD_REVISION:-development}
-      NAZOAUTH_EXPECTED_BUILD_ID: ${NAZOAUTH_BUILD_ID:-local:development}
     volumes:
-      - runtime_secrets:/run/nazoauth-secrets:ro
       - operator_state:/var/lib/nazoauth/operator-state
     depends_on:
-      secrets-init:
-        condition: service_completed_successfully
-      runtime-init:
-        condition: service_completed_successfully
       postgres:
-        condition: service_healthy
-      valkey:
         condition: service_healthy
     networks:
       nazo_oauth_net:
     command: ["nazoauth", "migrate"]
 
+  tenant-bootstrap:
+    build:
+      context: .
+      dockerfile: Containerfile
+      target: development-runtime
+    environment:
+      DATABASE_URL: "postgresql://nazoauth_lifecycle:${NAZOAUTH_POSTGRES_LIFECYCLE_PASSWORD:?set the URL-safe PostgreSQL lifecycle password using only RFC 3986 unreserved characters}@postgres:5432/oauth"
+      PUBLIC_BASE_URL: ${NAZOAUTH_PUBLIC_BASE_URL:-http://127.0.0.1:8000}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    networks:
+      nazo_oauth_net:
+    command: ["nazoauth", "tenant-bootstrap"]
+
   postgres:
-    image: docker.io/library/postgres:18@sha256:06cad38a5d9f5d24b4d83d86def30795d5e4b757fedbf5281172b576dedcd941
+    build:
+      context: .
+      dockerfile: Containerfile
+      target: compose-postgres
     restart: unless-stopped
     environment:
       POSTGRES_DB: oauth
-      POSTGRES_USER: nazoauth
-      POSTGRES_PASSWORD_FILE: /run/nazoauth-secrets/postgres-password
+      POSTGRES_USER: nazoauth_lifecycle
+      POSTGRES_PASSWORD: "${NAZOAUTH_POSTGRES_LIFECYCLE_PASSWORD:?set the URL-safe PostgreSQL lifecycle password using only RFC 3986 unreserved characters}"
+      NAZOAUTH_POSTGRES_PASSWORD: "${NAZOAUTH_POSTGRES_PASSWORD:?set the URL-safe PostgreSQL runtime password using only RFC 3986 unreserved characters}"
     volumes:
       - postgres_data:/var/lib/postgresql
-      - runtime_secrets:/run/nazoauth-secrets:ro
-    depends_on:
-      secrets-init:
-        condition: service_completed_successfully
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 5s
@@ -125,29 +110,13 @@ services:
   valkey:
     image: docker.io/valkey/valkey:8-alpine@sha256:e0eb7c480958d32bdc4357a74bdd70653ae15f2f9b4c93c4a5a9fad1dc471c84
     restart: unless-stopped
-    command:
-      [
-        "valkey-server",
-        "--aclfile",
-        "/run/nazoauth-secrets/valkey.acl",
-        "--save",
-        "60",
-        "1",
-        "--loglevel",
-        "warning",
-      ]
+    environment:
+      VALKEY_PASSWORD: "${NAZOAUTH_VALKEY_PASSWORD:?set a URL-safe Valkey password using only RFC 3986 unreserved characters}"
+    command: ["sh", "-euc", 'exec valkey-server --requirepass "$$VALKEY_PASSWORD" --save 60 1 --loglevel warning']
     volumes:
       - valkey_data:/data
-      - runtime_secrets:/run/nazoauth-secrets:ro
-    depends_on:
-      secrets-init:
-        condition: service_completed_successfully
     healthcheck:
-      test:
-        [
-          "CMD-SHELL",
-          "cat /run/nazoauth-secrets/valkey-password | valkey-cli --askpass ping",
-        ]
+      test: ["CMD-SHELL", "VALKEYCLI_AUTH=$$VALKEY_PASSWORD valkey-cli ping"]
       interval: 5s
       timeout: 3s
       retries: 10
@@ -163,7 +132,6 @@ volumes:
   instance_data:
   generated_secrets:
   ui_releases:
-  runtime_secrets:
   operator_state:
 
 networks:

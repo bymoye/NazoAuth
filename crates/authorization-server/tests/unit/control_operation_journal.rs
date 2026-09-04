@@ -7,8 +7,8 @@ use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex};
 
 use nazo_operator_protocol::{
-    CONTROL_OPERATION_SCHEMA, CONTROL_RESULT_SCHEMA, ControlBuildIdentity, ControlOperation,
-    ControlOperationPayload, ControlOutcome, ControlResult, ControlResultData, ControlTarget,
+    CONTROL_OPERATION_SCHEMA, CONTROL_RESULT_SCHEMA, ControlOperation, ControlOperationPayload,
+    ControlOutcome, ControlResult, ControlResultData,
 };
 
 use super::*;
@@ -56,14 +56,6 @@ fn operation(operation_id: &str) -> ControlOperation {
         operation_id: operation_id.to_owned(),
         kid: "kid-controller-test-key-0000000000000000000000000".to_owned(),
         deployment_id: "deployment-test".to_owned(),
-        target: ControlTarget::HostBinary {
-            sha256: "a".repeat(64),
-            embedded: ControlBuildIdentity {
-                product: "nazauth".to_owned(),
-                version: "v0.2.0".to_owned(),
-                commit: "b".repeat(40),
-            },
-        },
         config_revision: "config-revision-1".to_owned(),
         operation: ControlOperationPayload::MigrateApply,
     }

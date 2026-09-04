@@ -35,8 +35,6 @@ CLIENT_SECRET_PEPPER = os.environ.get(
 REFRESH_TOKEN_TTL_SECONDS = int(os.environ.get("REFRESH_TOKEN_TTL_SECONDS", "2592000"))
 REDIRECT_URI = "https://client.example/callback"
 CLIENT_ASSERTION_TYPE = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"
-CIBA_GRANT_TYPE = "urn:openid:params:grant-type:ciba"
-CIBA_DECISION_BINDING_TOKEN = "perf-ciba-automated-decision-token-2026"
 SESSION_TTL_SECONDS = int(os.environ.get("SESSION_TTL_SECONDS", "28800"))
 
 
@@ -512,18 +510,6 @@ def seed() -> None:
             tls_thumbprint=mtls_thumbprint,
             tls_subject_dn="CN=perf-mtls",
         )
-        upsert_client(
-            conn,
-            client_id="perf-ciba-private-jwt-dpop-client",
-            name="Perf CIBA Private JWT DPoP Client",
-            auth_method="private_key_jwt",
-            grants=[CIBA_GRANT_TYPE],
-            scopes=["openid", "profile"],
-            secret_hash=None,
-            jwks=jwks,
-            require_dpop=True,
-            require_par_request_object=True,
-        )
         oidc_refresh_tokens = seed_oidc_refresh_tokens(conn, users)
         logged_in_sessions = seed_logged_in_sessions(conn, users)
         conn.commit()
@@ -543,9 +529,7 @@ def seed() -> None:
             "oidc": "perf-oidc-client",
             "fapi": "perf-fapi-private-jwt-dpop-client",
             "mtls": "perf-mtls-client",
-            "ciba": "perf-ciba-private-jwt-dpop-client",
         },
-        "ciba_automated_decision_token": CIBA_DECISION_BINDING_TOKEN,
         "dpop_jkt": dpop_jkt,
         "private_jwk": rsa_private_jwk(rsa_key, rsa_kid),
         "ps256_private_jwk": rsa_private_jwk(rsa_key, ps256_kid, "PS256"),

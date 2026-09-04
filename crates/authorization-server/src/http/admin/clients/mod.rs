@@ -8,11 +8,12 @@ pub(crate) mod update;
 use crate::domain::sector_identifier::fetch_sector_identifier_uris;
 use crate::settings::Settings;
 use nazo_auth::{AdminClientPolicy, SectorIdentifierFuture, SectorIdentifierResolverPort};
+use std::sync::Arc;
 
 pub(crate) use nazo_key_management::ClientRegistrationCrypto as ServerAdminClientCrypto;
 
 pub(crate) type ServerAdminClientService = nazo_auth::AdminClientService<
-    nazo_postgres::OAuthClientRepository,
+    Arc<dyn nazo_auth::AdminClientRepositoryPort>,
     ServerSectorIdentifierResolver,
     ServerAdminClientCrypto,
 >;

@@ -6,22 +6,102 @@ use actix_web::web;
 use nazo_http_actix::{
     RuntimeModuleAdminError, RuntimeModuleAdminFuture, RuntimeModuleAdministration,
 };
-use nazo_postgres::{DbPool, RuntimeModuleRepository};
 use nazo_runtime_modules::{
-    ActiveModuleSnapshot, CatalogDurations, DesiredStateUpdate, DesiredStateUpdateOutcome,
-    ModuleCatalog, ModuleEventPage, ModuleId, ModuleLifecycle, ModuleRevision, ModuleState,
-    ModuleStateRepository, ReconcileOutcome, RegistryError, RuntimeModuleManagement,
+    ActiveModuleSnapshot, CasOutcome, CatalogDurations, DesiredRevisionGuard, DesiredStateChange,
+    DesiredStateRecord, DesiredStateUpdate, DesiredStateUpdateOutcome, InstanceStateMutation,
+    InstanceStateRecord, ModuleCatalog, ModuleEventPage, ModuleId, ModuleLifecycle, ModuleRevision,
+    ModuleState, ModuleStateRepository, ReconcileOutcome, RegistryError, RuntimeModuleManagement,
     RuntimeModuleManagementError, RuntimeModuleRegistry, RuntimeModuleView,
 };
 
 use crate::settings::Settings;
 
 pub(crate) type ServerRuntimeModuleRegistry =
-    RuntimeModuleRegistry<RuntimeModuleRepository, ServerModuleLifecycle>;
+    RuntimeModuleRegistry<PersistenceRuntimeModuleRepository, ServerModuleLifecycle>;
+
+#[derive(Clone)]
+pub(crate) struct PersistenceRuntimeModuleRepository {
+    store: Arc<dyn nazo_persistence::RuntimeModuleStore>,
+}
+
+impl PersistenceRuntimeModuleRepository {
+    pub(crate) fn new(store: Arc<dyn nazo_persistence::RuntimeModuleStore>) -> Self {
+        Self { store }
+    }
+}
+
+impl ModuleStateRepository for PersistenceRuntimeModuleRepository {
+    type Error = nazo_identity::ports::RepositoryError;
+
+    async fn read_desired(
+        &self,
+        module_id: ModuleId,
+    ) -> Result<Option<DesiredStateRecord>, Self::Error> {
+        self.store.read_desired(module_id).await
+    }
+
+    async fn read_all_desired(&self) -> Result<Vec<DesiredStateRecord>, Self::Error> {
+        self.store.read_all_desired().await
+    }
+
+    async fn compare_and_set_desired(
+        &self,
+        change: DesiredStateChange,
+    ) -> Result<CasOutcome<DesiredStateRecord>, Self::Error> {
+        self.store.compare_and_set_desired(change).await
+    }
+
+    async fn compare_and_set_desired_guarded(
+        &self,
+        change: DesiredStateChange,
+        required_revisions: Vec<DesiredRevisionGuard>,
+    ) -> Result<CasOutcome<DesiredStateRecord>, Self::Error> {
+        self.store
+            .compare_and_set_desired_guarded(change, required_revisions)
+            .await
+    }
+
+    async fn read_instance(
+        &self,
+        instance_id: &str,
+        module_id: ModuleId,
+    ) -> Result<Option<InstanceStateRecord>, Self::Error> {
+        self.store.read_instance(instance_id, module_id).await
+    }
+
+    async fn read_all_instances(
+        &self,
+        instance_id: &str,
+    ) -> Result<Vec<InstanceStateRecord>, Self::Error> {
+        self.store.read_all_instances(instance_id).await
+    }
+
+    async fn page_events(&self, offset: i64, limit: i64) -> Result<ModuleEventPage, Self::Error> {
+        self.store.page_events(offset, limit).await
+    }
+
+    async fn compare_and_set_instance(
+        &self,
+        required_desired_revision: ModuleRevision,
+        mutation: InstanceStateMutation,
+    ) -> Result<CasOutcome<InstanceStateRecord>, Self::Error> {
+        self.store
+            .compare_and_set_instance(required_desired_revision, mutation)
+            .await
+    }
+
+    async fn validate_revision(
+        &self,
+        module_id: ModuleId,
+        expected: ModuleRevision,
+    ) -> Result<bool, Self::Error> {
+        self.store.validate_revision(module_id, expected).await
+    }
+}
 
 #[derive(Clone)]
 pub(crate) struct ServerModuleLifecycle {
-    repository: Arc<RuntimeModuleRepository>,
+    repository: Arc<PersistenceRuntimeModuleRepository>,
 }
 
 impl ModuleLifecycle for ServerModuleLifecycle {
@@ -76,7 +156,7 @@ impl ModuleLifecycle for ServerModuleLifecycle {
 }
 
 pub(crate) struct RuntimeModules {
-    pub(crate) repository: Arc<RuntimeModuleRepository>,
+    pub(crate) repository: Arc<PersistenceRuntimeModuleRepository>,
     pub(crate) registry: Arc<ServerRuntimeModuleRegistry>,
     pub(crate) catalog: ModuleCatalog,
     pub(crate) instance_id: String,
@@ -84,11 +164,11 @@ pub(crate) struct RuntimeModules {
 
 impl RuntimeModules {
     pub(crate) async fn initialize(
-        pool: DbPool,
+        store: Arc<dyn nazo_persistence::RuntimeModuleStore>,
         settings: &Settings,
         instance_id: &str,
     ) -> anyhow::Result<Self> {
-        let repository = Arc::new(RuntimeModuleRepository::new(pool));
+        let repository = Arc::new(PersistenceRuntimeModuleRepository::new(store));
         let catalog = module_catalog(settings)?;
         let lifecycle = Arc::new(ServerModuleLifecycle {
             repository: repository.clone(),
@@ -127,14 +207,13 @@ impl RuntimeModules {
         })
     }
 
-    pub(crate) fn spawn_reconciler(modules: web::Data<Self>) {
-        for module_id in ModuleId::ALL {
-            let modules = modules.clone();
-            tokio::spawn(async move {
-                let mut interval = tokio::time::interval(Duration::from_secs(1));
-                interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-                loop {
-                    interval.tick().await;
+    pub(crate) fn spawn_reconciler(modules: web::Data<Self>) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(1));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                interval.tick().await;
+                for module_id in ModuleId::ALL {
                     match modules.registry.reconcile_once(module_id).await {
                         Ok(ReconcileOutcome::NoChange) => {}
                         Ok(outcome) => {
@@ -145,13 +224,13 @@ impl RuntimeModules {
                         }
                     }
                 }
-            });
-        }
+            }
+        })
     }
 }
 
 struct ServerRuntimeModuleAdministration {
-    management: RuntimeModuleManagement<RuntimeModuleRepository, ServerModuleLifecycle>,
+    management: RuntimeModuleManagement<PersistenceRuntimeModuleRepository, ServerModuleLifecycle>,
 }
 
 impl RuntimeModuleAdministration for ServerRuntimeModuleAdministration {
@@ -249,7 +328,7 @@ fn module_catalog(settings: &Settings) -> anyhow::Result<ModuleCatalog> {
 }
 
 async fn load_explicit_desired_states(
-    repository: &RuntimeModuleRepository,
+    repository: &PersistenceRuntimeModuleRepository,
     catalog: &ModuleCatalog,
     instance_id: &str,
 ) -> anyhow::Result<(BTreeSet<ModuleId>, BTreeSet<ModuleId>)> {
