@@ -169,14 +169,29 @@ pub(super) async fn build(
         session_cookie_config.clone(),
     ));
     let account_profiles = web::Data::new(account_profile_service);
-    let avatar_profiles = web::Data::new(AvatarProfileService::from_ports(
-        persistence.avatars(),
-        persistence.grant_summaries(),
-        crate::adapters::avatar_files::LocalAvatarStorage::new(
-            settings.storage.avatar_storage_dir.clone(),
-        ),
-        settings.storage.avatar_max_bytes,
-    ));
+    let avatar_profiles = web::Data::new(match &startup.avatar_storage {
+        crate::bootstrap::ServerAvatarStorageCapability::Local => {
+            AvatarProfileService::Local(nazo_identity::AvatarService::from_ports(
+                persistence.avatars(),
+                persistence.grant_summaries(),
+                crate::adapters::avatar_files::LocalAvatarStorage::new(
+                    settings.storage.avatar_storage_dir.clone(),
+                ),
+                settings.storage.avatar_max_bytes,
+            ))
+        }
+        crate::bootstrap::ServerAvatarStorageCapability::Direct(storage) => {
+            AvatarProfileService::Direct(nazo_identity::AvatarDirectUploadService::from_ports(
+                persistence.avatars(),
+                persistence.grant_summaries(),
+                storage.clone(),
+                transient_state.avatar_upload_state(),
+                settings.storage.avatar_max_bytes,
+                300,
+                30,
+            ))
+        }
+    });
     let profile_delivery_store = transient_state.delivery();
     let profile_access_requests = web::Data::new(ClientAccessProfileService::from_port(
         persistence.access_requests(),

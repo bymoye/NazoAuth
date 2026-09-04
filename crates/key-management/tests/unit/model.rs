@@ -1,9 +1,87 @@
-use std::{collections::BTreeSet, sync::Arc};
+use std::{
+    collections::BTreeSet,
+    sync::{Arc, Mutex},
+    time::Instant,
+};
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use nazo_auth::{SignRequest, Signer, SigningPurpose};
 
-use super::{KeyGeneration, KeyHandle, KeyManager, KeyState, ManagedKey};
+use super::{
+    KeyGeneration, KeyHandle, KeyManager, KeyRecordStatus, KeySettings, KeyState, ManagedKey,
+};
+use crate::{
+    PersistedSigningKeyset, SigningKeyRepository, SigningKeyRepositoryFuture,
+    SigningKeyWrappingKeyRing, SigningKeysetCompareAndSwapResult, SigningKeysetCreateResult,
+};
+
+#[derive(Default)]
+struct MemoryRepository(Mutex<Option<PersistedSigningKeyset>>);
+
+impl SigningKeyRepository for MemoryRepository {
+    fn load(&self) -> SigningKeyRepositoryFuture<'_, Option<PersistedSigningKeyset>> {
+        Box::pin(async move { Ok(self.0.lock().unwrap().clone()) })
+    }
+
+    fn create_if_absent(
+        &self,
+        candidate: PersistedSigningKeyset,
+    ) -> SigningKeyRepositoryFuture<'_, SigningKeysetCreateResult> {
+        Box::pin(async move {
+            let mut record = self.0.lock().unwrap();
+            Ok(match record.clone() {
+                Some(existing) => SigningKeysetCreateResult::Existing(existing),
+                None => {
+                    *record = Some(candidate.clone());
+                    SigningKeysetCreateResult::Created(candidate)
+                }
+            })
+        })
+    }
+
+    fn compare_and_swap(
+        &self,
+        expected: i64,
+        candidate: PersistedSigningKeyset,
+    ) -> SigningKeyRepositoryFuture<'_, SigningKeysetCompareAndSwapResult> {
+        Box::pin(async move {
+            let mut record = self.0.lock().unwrap();
+            let current = record.clone().expect("keyset exists before CAS");
+            Ok(if current.revision == expected {
+                *record = Some(candidate.clone());
+                SigningKeysetCompareAndSwapResult::Applied(candidate)
+            } else {
+                SigningKeysetCompareAndSwapResult::Conflict(current)
+            })
+        })
+    }
+}
+
+fn database_settings(
+    name: &str,
+    rotation_interval: chrono::Duration,
+    prepublish_window: chrono::Duration,
+) -> KeySettings {
+    KeySettings {
+        keys_dir: std::env::temp_dir().join(format!("nazo-key-{name}-{}", uuid::Uuid::now_v7())),
+        external_command: Vec::new(),
+        external_timeout: std::time::Duration::from_secs(1),
+        rotation_interval,
+        prepublish_window,
+        verification_grace: chrono::Duration::minutes(10),
+    }
+}
+
+async fn database_manager(settings: KeySettings) -> KeyManager {
+    KeyManager::load_or_create_database(
+        settings,
+        uuid::Uuid::now_v7(),
+        Arc::new(MemoryRepository::default()),
+        SigningKeyWrappingKeyRing::new("current", [17_u8; 32], None).unwrap(),
+    )
+    .await
+    .unwrap()
+}
 
 fn managed_key(state: KeyState, purposes: &[SigningPurpose]) -> ManagedKey {
     ManagedKey {
@@ -196,4 +274,88 @@ fn http_signing_rejects_wrong_purpose_grace_and_retired_keys() {
             "HTTP signing must reject policy state {state:?}"
         );
     }
+}
+
+#[tokio::test]
+async fn expired_database_generation_fails_closed_while_lifecycle_flag_is_still_healthy() {
+    let manager = database_manager(database_settings(
+        "expired-generation",
+        chrono::Duration::days(90),
+        chrono::Duration::days(1),
+    ))
+    .await;
+    let mut expired = KeyGeneration::database(manager.inner.generation.load().loaded.clone());
+    expired.expires_at = Some(Instant::now() - std::time::Duration::from_secs(1));
+    manager.inner.generation.store(Arc::new(expired));
+
+    assert_eq!(
+        manager.inner.health.snapshot().status,
+        super::KeyHealthStatus::Healthy
+    );
+    assert_eq!(manager.health().status, super::KeyHealthStatus::Unhealthy);
+    assert!(manager.prepare_http_signing().is_err());
+    assert!(
+        manager
+            .encode_jwt(
+                SigningPurpose::IdToken,
+                &jsonwebtoken::Header::new(jsonwebtoken::Algorithm::RS256),
+                &serde_json::json!({"sub":"expired"}),
+            )
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn expired_http_lease_cannot_use_old_generation_after_newer_generation_is_current() {
+    let manager = database_manager(database_settings(
+        "expired-lease",
+        chrono::Duration::days(90),
+        chrono::Duration::days(1),
+    ))
+    .await;
+    let mut lease = manager.prepare_http_signing().unwrap();
+    manager
+        .inner
+        .generation
+        .store(Arc::new(KeyGeneration::database(
+            manager.inner.generation.load().loaded.clone(),
+        )));
+    Arc::get_mut(&mut lease.generation)
+        .expect("lease owns its captured generation")
+        .expires_at = Some(Instant::now() - std::time::Duration::from_secs(1));
+
+    assert!(lease.sign(b"old generation must expire").await.is_err());
+}
+
+#[tokio::test]
+async fn database_rotation_retains_old_public_key_for_grace_and_snapshot_bounds() {
+    let settings = database_settings(
+        "retirement-bound",
+        chrono::Duration::seconds(-1),
+        chrono::Duration::zero(),
+    );
+    let manager = database_manager(settings).await;
+    let old_kid = manager.snapshot().active_kid.clone();
+    let before = chrono::Utc::now();
+    manager.refresh().await.unwrap(); // publishes a prepublished key
+    manager.refresh().await.unwrap(); // activates it
+    let old = manager
+        .database_list_keys()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|record| record.kid == old_kid)
+        .expect("prior active key remains published");
+    assert_eq!(old.status, KeyRecordStatus::Grace);
+    let retire_at = chrono::DateTime::parse_from_rfc3339(old.retire_at.as_deref().unwrap())
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+    assert!(
+        retire_at
+            >= before
+                + chrono::Duration::minutes(10)
+                + crate::lifecycle::MAX_DATABASE_SNAPSHOT_STALENESS
+                - chrono::Duration::seconds(1)
+    );
 }

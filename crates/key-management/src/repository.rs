@@ -80,10 +80,7 @@ impl SealedKeyMaterial {
         bytes
     }
 
-    pub fn from_persisted_bytes(
-        wrapping_key_id: String,
-        bytes: &[u8],
-    ) -> anyhow::Result<Self> {
+    pub fn from_persisted_bytes(wrapping_key_id: String, bytes: &[u8]) -> anyhow::Result<Self> {
         let nonce = bytes
             .get(..12)
             .ok_or_else(|| anyhow::anyhow!("signing-key encrypted material is malformed"))?
@@ -187,7 +184,10 @@ impl SigningKeyWrappingKeyRing {
         public_metadata: &serde_json::Value,
         plaintext: &[u8],
     ) -> anyhow::Result<SealedKeyMaterial> {
-        self.seal_with_aad(plaintext, generation_associated_data(tenant_id, revision, public_metadata)?)
+        self.seal_with_aad(
+            plaintext,
+            generation_associated_data(tenant_id, revision, public_metadata)?,
+        )
     }
 
     pub fn open_generation(
@@ -197,7 +197,10 @@ impl SigningKeyWrappingKeyRing {
         public_metadata: &serde_json::Value,
         material: &SealedKeyMaterial,
     ) -> anyhow::Result<Vec<u8>> {
-        self.open_with_aad(material, generation_associated_data(tenant_id, revision, public_metadata)?)
+        self.open_with_aad(
+            material,
+            generation_associated_data(tenant_id, revision, public_metadata)?,
+        )
     }
 
     fn seal_with_aad(&self, plaintext: &[u8], aad: Vec<u8>) -> anyhow::Result<SealedKeyMaterial> {
@@ -206,14 +209,31 @@ impl SigningKeyWrappingKeyRing {
         Ok(SealedKeyMaterial {
             wrapping_key_id: self.current.id.clone(),
             nonce,
-            ciphertext: crate::crypto::aes_256_gcm_encrypt(&self.current.key, &nonce, &aad, plaintext)?,
+            ciphertext: crate::crypto::aes_256_gcm_encrypt(
+                &self.current.key,
+                &nonce,
+                &aad,
+                plaintext,
+            )?,
         })
     }
 
     fn open_with_aad(&self, material: &SealedKeyMaterial, aad: Vec<u8>) -> anyhow::Result<Vec<u8>> {
-        let key = self.key_for(&material.wrapping_key_id).ok_or_else(|| anyhow::anyhow!("signing-key wrapping key is unavailable"))?;
-        let split = material.ciphertext.len().checked_sub(16).ok_or_else(|| anyhow::anyhow!("signing-key encrypted material is malformed"))?;
-        crate::crypto::aes_256_gcm_decrypt(key, &material.nonce, &aad, &material.ciphertext[..split], &material.ciphertext[split..])
+        let key = self
+            .key_for(&material.wrapping_key_id)
+            .ok_or_else(|| anyhow::anyhow!("signing-key wrapping key is unavailable"))?;
+        let split = material
+            .ciphertext
+            .len()
+            .checked_sub(16)
+            .ok_or_else(|| anyhow::anyhow!("signing-key encrypted material is malformed"))?;
+        crate::crypto::aes_256_gcm_decrypt(
+            key,
+            &material.nonce,
+            &aad,
+            &material.ciphertext[..split],
+            &material.ciphertext[split..],
+        )
     }
 
     fn key_for(&self, id: &str) -> Option<&[u8; 32]> {
@@ -248,7 +268,11 @@ fn associated_data(tenant_id: Uuid, purpose: &str) -> Vec<u8> {
     aad
 }
 
-fn generation_associated_data(tenant_id: Uuid, revision: i64, metadata: &serde_json::Value) -> anyhow::Result<Vec<u8>> {
+fn generation_associated_data(
+    tenant_id: Uuid,
+    revision: i64,
+    metadata: &serde_json::Value,
+) -> anyhow::Result<Vec<u8>> {
     use sha2::{Digest as _, Sha256};
 
     let mut aad = b"nazoauth/signing-keyset/v1\0".to_vec();

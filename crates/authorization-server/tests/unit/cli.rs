@@ -39,6 +39,8 @@ impl PersistenceLauncher for UnusedLauncher {
 
 struct UnusedTransientStateLauncher;
 
+struct UnusedAvatarObjectStoreLauncher;
+
 impl TransientStateLauncher for UnusedTransientStateLauncher {
     fn server_config_extension(&self) -> crate::config::ServerConfigExtension {
         crate::config::ServerConfigExtension::new(
@@ -61,12 +63,33 @@ impl TransientStateLauncher for UnusedTransientStateLauncher {
     }
 }
 
+impl AvatarObjectStoreLauncher for UnusedAvatarObjectStoreLauncher {
+    fn server_config_extension(&self) -> crate::config::ServerConfigExtension {
+        crate::config::ServerConfigExtension::configuration_only(
+            "AVATAR_OBJECT_STORE: \"local\"\n".to_owned(),
+            vec!["AVATAR_OBJECT_STORE"],
+        )
+    }
+
+    fn server_bindings<'a>(
+        &'a self,
+        _config: &'a ConfigSource,
+        _deployment_id: &'a str,
+    ) -> LauncherFuture<'a, crate::bootstrap::ServerAvatarObjectStoreBindings> {
+        unreachable!("help and release identity do not initialize object storage")
+    }
+}
+
 fn unused_launcher() -> Arc<dyn PersistenceLauncher> {
     Arc::new(UnusedLauncher)
 }
 
 fn unused_transient_state_launcher() -> Arc<dyn TransientStateLauncher> {
     Arc::new(UnusedTransientStateLauncher)
+}
+
+fn unused_avatar_object_store_launcher() -> Arc<dyn AvatarObjectStoreLauncher> {
+    Arc::new(UnusedAvatarObjectStoreLauncher)
 }
 
 fn parse(args: &[&str]) -> anyhow::Result<Command> {
@@ -131,6 +154,7 @@ async fn public_help_command_completes_without_loading_runtime_configuration() {
         ["nazoauth".to_owned(), "help".to_owned()],
         unused_launcher(),
         unused_transient_state_launcher(),
+        unused_avatar_object_store_launcher(),
     )
     .await
     .unwrap();
@@ -142,6 +166,7 @@ async fn release_identity_completes_without_loading_runtime_configuration() {
         ["nazoauth".to_owned(), "release-identity".to_owned()],
         unused_launcher(),
         unused_transient_state_launcher(),
+        unused_avatar_object_store_launcher(),
     )
     .await
     .unwrap();

@@ -14,6 +14,7 @@ test = false
 [dependencies]
 anyhow.workspace = true
 nazo-oauth-server.workspace = true
+nazo-oauth-server-object-store.workspace = true
 nazo-oauth-server-postgres.workspace = true
 nazo-oauth-server-valkey.workspace = true
 tokio = { workspace = true, features = ["full"] }

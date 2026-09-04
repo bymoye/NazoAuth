@@ -178,3 +178,7 @@ pub(crate) fn access_token_subject(tenant_id: uuid::Uuid, jti: &str) -> String {
 pub(crate) fn native_sso(secret: &str) -> String {
     format!("oauth:native_sso:device_secret:{}", blake3_hex(secret))
 }
+
+pub(crate) fn avatar_upload(upload_id: &str) -> String {
+    format!("oauth:avatar:upload:{}", blake3_hex(upload_id))
+}

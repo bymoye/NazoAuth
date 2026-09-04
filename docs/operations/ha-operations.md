@@ -59,7 +59,7 @@ Point-in-time restore can roll back security events. After any PostgreSQL restor
 When PostgreSQL is unavailable or the pool is exhausted:
 
 - `/health` can remain a process-health check; external readiness checks include a database probe outside this service.
-- Discovery and JWKS can still serve if the process has loaded the keyset and configuration. A signing instance can use its last verified database generation for at most two hours after its last successful lifecycle refresh; after that it refuses signing until PostgreSQL and the wrapping root are available again.
+- Discovery and JWKS can still serve if the process has loaded the keyset and configuration. A failed lifecycle refresh immediately makes signing fail closed. Each database generation and any signing lease also has a two-hour hard expiry, so an old snapshot cannot remain usable indefinitely if lifecycle supervision is interrupted.
 - Login, consent, authorization code issuance, token issuance, refresh, introspection, revocation, admin APIs, profile APIs, and userinfo that requires durable lookup fail with server errors.
 - The service must not mint tokens, mark grants, or accept revocation/introspection decisions from stale or partial durable state.
 

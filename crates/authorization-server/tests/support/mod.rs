@@ -203,13 +203,15 @@ pub(crate) fn profile_sessions(
 pub(crate) fn avatar_profiles(
     state: &TestInfrastructure,
 ) -> actix_web::web::Data<crate::bootstrap::AvatarProfileService> {
-    actix_web::web::Data::new(crate::bootstrap::AvatarProfileService::new(
-        nazo_postgres::UserRepository::new(state.diesel_db.clone()),
-        nazo_postgres::GrantRepository::new(state.diesel_db.clone()),
-        crate::adapters::avatar_files::LocalAvatarStorage::new(
-            state.settings.storage.avatar_storage_dir.clone(),
+    actix_web::web::Data::new(crate::bootstrap::AvatarProfileService::Local(
+        nazo_identity::AvatarService::new(
+            nazo_postgres::UserRepository::new(state.diesel_db.clone()),
+            nazo_postgres::GrantRepository::new(state.diesel_db.clone()),
+            crate::adapters::avatar_files::LocalAvatarStorage::new(
+                state.settings.storage.avatar_storage_dir.clone(),
+            ),
+            state.settings.storage.avatar_max_bytes,
         ),
-        state.settings.storage.avatar_max_bytes,
     ))
 }
 

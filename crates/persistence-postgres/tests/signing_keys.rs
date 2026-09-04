@@ -19,6 +19,113 @@ fn candidate(revision: i64, marker: u8) -> PersistedSigningKeyset {
 }
 
 #[tokio::test]
+async fn database_managers_share_encrypted_keys_and_restart_without_local_files()
+-> anyhow::Result<()> {
+    use nazo_key_management::{KeyManager, KeySettings, SigningKeyWrappingKeyRing};
+    use std::sync::Arc;
+
+    let database_url = std::env::var("NAZO_TEST_DATABASE_URL")
+        .or_else(|_| std::env::var("DATABASE_URL"))
+        .expect("signing-key integration test requires a PostgreSQL test database");
+    run_pending_migrations(&database_url).await?;
+    let pool = create_pool(database_url, 4)?;
+    let tenant = Uuid::now_v7();
+    sql_query(
+        "INSERT INTO tenants (id, slug, display_name) VALUES ($1, $1::text, 'Shared-key managers')",
+    )
+    .bind::<SqlUuid, _>(tenant)
+    .execute(&mut pool.get().await?)
+    .await?;
+    let directory = std::env::temp_dir().join(format!("nazo-shared-key-proof-{tenant}"));
+    let settings = KeySettings {
+        keys_dir: directory.clone(),
+        external_command: Vec::new(),
+        external_timeout: std::time::Duration::from_secs(1),
+        rotation_interval: chrono::Duration::days(90),
+        prepublish_window: chrono::Duration::days(1),
+        verification_grace: chrono::Duration::minutes(10),
+    };
+    let repository: Arc<dyn SigningKeyRepository> =
+        Arc::new(SigningKeysetRepository::for_tenant(pool.clone(), tenant));
+    let second_repository: Arc<dyn SigningKeyRepository> =
+        Arc::new(SigningKeysetRepository::for_tenant(pool.clone(), tenant));
+    let ring = SigningKeyWrappingKeyRing::new("first", [17_u8; 32], None)?;
+    let (first, second) = tokio::join!(
+        KeyManager::load_or_create_database(
+            settings.clone(),
+            tenant,
+            repository.clone(),
+            ring.clone()
+        ),
+        KeyManager::load_or_create_database(settings.clone(), tenant, second_repository, ring),
+    );
+    let (first, second) = (first?, second?);
+    let original_kid = first.snapshot().active_kid.clone();
+    assert_eq!(original_kid, second.snapshot().active_kid);
+    assert!(!directory.exists());
+    let persisted = SigningKeyRepository::load(repository.as_ref())
+        .await?
+        .unwrap();
+    assert_eq!(persisted.revision, 1);
+    assert!(
+        !persisted
+            .public_metadata
+            .to_string()
+            .contains("private_pkcs8_der")
+    );
+    assert!(
+        !persisted
+            .public_metadata
+            .to_string()
+            .contains("request_object_private_pem")
+    );
+    let wrong = SigningKeyWrappingKeyRing::new("first", [18_u8; 32], None)?;
+    assert!(
+        KeyManager::load_or_create_database(settings.clone(), tenant, repository.clone(), wrong)
+            .await
+            .is_err()
+    );
+
+    drop(first);
+    drop(second);
+    let rolling_ring = SigningKeyWrappingKeyRing::new(
+        "second",
+        [19_u8; 32],
+        Some(("first".to_owned(), [17_u8; 32])),
+    )?;
+    let rolling = KeyManager::load_or_create_database(
+        settings.clone(),
+        tenant,
+        repository.clone(),
+        rolling_ring,
+    )
+    .await?;
+    rolling.refresh().await?;
+    assert_eq!(
+        SigningKeyRepository::load(repository.as_ref())
+            .await?
+            .unwrap()
+            .wrapping_key_id,
+        "second"
+    );
+    drop(rolling);
+    let restarted = KeyManager::load_or_create_database(
+        settings,
+        tenant,
+        repository,
+        SigningKeyWrappingKeyRing::new("second", [19_u8; 32], None)?,
+    )
+    .await?;
+    assert_eq!(restarted.snapshot().active_kid, original_kid);
+    assert!(!directory.exists());
+    sql_query("DELETE FROM tenants WHERE id = $1")
+        .bind::<SqlUuid, _>(tenant)
+        .execute(&mut pool.get().await?)
+        .await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn signing_key_repository_converges_and_isolates_tenants() -> anyhow::Result<()> {
     let database_url = std::env::var("NAZO_TEST_DATABASE_URL")
         .or_else(|_| std::env::var("DATABASE_URL"))

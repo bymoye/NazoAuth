@@ -352,6 +352,7 @@ def check_aggregate_package_boundary() -> None:
         "nazo-oauth-server",
         "nazo-oauth-server-postgres",
         "nazo-oauth-server-valkey",
+        "nazo-oauth-server-object-store",
         "tokio",
     }
     if dependencies != expected:

@@ -6,10 +6,136 @@ use actix_web::http::header::HeaderValue;
 use actix_web::{
     HttpRequest, HttpResponse,
     http::{StatusCode, header},
-    web::Data,
+    web::{Data, Path},
 };
 use futures_util::StreamExt as _;
 use nazo_http_actix::{bytes_response, csrf_error, json_response, oauth_error};
+use serde::Serialize;
+
+#[derive(Serialize)]
+struct AvatarUploadStartResponse {
+    upload_id: String,
+    expires_at: String,
+    upload: AvatarUploadTargetResponse,
+}
+
+#[derive(Serialize)]
+struct AvatarUploadTargetResponse {
+    url: String,
+    method: String,
+    fields: std::collections::BTreeMap<String, String>,
+    headers: std::collections::BTreeMap<String, String>,
+}
+
+pub(crate) async fn begin_direct_avatar_upload(
+    sessions: Data<SessionProfileHandles>,
+    avatars: Data<crate::bootstrap::AvatarProfileService>,
+    req: HttpRequest,
+) -> HttpResponse {
+    if !sessions.has_valid_csrf_token(&req, None) {
+        return csrf_error();
+    }
+    let user = match sessions.current_user_or_login_required(&req).await {
+        Ok(user) => user,
+        Err(response) => return response,
+    };
+    match avatars.begin_direct_upload(&user).await {
+        Ok(start) => json_response(AvatarUploadStartResponse {
+            upload_id: start.upload_id,
+            expires_at: start.expires_at.to_rfc3339(),
+            upload: AvatarUploadTargetResponse {
+                url: start.target.url,
+                method: start.target.method,
+                fields: start.target.fields,
+                headers: start.target.headers,
+            },
+        }),
+        Err(nazo_identity::DirectAvatarUploadError::Storage(
+            nazo_identity::ports::AvatarStorageError::Unsupported,
+        )) => oauth_error(
+            StatusCode::NOT_FOUND,
+            "invalid_request",
+            "当前头像存储不支持直接上传.",
+        ),
+        Err(error) => {
+            tracing::warn!(?error, "failed to authorize direct avatar upload");
+            oauth_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "server_error",
+                "头像上传授权失败.",
+            )
+        }
+    }
+}
+
+pub(crate) async fn complete_direct_avatar_upload(
+    sessions: Data<SessionProfileHandles>,
+    avatars: Data<crate::bootstrap::AvatarProfileService>,
+    req: HttpRequest,
+    upload_id: Path<String>,
+) -> HttpResponse {
+    if !sessions.has_valid_csrf_token(&req, None) {
+        return csrf_error();
+    }
+    if uuid::Uuid::parse_str(upload_id.as_str()).is_err() {
+        return oauth_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "头像上传标识无效.",
+        );
+    }
+    let user = match sessions.current_user_or_login_required(&req).await {
+        Ok(user) => user,
+        Err(response) => return response,
+    };
+    match avatars
+        .complete_direct_upload(&user, upload_id.as_str())
+        .await
+    {
+        Ok(overview) => json_response(auth_me_json_with_count(
+            &overview.account,
+            overview.authorized_application_count,
+        )),
+        Err(nazo_identity::DirectAvatarUploadError::UnsupportedContent) => oauth_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "头像仅支持 PNG、JPEG、WEBP 格式.",
+        ),
+        Err(
+            nazo_identity::DirectAvatarUploadError::Missing
+            | nazo_identity::DirectAvatarUploadError::Expired,
+        ) => oauth_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "头像上传已失效.",
+        ),
+        Err(nazo_identity::DirectAvatarUploadError::Busy) => oauth_error(
+            StatusCode::CONFLICT,
+            "invalid_request",
+            "头像上传正在确认中.",
+        ),
+        Err(nazo_identity::DirectAvatarUploadError::ConcurrentChange) => oauth_error(
+            StatusCode::CONFLICT,
+            "invalid_request",
+            "头像已被其他请求更新.",
+        ),
+        Err(nazo_identity::DirectAvatarUploadError::Storage(
+            nazo_identity::ports::AvatarStorageError::Unsupported,
+        )) => oauth_error(
+            StatusCode::NOT_FOUND,
+            "invalid_request",
+            "当前头像存储不支持直接上传.",
+        ),
+        Err(error) => {
+            tracing::warn!(?error, "failed to finalize direct avatar upload");
+            oauth_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "server_error",
+                "头像保存失败.",
+            )
+        }
+    }
+}
 
 pub(crate) async fn upload_avatar(
     sessions: Data<SessionProfileHandles>,

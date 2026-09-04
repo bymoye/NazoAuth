@@ -85,6 +85,18 @@ async fn upload_avatar(
     .await
 }
 
+async fn begin_direct_avatar_upload(
+    state: Data<TestInfrastructure>,
+    req: HttpRequest,
+) -> HttpResponse {
+    super::begin_direct_avatar_upload(
+        crate::test_support::profile_sessions(&state),
+        crate::test_support::avatar_profiles(&state),
+        req,
+    )
+    .await
+}
+
 async fn get_avatar(state: Data<TestInfrastructure>, req: HttpRequest) -> HttpResponse {
     super::get_avatar(
         crate::test_support::profile_sessions(&state),
@@ -759,6 +771,13 @@ async fn upload_avatar_rejects_session_request_without_csrf_before_file_or_profi
         actix_multipart::Multipart::new(&headers, stream::empty::<Result<Bytes, PayloadError>>());
 
     assert_avatar_write_rejects_missing_csrf(upload_avatar(state, req, payload).await).await;
+}
+
+#[actix_web::test]
+async fn direct_avatar_authorization_rejects_session_request_without_csrf() {
+    let state = Data::new(test_state());
+    let req = request_with_session_but_no_csrf(&state);
+    assert_avatar_write_rejects_missing_csrf(begin_direct_avatar_upload(state, req).await).await;
 }
 
 #[actix_web::test]

@@ -34,6 +34,7 @@ pub(super) struct ProcessRuntime {
     pub(super) control_tenant_id: nazo_identity::TenantId,
     pub(super) persistence: super::super::ServerPersistenceBindings,
     pub(super) state_backend: super::super::ServerStateBackendBindings,
+    pub(super) avatar_object_store: super::super::ServerAvatarObjectStoreBindings,
     pub(super) token_issuance_response_keys: nazo_persistence::TokenIssuanceResponseKeyRing,
     pub(super) control_discovery: web::Data<crate::control_discovery::ControlDiscoveryEndpoint>,
     pub(super) database_pool_metrics: web::Data<dyn nazo_persistence::DatabasePoolMetricsPort>,
@@ -382,7 +383,16 @@ async fn build_service_runtime(
     )
     .await?;
     let lifecycle = Arc::new(Mutex::new(TenantRuntimeLifecycle::default()));
-    tokio::fs::create_dir_all(&settings.storage.avatar_storage_dir).await?;
+    let avatar_storage = process
+        .avatar_object_store
+        .provider()
+        .for_tenant(settings.tenant.context.tenant_id);
+    if matches!(
+        avatar_storage,
+        super::super::ServerAvatarStorageCapability::Local
+    ) {
+        tokio::fs::create_dir_all(&settings.storage.avatar_storage_dir).await?;
+    }
     let readiness_dependencies =
         web::Data::new(crate::http::well_known::ReadinessDependencies::new(
             process.persistence.provider().database_health(),
@@ -413,6 +423,7 @@ async fn build_service_runtime(
         config: process.config.clone(),
         persistence: process.persistence.clone(),
         transient_state,
+        avatar_storage,
         settings,
         token_issuance_response_keys: process.token_issuance_response_keys.clone(),
         control_discovery: process.control_discovery.clone(),

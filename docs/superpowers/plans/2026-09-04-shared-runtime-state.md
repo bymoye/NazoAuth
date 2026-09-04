@@ -2,13 +2,14 @@
 
 **Goal:** Deliver S3-compatible direct avatar upload and a database-authoritative signing-key lifecycle that works across disposable service instances.
 
-**Architecture:** PostgreSQL owns durable avatar references and encrypted key generations. S3 owns immutable avatar objects; Valkey owns short-lived upload authorizations. NazoAuth owns validation and state transitions; ctl invokes existing operator contracts. Instances may cache keys in memory, but never require local key files for normal database-backed operation.
+**Architecture:** Persistence ports own durable avatar references and encrypted key generations; object-storage ports own immutable avatar objects; transient-state ports own short-lived upload authorizations. The current concrete adapters use PostgreSQL, S3-compatible storage and Valkey. NazoAuth owns validation and state transitions without depending on those implementations; ctl invokes existing operator contracts. Instances may cache keys in memory, but never require local key files for normal database-backed operation.
 
-**Workspaces:** Integration and keys: `D:/self/NazoAuth-mdoc-cert-profile` (`feat/shared-runtime-state`). Avatar: `D:/self/NazoAuth-s3-avatar` (`feat/s3-avatar-direct-upload`). Preserve the primary checkout and all its untracked files. Hostinger is the integration build/test host; temporary test services must be isolated from production.
+**Workspaces:** Integration and keys: `feat/shared-runtime-state`. Avatar: `feat/s3-avatar-direct-upload`. Both use isolated worktrees; preserve the primary checkout and all its untracked files. Hostinger is the integration build/test host; temporary test services must be isolated from production.
 
 ## Constraints and accepted decisions
 
 - HARD BOUNDARY: NazoAuth and key-management business logic must not depend on PostgreSQL/SQL/Diesel or concrete database types. Declare ports at the existing abstract boundary, implement SQL and concurrency in the PostgreSQL adapter, and inject through the composition root. The current concrete database is an implementation choice, never a runtime-domain dependency.
+- HARD BOUNDARY: NazoAuth must not depend on S3 protocol or SDK either. A concrete storage adapter owns endpoint/bucket/signature configuration and protocol operations; composition injects generic upload authorization, fixed-object publication, read and delete capabilities. Authorizations expose transport-neutral URL/method/headers/form fields, never an S3-specific business DTO.
 - Preserve local avatar storage for single-instance deployments; S3 mode must not fall back to local storage.
 - Direct upload authorizations bind a tenant/user, one server-generated object key, expiry, and an enforced size limit. Do not trust MIME declarations as image validation.
 - Uploads land in private temporary storage. Finalization fixes the exact bytes before validation/publication so a reusable signed upload cannot replace the accepted avatar.
