@@ -77,12 +77,18 @@ impl S3AvatarObjectStore {
 
     fn staging_key(&self, object_id: &str) -> Result<String, AvatarStorageError> {
         safe_object_id(object_id)?;
-        Ok(format!("{}/{STAGING_DIRECTORY}/{object_id}", self.prefix))
+        Ok(format!(
+            "{TENANT_PREFIX}/{STAGING_DIRECTORY}/{}/{object_id}",
+            self.prefix
+        ))
     }
 
     fn final_key(&self, object_id: &str) -> Result<String, AvatarStorageError> {
         safe_object_id(object_id)?;
-        Ok(format!("{}/{FINAL_DIRECTORY}/{object_id}", self.prefix))
+        Ok(format!(
+            "{TENANT_PREFIX}/{FINAL_DIRECTORY}/{}/{object_id}",
+            self.prefix
+        ))
     }
 }
 
@@ -212,8 +218,22 @@ impl AvatarDirectUploadPort for S3AvatarObjectStore {
                 return Err(AvatarStorageError::InvalidState);
             }
             let version = head.e_tag.ok_or(AvatarStorageError::InvalidState)?;
-            let mut response = self
+            // Bind the bytes handed to the image decoder to the same object
+            // version later supplied to CopyObject. Without this conditional
+            // GET, a client could replace staging between HEAD and GET, then
+            // restore the old ETag before copy and publish unvalidated bytes.
+            let mut headers = self.bucket.extra_headers().clone();
+            headers.insert(
+                "if-match",
+                version
+                    .parse()
+                    .map_err(|_| AvatarStorageError::InvalidState)?,
+            );
+            let bucket = self
                 .bucket
+                .with_extra_headers(headers)
+                .map_err(s3_unavailable)?;
+            let mut response = bucket
                 .get_object_stream(&object_key)
                 .await
                 .map_err(s3_unavailable)?;
@@ -372,7 +392,7 @@ fn tenant_namespace(tenant_id: TenantId) -> String {
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
-    format!("{TENANT_PREFIX}/{encoded}")
+    encoded
 }
 
 fn expiry_seconds(expires_at: DateTime<Utc>) -> Result<u32, AvatarStorageError> {

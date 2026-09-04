@@ -72,12 +72,29 @@ pub trait TransientStateLauncher: Send + Sync {
     ) -> LauncherFuture<'a, crate::bootstrap::ServerStateBackendBindings>;
 }
 
+/// Concrete object-store lifecycle. The generic server sees only the
+/// tenant-bound avatar capability and a generic configuration extension.
+pub trait AvatarObjectStoreLauncher: Send + Sync {
+    fn server_config_extension(&self) -> crate::config::ServerConfigExtension;
+
+    fn server_bindings<'a>(
+        &'a self,
+        config: &'a ConfigSource,
+        deployment_id: &'a str,
+    ) -> LauncherFuture<'a, crate::bootstrap::ServerAvatarObjectStoreBindings>;
+}
+
 pub async fn run(
     args: impl IntoIterator<Item = String>,
     persistence: Arc<dyn PersistenceLauncher>,
     transient_state: Arc<dyn TransientStateLauncher>,
+    avatar_object_store: Arc<dyn AvatarObjectStoreLauncher>,
 ) -> anyhow::Result<()> {
-    crate::config::install_server_config_extension(transient_state.server_config_extension())?;
+    crate::config::install_server_config_extension(
+        transient_state
+            .server_config_extension()
+            .merge(avatar_object_store.server_config_extension())?,
+    )?;
     let args = args.into_iter().collect::<Vec<_>>();
     let usage = usage_for_args(&args);
     match Command::parse(args)? {
@@ -85,7 +102,14 @@ pub async fn run(
             println!("{usage}");
             Ok(())
         }
-        Command::Server => run_server(persistence.as_ref(), transient_state.as_ref()).await,
+        Command::Server => {
+            run_server(
+                persistence.as_ref(),
+                transient_state.as_ref(),
+                avatar_object_store.as_ref(),
+            )
+            .await
+        }
         Command::OperatorTask => {
             let config = ConfigSource::load_for_migrations()?;
             let operator_persistence = persistence.operator_persistence(&config).await?;
@@ -338,6 +362,7 @@ async fn run_audit_anchor_worker(launcher: &dyn PersistenceLauncher) -> anyhow::
 async fn run_server(
     persistence: &dyn PersistenceLauncher,
     transient_state: &dyn TransientStateLauncher,
+    avatar_object_store: &dyn AvatarObjectStoreLauncher,
 ) -> anyhow::Result<()> {
     match crate::config::prepare_server_config(persistence.default_database_url())? {
         ServerConfigPreparation::Ready => {}
@@ -350,7 +375,7 @@ async fn run_server(
     }
     let config = ConfigSource::load()?;
     let bindings = persistence.server_bindings(&config).await?;
-    crate::bootstrap::run(config, bindings, transient_state).await
+    crate::bootstrap::run(config, bindings, transient_state, avatar_object_store).await
 }
 
 #[derive(Debug, Eq, PartialEq)]

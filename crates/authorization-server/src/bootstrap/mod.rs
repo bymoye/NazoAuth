@@ -4,6 +4,7 @@
 mod authentication_services;
 mod cors;
 mod federation_services;
+mod object_store;
 mod observability;
 mod passkey_services;
 mod persistence;
@@ -19,6 +20,9 @@ pub(crate) use authentication_services::{
 };
 pub(crate) use federation_services::{
     FederationBootstrapPasswordHasher, LocalFederationService, TracingFederationAudit,
+};
+pub use object_store::{
+    ServerAvatarObjectStoreBindings, ServerAvatarObjectStoreProvider, ServerAvatarStorageCapability,
 };
 pub(crate) use passkey_services::{
     LocalPasskeyService, PASSKEY_CEREMONY_TTL_SECONDS, TracingPasskeyAudit,

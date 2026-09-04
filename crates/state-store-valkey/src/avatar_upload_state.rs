@@ -24,7 +24,7 @@ if state['status'] == 'completed' then
   return cjson.encode({outcome = 'completed', final_object_id = state['final_object_id']})
 end
 if state['status'] ~= 'pending' and state['status'] ~= 'publishing' then return 'corrupt' end
-if tonumber(state['lease_until'] or 0) > now then return 'busy' end
+if (tonumber(state['lease_until']) or 0) > now then return 'busy' end
 local generation = tonumber(state['claim_generation'])
 if not generation or generation < 0 then return 'corrupt' end
 generation = generation + 1
@@ -60,7 +60,7 @@ if tonumber(state['expires_at'] or 0) <= now then
 end
 if state['user_id'] ~= ARGV[1]
   or state['ownership_token'] ~= ARGV[2]
-  or tonumber(state['lease_until'] or 0) <= now then
+  or (tonumber(state['lease_until']) or 0) <= now then
   return 'rejected'
 end
 if state['status'] == 'publishing' then
@@ -95,7 +95,7 @@ if state['status'] == 'completed' then
 end
 if state['status'] ~= 'publishing'
   or state['ownership_token'] ~= ARGV[2]
-  or tonumber(state['lease_until'] or 0) <= now then
+  or (tonumber(state['lease_until']) or 0) <= now then
   return 'rejected'
 end
 state['status'] = 'completed'
@@ -120,7 +120,7 @@ end
 if state['user_id'] ~= ARGV[1]
   or (state['status'] ~= 'pending' and state['status'] ~= 'publishing')
   or state['ownership_token'] ~= ARGV[2]
-  or tonumber(state['lease_until'] or 0) <= now then
+  or (tonumber(state['lease_until']) or 0) <= now then
   return 'rejected'
 end
 state['ownership_token'] = nil

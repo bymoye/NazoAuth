@@ -32,12 +32,8 @@ pub use authentication::{
     AuthenticationServiceConfig, LoginSuccess, RememberedMfaProof,
 };
 pub use avatar::{
-    AvatarContentType, AvatarObject, AvatarService, DeleteAvatarError, ReadAvatarError,
-    UploadAvatarError,
-};
-pub use ports::{
-    AvatarDirectUploadPort, AvatarStagedObject, AvatarUploadAuthorization, AvatarUploadClaim,
-    AvatarUploadStatePort, AvatarUploadTarget,
+    AvatarContentType, AvatarDirectUploadService, AvatarObject, AvatarService, AvatarUploadStart,
+    DeleteAvatarError, DirectAvatarUploadError, ReadAvatarError, UploadAvatarError,
 };
 pub use federation::{
     FederationAuditEvent, FederationError, FederationService, FederationServiceConfig,
@@ -60,6 +56,10 @@ pub use mtls_trust::{
 pub use passkey::{
     PasskeyAuditEvent, PasskeyError, PasskeyLoginBegin, PasskeyRegistrationBegin, PasskeyService,
     PasskeyServiceConfig, StoredPasskeyAuthentication, StoredPasskeyRegistration,
+};
+pub use ports::{
+    AvatarDirectUploadPort, AvatarStagedObject, AvatarUploadAuthorization, AvatarUploadClaim,
+    AvatarUploadStatePort, AvatarUploadTarget,
 };
 pub use profile::{
     AccessRequestCreateError, AccessRequestListError, AccessRequestValidationError,

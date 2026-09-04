@@ -1,5 +1,6 @@
 use std::env;
 
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use nazo_identity::{
     AvatarContentType, TenantId,
     ports::{AvatarDirectUploadPort, AvatarStorageError, AvatarUploadTarget},
@@ -24,7 +25,9 @@ async fn minio_presigned_post_publishes_an_immutable_candidate() {
     let upload_id = Uuid::now_v7().to_string();
     let final_id = format!("final-{upload_id}");
     let conflicting_final_id = format!("conflict-{upload_id}");
-    let original = b"accepted staged image bytes";
+    let original = STANDARD
+        .decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScL5VQAAAABJRU5ErkJggg==")
+        .expect("valid PNG fixture");
     let replay = b"replayed staged image bytes";
 
     let target = store
@@ -35,7 +38,7 @@ async fn minio_presigned_post_publishes_an_immutable_candidate() {
         )
         .await
         .expect("presigned POST");
-    post(&target, original)
+    post(&target, &original)
         .await
         .expect("original POST is accepted");
     let staged = store

@@ -1,14 +1,29 @@
+use sha2::{Digest as _, Sha256};
 use uuid::Uuid;
 
 use crate::{
     AccountOverview, PublicAccount,
     ports::{
-        AvatarRepositoryPort, AvatarStorageError, AvatarStoragePort, GrantSummaryRepositoryPort,
-        RepositoryError,
+        AvatarDirectUploadPort, AvatarRepositoryPort, AvatarStorageError, AvatarStoragePort,
+        AvatarUploadAuthorization, AvatarUploadClaim, AvatarUploadStatePort, AvatarUploadTarget,
+        GrantSummaryRepositoryPort, RepositoryError,
     },
 };
 
 const AVATAR_URL_PREFIX: &str = "/auth/me/avatar?v=";
+
+fn avatar_url(final_object_id: &str) -> String {
+    format!("{AVATAR_URL_PREFIX}{final_object_id}")
+}
+
+fn final_object_id(upload_id: &str, bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    let encoded = digest
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    format!("{upload_id}-{encoded}")
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AvatarContentType {
@@ -90,6 +105,380 @@ pub enum DeleteAvatarError {
     Storage(AvatarStorageError),
     Repository(RepositoryError),
     Overview(RepositoryError),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AvatarUploadStart {
+    pub upload_id: String,
+    pub expires_at: chrono::DateTime<chrono::Utc>,
+    pub target: AvatarUploadTarget,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum DirectAvatarUploadError {
+    InvalidCurrentReference,
+    Missing,
+    Expired,
+    Busy,
+    ConcurrentChange,
+    UnsupportedContent,
+    Storage(AvatarStorageError),
+    State(RepositoryError),
+    Repository(RepositoryError),
+    Overview(RepositoryError),
+}
+
+/// Direct-upload avatar flow. Object storage receives bytes only from the
+/// browser; this service reads the bounded staged snapshot once to validate it
+/// and asks the provider to publish that exact snapshot server-side.
+#[derive(Clone)]
+pub struct AvatarDirectUploadService {
+    avatars: std::sync::Arc<dyn AvatarRepositoryPort>,
+    grants: std::sync::Arc<dyn GrantSummaryRepositoryPort>,
+    storage: std::sync::Arc<dyn AvatarDirectUploadPort>,
+    state: std::sync::Arc<dyn AvatarUploadStatePort>,
+    max_bytes: usize,
+    upload_ttl_seconds: u64,
+    claim_lease_seconds: u64,
+}
+
+impl AvatarDirectUploadService {
+    pub fn from_ports(
+        avatars: std::sync::Arc<dyn AvatarRepositoryPort>,
+        grants: std::sync::Arc<dyn GrantSummaryRepositoryPort>,
+        storage: std::sync::Arc<dyn AvatarDirectUploadPort>,
+        state: std::sync::Arc<dyn AvatarUploadStatePort>,
+        max_bytes: usize,
+        upload_ttl_seconds: u64,
+        claim_lease_seconds: u64,
+    ) -> Self {
+        Self {
+            avatars,
+            grants,
+            storage,
+            state,
+            max_bytes,
+            upload_ttl_seconds,
+            claim_lease_seconds,
+        }
+    }
+
+    #[must_use]
+    pub const fn max_bytes(&self) -> usize {
+        self.max_bytes
+    }
+
+    pub async fn begin_upload(
+        &self,
+        account: &PublicAccount,
+    ) -> Result<AvatarUploadStart, DirectAvatarUploadError> {
+        if account
+            .profile
+            .avatar_url
+            .as_deref()
+            .map(avatar_url_version)
+            .transpose()
+            .is_err()
+        {
+            return Err(DirectAvatarUploadError::InvalidCurrentReference);
+        }
+        let upload_id = Uuid::now_v7().to_string();
+        let expires_at = chrono::Utc::now()
+            + chrono::Duration::seconds(
+                i64::try_from(self.upload_ttl_seconds)
+                    .map_err(|_| DirectAvatarUploadError::Expired)?,
+            );
+        let authorization = AvatarUploadAuthorization {
+            staging_object_id: upload_id.clone(),
+            upload_id: upload_id.clone(),
+            tenant_id: account.tenant().tenant_id,
+            user_id: account.user_id(),
+            expected_avatar_url: account.profile.avatar_url.clone(),
+            expires_at,
+        };
+        let target = self
+            .storage
+            .authorize_upload(
+                &authorization.staging_object_id,
+                self.max_bytes,
+                authorization.expires_at,
+            )
+            .await
+            .map_err(DirectAvatarUploadError::Storage)?;
+        self.state
+            .create(&authorization, self.upload_ttl_seconds)
+            .await
+            .map_err(DirectAvatarUploadError::State)?;
+        Ok(AvatarUploadStart {
+            upload_id,
+            expires_at,
+            target,
+        })
+    }
+
+    pub async fn complete_upload(
+        &self,
+        account: &PublicAccount,
+        upload_id: &str,
+    ) -> Result<AccountOverview, DirectAvatarUploadError> {
+        let lease_until = chrono::Utc::now()
+            + chrono::Duration::seconds(
+                i64::try_from(self.claim_lease_seconds)
+                    .map_err(|_| DirectAvatarUploadError::Expired)?,
+            );
+        let claim = self
+            .state
+            .claim(account.user_id(), upload_id, lease_until)
+            .await
+            .map_err(DirectAvatarUploadError::State)?;
+        let (authorization, ownership_token, staged_version, candidate_id, staged_snapshot) =
+            match claim {
+                AvatarUploadClaim::Pending {
+                    authorization,
+                    ownership_token,
+                } => {
+                    if authorization.tenant_id != account.tenant().tenant_id
+                        || authorization.user_id != account.user_id()
+                    {
+                        let _ = self
+                            .state
+                            .release(account.user_id(), upload_id, &ownership_token)
+                            .await;
+                        return Err(DirectAvatarUploadError::Missing);
+                    }
+                    if authorization.expires_at <= chrono::Utc::now() {
+                        let _ = self
+                            .state
+                            .release(account.user_id(), upload_id, &ownership_token)
+                            .await;
+                        return Err(DirectAvatarUploadError::Expired);
+                    }
+                    let staged = match self
+                        .storage
+                        .read_staged(&authorization.staging_object_id, self.max_bytes)
+                        .await
+                    {
+                        Ok(staged) => staged,
+                        Err(error) => {
+                            let _ = self
+                                .state
+                                .release(account.user_id(), upload_id, &ownership_token)
+                                .await;
+                            return Err(DirectAvatarUploadError::Storage(error));
+                        }
+                    };
+                    let content_type = match AvatarContentType::detect(&staged.bytes) {
+                        Some(content_type) => content_type,
+                        None => {
+                            let _ = self
+                                .state
+                                .release(account.user_id(), upload_id, &ownership_token)
+                                .await;
+                            return Err(DirectAvatarUploadError::UnsupportedContent);
+                        }
+                    };
+                    let final_object_id = final_object_id(&authorization.upload_id, &staged.bytes);
+                    let recorded = self
+                        .state
+                        .record_candidate(
+                            account.user_id(),
+                            upload_id,
+                            &ownership_token,
+                            &staged.version,
+                            &final_object_id,
+                        )
+                        .await
+                        .map_err(DirectAvatarUploadError::State)?;
+                    if !recorded {
+                        return Err(DirectAvatarUploadError::ConcurrentChange);
+                    }
+                    (
+                        authorization,
+                        ownership_token,
+                        staged.version,
+                        final_object_id,
+                        Some((staged.bytes, content_type)),
+                    )
+                }
+                AvatarUploadClaim::Publishing {
+                    authorization,
+                    ownership_token,
+                    staged_version,
+                    final_object_id,
+                } => (
+                    authorization,
+                    ownership_token,
+                    staged_version,
+                    final_object_id,
+                    None,
+                ),
+                AvatarUploadClaim::Completed { final_object_id } => {
+                    return if account.profile.avatar_url.as_deref()
+                        == Some(&avatar_url(&final_object_id))
+                    {
+                        self.overview(account.clone())
+                            .await
+                            .map_err(DirectAvatarUploadError::Overview)
+                    } else {
+                        Err(DirectAvatarUploadError::ConcurrentChange)
+                    };
+                }
+                AvatarUploadClaim::Busy => return Err(DirectAvatarUploadError::Busy),
+                AvatarUploadClaim::Missing => return Err(DirectAvatarUploadError::Missing),
+            };
+
+        if authorization.tenant_id != account.tenant().tenant_id
+            || authorization.user_id != account.user_id()
+            || authorization.expires_at <= chrono::Utc::now()
+        {
+            return Err(DirectAvatarUploadError::Expired);
+        }
+        if account.profile.avatar_url.as_deref() == Some(&avatar_url(&candidate_id)) {
+            let completed = self
+                .state
+                .complete(
+                    account.user_id(),
+                    upload_id,
+                    &ownership_token,
+                    &candidate_id,
+                )
+                .await
+                .map_err(DirectAvatarUploadError::State)?;
+            if !completed {
+                return Err(DirectAvatarUploadError::ConcurrentChange);
+            }
+            let _ = self
+                .storage
+                .delete_staging(&authorization.staging_object_id)
+                .await;
+            return self
+                .overview(account.clone())
+                .await
+                .map_err(DirectAvatarUploadError::Overview);
+        }
+
+        let content_type = match staged_snapshot {
+            Some((bytes, content_type)) => {
+                if final_object_id(&authorization.upload_id, &bytes) != candidate_id {
+                    return Err(DirectAvatarUploadError::ConcurrentChange);
+                }
+                content_type
+            }
+            None => {
+                let staged = self
+                    .storage
+                    .read_staged(&authorization.staging_object_id, self.max_bytes)
+                    .await
+                    .map_err(DirectAvatarUploadError::Storage)?;
+                if staged.version != staged_version
+                    || final_object_id(&authorization.upload_id, &staged.bytes) != candidate_id
+                {
+                    return Err(DirectAvatarUploadError::ConcurrentChange);
+                }
+                AvatarContentType::detect(&staged.bytes)
+                    .ok_or(DirectAvatarUploadError::UnsupportedContent)?
+            }
+        };
+        self.storage
+            .publish_staged(
+                &authorization.staging_object_id,
+                &staged_version,
+                &candidate_id,
+                content_type,
+            )
+            .await
+            .map_err(DirectAvatarUploadError::Storage)?;
+        let updated = self
+            .avatars
+            .compare_and_set_avatar(
+                authorization.tenant_id,
+                authorization.user_id,
+                authorization.expected_avatar_url.as_deref(),
+                Some(avatar_url(&candidate_id)),
+            )
+            .await;
+        let updated = match updated {
+            Ok(Some(updated)) => updated,
+            Ok(None) => return Err(DirectAvatarUploadError::ConcurrentChange),
+            Err(error) => return Err(DirectAvatarUploadError::Repository(error)),
+        };
+        let completed = self
+            .state
+            .complete(
+                account.user_id(),
+                upload_id,
+                &ownership_token,
+                &candidate_id,
+            )
+            .await
+            .map_err(DirectAvatarUploadError::State)?;
+        if !completed {
+            return Err(DirectAvatarUploadError::ConcurrentChange);
+        }
+        let _ = self
+            .storage
+            .delete_staging(&authorization.staging_object_id)
+            .await;
+        self.overview(updated)
+            .await
+            .map_err(DirectAvatarUploadError::Overview)
+    }
+
+    pub async fn read(&self, account: &PublicAccount) -> Result<AvatarObject, ReadAvatarError> {
+        let avatar_url = account
+            .profile
+            .avatar_url
+            .as_deref()
+            .ok_or(ReadAvatarError::NotUploaded)?;
+        let final_object_id =
+            avatar_url_version(avatar_url).map_err(|()| ReadAvatarError::InvalidReference)?;
+        self.storage
+            .read_final(final_object_id)
+            .await
+            .map_err(ReadAvatarError::Storage)
+    }
+
+    pub async fn delete(
+        &self,
+        account: &PublicAccount,
+    ) -> Result<AccountOverview, DeleteAvatarError> {
+        let expected_url = account.profile.avatar_url.as_deref();
+        let final_object_id = expected_url
+            .map(avatar_url_version)
+            .transpose()
+            .map_err(|()| DeleteAvatarError::InvalidCurrentReference)?;
+        let updated = self
+            .avatars
+            .compare_and_set_avatar(
+                account.tenant().tenant_id,
+                account.user_id(),
+                expected_url,
+                None,
+            )
+            .await;
+        let updated = match updated {
+            Ok(Some(updated)) => updated,
+            Ok(None) => return Err(DeleteAvatarError::ConcurrentChange),
+            Err(error) => return Err(DeleteAvatarError::Repository(error)),
+        };
+        if let Some(final_object_id) = final_object_id {
+            let _ = self.storage.delete_final(final_object_id).await;
+        }
+        self.overview(updated)
+            .await
+            .map_err(DeleteAvatarError::Overview)
+    }
+
+    async fn overview(&self, account: PublicAccount) -> Result<AccountOverview, RepositoryError> {
+        let authorized_application_count = self
+            .grants
+            .authorized_client_count(account.tenant().tenant_id, account.id())
+            .await?;
+        Ok(AccountOverview {
+            account,
+            authorized_application_count,
+        })
+    }
 }
 
 #[derive(Clone)]

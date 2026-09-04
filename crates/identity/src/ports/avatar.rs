@@ -81,7 +81,17 @@ pub enum AvatarUploadClaim {
         authorization: AvatarUploadAuthorization,
         ownership_token: String,
     },
-    Completed { final_object_id: String },
+    /// A previous worker fixed the exact staged snapshot and immutable
+    /// candidate before publishing. A new lease must resume this same work.
+    Publishing {
+        authorization: AvatarUploadAuthorization,
+        ownership_token: String,
+        staged_version: String,
+        final_object_id: String,
+    },
+    Completed {
+        final_object_id: String,
+    },
     Busy,
     Missing,
 }
@@ -101,6 +111,17 @@ pub trait AvatarUploadStatePort: Send + Sync {
         upload_id: &'a str,
         lease_until: DateTime<Utc>,
     ) -> RepositoryFuture<'a, AvatarUploadClaim>;
+
+    /// Records the only candidate this upload may publish. The owner token
+    /// prevents an expired worker from fixing data for a newer lease.
+    fn record_candidate<'a>(
+        &'a self,
+        user_id: UserId,
+        upload_id: &'a str,
+        ownership_token: &'a str,
+        staged_version: &'a str,
+        final_object_id: &'a str,
+    ) -> RepositoryFuture<'a, bool>;
 
     fn complete<'a>(
         &'a self,
@@ -142,15 +163,13 @@ pub trait AvatarDirectUploadPort: Send + Sync {
         content_type: AvatarContentType,
     ) -> AvatarStorageFuture<'a, ()>;
 
-    fn read_final<'a>(
-        &'a self,
-        final_object_id: &'a str,
-    ) -> AvatarStorageFuture<'a, AvatarObject>;
+    fn read_final<'a>(&'a self, final_object_id: &'a str) -> AvatarStorageFuture<'a, AvatarObject>;
 
-    fn delete_staging<'a>(
-        &'a self,
-        staging_object_id: &'a str,
-    ) -> AvatarStorageFuture<'a, ()>;
+    fn delete_staging<'a>(&'a self, staging_object_id: &'a str) -> AvatarStorageFuture<'a, ()>;
+
+    /// Deletes a final object only after its database reference has been
+    /// compare-and-set away. Ambiguous metadata failures must retain it.
+    fn delete_final<'a>(&'a self, final_object_id: &'a str) -> AvatarStorageFuture<'a, ()>;
 }
 
 impl std::error::Error for AvatarStorageError {}

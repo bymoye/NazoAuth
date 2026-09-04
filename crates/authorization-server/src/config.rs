@@ -46,6 +46,27 @@ pub struct ServerConfigExtension {
 }
 
 impl ServerConfigExtension {
+    pub fn merge(self, other: Self) -> anyhow::Result<Self> {
+        if self.state_epoch_key.is_some() && other.state_epoch_key.is_some() {
+            anyhow::bail!("only one server configuration extension may define a state epoch");
+        }
+        let mut config_keys = self.config_keys;
+        for key in other.config_keys {
+            if config_keys.contains(&key) {
+                anyhow::bail!("server configuration extension duplicates {key}");
+            }
+            config_keys.push(key);
+        }
+        Ok(Self {
+            initial_config_fragment: format!(
+                "{}{}",
+                self.initial_config_fragment, other.initial_config_fragment
+            ),
+            config_keys,
+            state_epoch_key: self.state_epoch_key.or(other.state_epoch_key),
+        })
+    }
+
     #[must_use]
     pub fn new(
         initial_config_fragment: String,
@@ -64,6 +85,20 @@ impl ServerConfigExtension {
         Self {
             initial_config_fragment: String::new(),
             config_keys: Vec::new(),
+            state_epoch_key: None,
+        }
+    }
+
+    /// Adds concrete-adapter configuration without participating in the
+    /// transient-state epoch mechanism.
+    #[must_use]
+    pub fn configuration_only(
+        initial_config_fragment: String,
+        config_keys: Vec<&'static str>,
+    ) -> Self {
+        Self {
+            initial_config_fragment,
+            config_keys,
             state_epoch_key: None,
         }
     }

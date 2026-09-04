@@ -8,19 +8,16 @@ publish = false
 
 [dependencies]
 anyhow.workspace = true
-blake3.workspace = true
 chrono.workspace = true
 futures-util.workspace = true
 nazo-identity.workspace = true
 nazo-oauth-server.workspace = true
 rust-s3 = { version = "0.37.2", default-features = false, features = ["tokio-rustls-tls"] }
 sha2.workspace = true
-tokio = { workspace = true, features = ["fs", "io-util", "sync"] }
 
 [dev-dependencies]
 base64.workspace = true
 serde_json.workspace = true
-tempfile = "3.26.0"
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 uuid = { workspace = true, features = ["v7"] }
 reqwest = { version = "0.12.28", default-features = false, features = ["multipart", "rustls-tls"] }

@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use nazo_oauth_server_object_store::AvatarObjectStoreLauncher;
 use nazo_oauth_server_postgres::PostgresLauncher;
 use nazo_oauth_server_valkey::ValkeyTransientStateLauncher;
 
@@ -11,6 +12,7 @@ async fn main() -> anyhow::Result<()> {
         std::env::args(),
         Arc::new(PostgresLauncher),
         Arc::new(ValkeyTransientStateLauncher),
+        Arc::new(AvatarObjectStoreLauncher),
     )
     .await
 }

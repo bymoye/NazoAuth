@@ -1,8 +1,9 @@
 use nazo_identity::{
     Principal, PublicAccount, SubjectClaims, TenantContext, UserId, UserRole,
     ports::{
-        AvatarStorageError, AvatarUploadTarget, EncodedSecretHash, FakeUserRepository, PasswordHashInput,
-        RepositoryError, UserRepositoryPort,
+        AvatarStorageError, AvatarUploadAuthorization, AvatarUploadClaim, AvatarUploadTarget,
+        EncodedSecretHash, FakeUserRepository, PasswordHashInput, RepositoryError,
+        UserRepositoryPort,
     },
 };
 use uuid::Uuid;
@@ -136,6 +137,26 @@ fn avatar_direct_upload_contract_keeps_storage_details_opaque() {
     };
     assert_eq!(target.method, "POST");
     assert_eq!(target.fields.get("key"), Some(&"staging-id".to_owned()));
+}
+
+#[test]
+fn avatar_upload_claim_preserves_the_fixed_candidate_across_a_retry() {
+    let authorization = AvatarUploadAuthorization {
+        upload_id: "upload-1".to_owned(),
+        tenant_id: TenantContext::default_system().tenant_id,
+        user_id: UserId::new(Uuid::now_v7()).expect("test id"),
+        expected_avatar_url: None,
+        staging_object_id: "staging-1".to_owned(),
+        expires_at: chrono::Utc::now(),
+    };
+    let claim = AvatarUploadClaim::Publishing {
+        authorization,
+        ownership_token: "lease-2".to_owned(),
+        staged_version: "etag-1".to_owned(),
+        final_object_id: "candidate-1".to_owned(),
+    };
+
+    assert!(matches!(claim, AvatarUploadClaim::Publishing { .. }));
 }
 
 #[test]

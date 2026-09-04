@@ -59,7 +59,19 @@ async fn avatar_upload_claims_are_leased_and_owner_fenced() {
     else {
         panic!("first owner must obtain the pending authorization");
     };
-    assert_eq!(claimed, authorization);
+    assert_eq!(claimed.upload_id, authorization.upload_id);
+    assert_eq!(claimed.tenant_id, authorization.tenant_id);
+    assert_eq!(claimed.user_id, authorization.user_id);
+    assert_eq!(
+        claimed.expected_avatar_url,
+        authorization.expected_avatar_url
+    );
+    assert_eq!(claimed.staging_object_id, authorization.staging_object_id);
+    assert_eq!(
+        claimed.expires_at.timestamp(),
+        authorization.expires_at.timestamp(),
+        "Valkey TTL and the wire format have whole-second precision"
+    );
     assert!(!ownership_token.is_empty());
 
     assert_eq!(
@@ -123,7 +135,9 @@ async fn avatar_upload_claims_are_leased_and_owner_fenced() {
     else {
         panic!("released candidate must be resumable");
     };
-    assert_eq!(resumed, authorization);
+    assert_eq!(resumed.upload_id, authorization.upload_id);
+    assert_eq!(resumed.tenant_id, authorization.tenant_id);
+    assert_eq!(resumed.user_id, authorization.user_id);
     assert_eq!(staged_version, "version-first");
     assert_eq!(final_object_id, "final/first");
     assert_ne!(resumed_owner, ownership_token);

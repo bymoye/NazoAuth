@@ -53,6 +53,8 @@
     {"path":"/auth/me/mfa/backup-codes/regenerate","methods":["POST"],"condition":"always"},
     {"path":"/auth/me/mfa/disable","methods":["POST"],"condition":"always"},
     {"path":"/auth/me/avatar","methods":["DELETE","GET","POST"],"condition":"always"},
+    {"path":"/auth/me/avatar/uploads","methods":["POST"],"condition":"always"},
+    {"path":"/auth/me/avatar/uploads/{upload_id}/complete","methods":["POST"],"condition":"always"},
     {"path":"/auth/me/applications","methods":["GET"],"condition":"always"},
     {"path":"/auth/me/federation/links","methods":["GET"],"condition":"always"},
     {"path":"/auth/me/federation/links/{link_id}","methods":["DELETE"],"condition":"always"},
