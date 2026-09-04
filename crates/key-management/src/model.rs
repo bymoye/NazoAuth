@@ -271,6 +271,7 @@ pub(crate) struct KeyManagerInner {
     pub(crate) settings: KeySettings,
     pub(crate) health: Arc<LifecycleHealth>,
     pub(crate) lifecycle_shutdown: watch::Sender<bool>,
+    pub(crate) database: Option<crate::database::DatabaseKeysetBinding>,
 }
 
 #[derive(Clone)]
@@ -472,6 +473,7 @@ impl KeyManager {
                 },
                 health: Arc::new(LifecycleHealth::new()),
                 lifecycle_shutdown: watch::channel(false).0,
+                database: None,
             }),
         }
     }
@@ -532,6 +534,30 @@ impl KeyManager {
         Ok(Self::from_loaded(settings, loaded))
     }
 
+    pub async fn load_or_create_database(
+        settings: KeySettings,
+        tenant_id: uuid::Uuid,
+        repository: Arc<dyn crate::SigningKeyRepository>,
+        wrapping_keys: crate::SigningKeyWrappingKeyRing,
+    ) -> anyhow::Result<Self> {
+        let (loaded, database) = crate::database::load_or_create(
+            &settings,
+            tenant_id,
+            repository,
+            wrapping_keys,
+        )
+        .await?;
+        Ok(Self {
+            inner: Arc::new(KeyManagerInner {
+                generation: ArcSwap::from_pointee(KeyGeneration::new(loaded)),
+                settings,
+                health: Arc::new(LifecycleHealth::new()),
+                lifecycle_shutdown: watch::channel(false).0,
+                database: Some(database),
+            }),
+        })
+    }
+
     pub(crate) fn from_loaded(settings: KeySettings, loaded: LoadedKeyset) -> Self {
         Self {
             inner: Arc::new(KeyManagerInner {
@@ -539,6 +565,7 @@ impl KeyManager {
                 settings,
                 health: Arc::new(LifecycleHealth::new()),
                 lifecycle_shutdown: watch::channel(false).0,
+                database: None,
             }),
         }
     }
@@ -639,7 +666,12 @@ impl KeyManager {
     }
 
     pub async fn refresh(&self) -> anyhow::Result<()> {
-        match crate::store::load_or_create_keyset(&self.inner.settings).await {
+        let result = if let Some(database) = &self.inner.database {
+            crate::database::refresh(&self.inner.settings, database).await
+        } else {
+            crate::store::load_or_create_keyset(&self.inner.settings).await
+        };
+        match result {
             Ok(loaded) => {
                 self.inner
                     .generation

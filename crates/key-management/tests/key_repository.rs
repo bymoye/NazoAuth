@@ -1,4 +1,10 @@
-use nazo_key_management::SigningKeyWrappingKeyRing;
+use std::sync::{Arc, Mutex};
+
+use nazo_key_management::{
+    KeyManager, KeySettings, PersistedSigningKeyset, SigningKeyRepository,
+    SigningKeyRepositoryFuture, SigningKeyWrappingKeyRing, SigningKeysetCompareAndSwapResult,
+    SigningKeysetCreateResult,
+};
 use uuid::Uuid;
 
 #[test]
@@ -39,4 +45,39 @@ fn encrypted_generation_rejects_swapped_public_metadata() {
             &sealed,
         )
         .is_err());
+}
+
+#[derive(Default)]
+struct MemoryRepository(Mutex<Option<PersistedSigningKeyset>>);
+
+impl SigningKeyRepository for MemoryRepository {
+    fn load(&self) -> SigningKeyRepositoryFuture<'_, Option<PersistedSigningKeyset>> {
+        Box::pin(async move { Ok(self.0.lock().unwrap().clone()) })
+    }
+    fn create_if_absent(&self, candidate: PersistedSigningKeyset) -> SigningKeyRepositoryFuture<'_, SigningKeysetCreateResult> {
+        Box::pin(async move {
+            let mut record = self.0.lock().unwrap();
+            Ok(match record.clone() { Some(existing) => SigningKeysetCreateResult::Existing(existing), None => { *record = Some(candidate.clone()); SigningKeysetCreateResult::Created(candidate) } })
+        })
+    }
+    fn compare_and_swap(&self, expected: i64, candidate: PersistedSigningKeyset) -> SigningKeyRepositoryFuture<'_, SigningKeysetCompareAndSwapResult> {
+        Box::pin(async move {
+            let mut record = self.0.lock().unwrap();
+            let current = record.clone().unwrap();
+            Ok(if current.revision == expected { *record = Some(candidate.clone()); SigningKeysetCompareAndSwapResult::Applied(candidate) } else { SigningKeysetCompareAndSwapResult::Conflict(current) })
+        })
+    }
+}
+
+#[tokio::test]
+async fn two_managers_share_database_keyset_without_writing_key_files() {
+    let root = std::env::temp_dir().join(format!("nazoauth-db-keys-{}", Uuid::now_v7()));
+    let settings = KeySettings { keys_dir: root.clone(), external_command: Vec::new(), external_timeout: std::time::Duration::from_secs(1), rotation_interval: chrono::Duration::days(90), prepublish_window: chrono::Duration::days(1), verification_grace: chrono::Duration::minutes(10) };
+    let repository = Arc::new(MemoryRepository::default());
+    let ring = SigningKeyWrappingKeyRing::new("current", [3_u8; 32], None).unwrap();
+    let tenant = Uuid::now_v7();
+    let first = KeyManager::load_or_create_database(settings.clone(), tenant, repository.clone(), ring.clone()).await.unwrap();
+    let second = KeyManager::load_or_create_database(settings, tenant, repository, ring).await.unwrap();
+    assert_eq!(first.snapshot().active_kid, second.snapshot().active_kid);
+    assert!(!root.exists(), "database key path must not create local files");
 }
