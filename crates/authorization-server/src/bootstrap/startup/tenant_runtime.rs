@@ -387,11 +387,13 @@ async fn build_service_runtime(
         .avatar_object_store
         .provider()
         .for_tenant(settings.tenant.context.tenant_id);
-    if matches!(
-        avatar_storage,
-        super::super::ServerAvatarStorageCapability::Local
-    ) {
-        tokio::fs::create_dir_all(&settings.storage.avatar_storage_dir).await?;
+    if let super::super::ServerAvatarStorageCapability::Local { directory } = &avatar_storage {
+        tokio::fs::create_dir_all(
+            directory
+                .as_ref()
+                .unwrap_or(&settings.storage.avatar_storage_dir),
+        )
+        .await?;
     }
     let readiness_dependencies =
         web::Data::new(crate::http::well_known::ReadinessDependencies::new(

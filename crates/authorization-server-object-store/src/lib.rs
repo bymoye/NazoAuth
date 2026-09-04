@@ -19,7 +19,7 @@ pub struct LocalAvatarObjectStoreProvider;
 
 impl ServerAvatarObjectStoreProvider for LocalAvatarObjectStoreProvider {
     fn for_tenant(&self, _tenant_id: TenantId) -> ServerAvatarStorageCapability {
-        ServerAvatarStorageCapability::Local
+        ServerAvatarStorageCapability::Local { directory: None }
     }
 }
 

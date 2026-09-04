@@ -4,6 +4,7 @@ pub(crate) type AccountProfileService = nazo_identity::AccountProfileService;
 
 #[derive(Clone)]
 pub(crate) enum AvatarProfileService {
+    Disabled,
     Local(nazo_identity::AvatarService<crate::adapters::avatar_files::LocalAvatarStorage>),
     Direct(nazo_identity::AvatarDirectUploadService),
 }
@@ -11,9 +12,14 @@ pub(crate) enum AvatarProfileService {
 impl AvatarProfileService {
     pub(crate) const fn max_bytes(&self) -> usize {
         match self {
+            Self::Disabled => 0,
             Self::Local(service) => service.max_bytes(),
             Self::Direct(service) => service.max_bytes(),
         }
+    }
+
+    pub(crate) const fn is_disabled(&self) -> bool {
+        matches!(self, Self::Disabled)
     }
 
     pub(crate) async fn upload(
@@ -23,7 +29,7 @@ impl AvatarProfileService {
     ) -> Result<nazo_identity::AccountOverview, nazo_identity::UploadAvatarError> {
         match self {
             Self::Local(service) => service.upload(account, bytes).await,
-            Self::Direct(_) => Err(nazo_identity::UploadAvatarError::Storage(
+            Self::Disabled | Self::Direct(_) => Err(nazo_identity::UploadAvatarError::Storage(
                 nazo_identity::ports::AvatarStorageError::Unsupported,
             )),
         }
@@ -35,9 +41,11 @@ impl AvatarProfileService {
         content_length: usize,
     ) -> Result<nazo_identity::AvatarUploadStart, nazo_identity::DirectAvatarUploadError> {
         match self {
-            Self::Local(_) => Err(nazo_identity::DirectAvatarUploadError::Storage(
-                nazo_identity::ports::AvatarStorageError::Unsupported,
-            )),
+            Self::Disabled | Self::Local(_) => {
+                Err(nazo_identity::DirectAvatarUploadError::Storage(
+                    nazo_identity::ports::AvatarStorageError::Unsupported,
+                ))
+            }
             Self::Direct(service) => service.begin_upload(account, content_length).await,
         }
     }
@@ -48,9 +56,11 @@ impl AvatarProfileService {
         upload_id: &str,
     ) -> Result<nazo_identity::AccountOverview, nazo_identity::DirectAvatarUploadError> {
         match self {
-            Self::Local(_) => Err(nazo_identity::DirectAvatarUploadError::Storage(
-                nazo_identity::ports::AvatarStorageError::Unsupported,
-            )),
+            Self::Disabled | Self::Local(_) => {
+                Err(nazo_identity::DirectAvatarUploadError::Storage(
+                    nazo_identity::ports::AvatarStorageError::Unsupported,
+                ))
+            }
             Self::Direct(service) => service.complete_upload(account, upload_id).await,
         }
     }
@@ -60,6 +70,9 @@ impl AvatarProfileService {
         account: &nazo_identity::PublicAccount,
     ) -> Result<nazo_identity::AvatarObject, nazo_identity::ReadAvatarError> {
         match self {
+            Self::Disabled => Err(nazo_identity::ReadAvatarError::Storage(
+                nazo_identity::ports::AvatarStorageError::Unsupported,
+            )),
             Self::Local(service) => service.read(account).await,
             Self::Direct(service) => service.read(account).await,
         }
@@ -70,6 +83,9 @@ impl AvatarProfileService {
         account: &nazo_identity::PublicAccount,
     ) -> Result<nazo_identity::AccountOverview, nazo_identity::DeleteAvatarError> {
         match self {
+            Self::Disabled => Err(nazo_identity::DeleteAvatarError::Storage(
+                nazo_identity::ports::AvatarStorageError::Unsupported,
+            )),
             Self::Local(service) => service.delete(account).await,
             Self::Direct(service) => service.delete(account).await,
         }

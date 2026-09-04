@@ -1,4 +1,9 @@
-use std::{collections::BTreeMap, sync::Arc, time::SystemTime};
+use std::{
+    collections::{BTreeMap, HashMap},
+    path::PathBuf,
+    sync::Arc,
+    time::SystemTime,
+};
 
 use aws_credential_types::Credentials as AwsCredentials;
 use aws_sigv4::{
@@ -23,6 +28,7 @@ use nazo_oauth_server::{
     config::{ConfigSource, ServerConfigExtension},
 };
 use s3::{Bucket, Region, creds::Credentials};
+use serde::Deserialize;
 
 const STAGING_DIRECTORY: &str = "staging";
 const FINAL_DIRECTORY: &str = "final";
@@ -30,14 +36,20 @@ const TENANT_PREFIX: &str = "avatars";
 
 /// All S3-compatible object-store connection details.  This concrete adapter
 /// deliberately does not leak S3 SDK values through the server or domain.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct S3AvatarObjectStoreConfig {
     pub endpoint: String,
     pub region: String,
     pub bucket: String,
     pub access_key: String,
     pub secret_key: String,
+    #[serde(default = "default_path_style")]
     pub path_style: bool,
+}
+
+fn default_path_style() -> bool {
+    true
 }
 
 #[derive(Clone)]
@@ -222,6 +234,80 @@ impl ServerAvatarObjectStoreProvider for S3AvatarObjectStoreProvider {
     }
 }
 
+#[derive(Deserialize)]
+#[serde(tag = "type", rename_all = "lowercase", deny_unknown_fields)]
+enum TenantStorageConfig {
+    Local { directory: PathBuf },
+    S3(S3AvatarObjectStoreConfig),
+}
+
+struct TenantAvatarObjectStoreProvider {
+    default: Option<Arc<dyn ServerAvatarObjectStoreProvider>>,
+    overrides: HashMap<TenantId, ServerAvatarStorageCapability>,
+}
+
+impl TenantAvatarObjectStoreProvider {
+    fn new(
+        default: Option<Arc<dyn ServerAvatarObjectStoreProvider>>,
+        overrides_json: &str,
+    ) -> anyhow::Result<Self> {
+        let configurations: HashMap<TenantId, TenantStorageConfig> =
+            serde_json::from_str(overrides_json)
+                .map_err(|_| anyhow::anyhow!("AVATAR_TENANT_STORAGE_JSON must map tenant UUIDs to complete local or s3 configurations"))?;
+        let mut overrides = HashMap::new();
+        for (tenant_id, configuration) in configurations {
+            let capability = match configuration {
+                TenantStorageConfig::Local { directory } => {
+                    anyhow::ensure!(
+                        directory.is_absolute(),
+                        "tenant avatar storage directory must be absolute"
+                    );
+                    ServerAvatarStorageCapability::Local {
+                        directory: Some(directory.join(tenant_id.as_uuid().to_string())),
+                    }
+                }
+                TenantStorageConfig::S3(config) => ServerAvatarStorageCapability::Direct(Arc::new(
+                    S3AvatarObjectStore::new(config, tenant_id)?,
+                )),
+            };
+            overrides.insert(tenant_id, capability);
+        }
+        Ok(Self { default, overrides })
+    }
+
+    fn from_config(source: &ConfigSource) -> anyhow::Result<Self> {
+        let default: Option<Arc<dyn ServerAvatarObjectStoreProvider>> =
+            match source.optional_string("AVATAR_OBJECT_STORE").as_deref() {
+                None => None,
+                Some("local") => Some(Arc::new(crate::LocalAvatarObjectStoreProvider)),
+                Some("s3") => Some(Arc::new(S3AvatarObjectStoreProvider::new(
+                    S3AvatarObjectStoreConfig {
+                        endpoint: source.required_string("AVATAR_S3_ENDPOINT")?,
+                        region: source.required_string("AVATAR_S3_REGION")?,
+                        bucket: source.required_string("AVATAR_S3_BUCKET")?,
+                        access_key: source.required_string("AVATAR_S3_ACCESS_KEY")?,
+                        secret_key: source.required_string("AVATAR_S3_SECRET_KEY")?,
+                        path_style: source.bool("AVATAR_S3_PATH_STYLE", true)?,
+                    },
+                )?)),
+                Some(_) => anyhow::bail!("AVATAR_OBJECT_STORE must be local or s3 when configured"),
+            };
+        Self::new(default, &source.string("AVATAR_TENANT_STORAGE_JSON", "{}"))
+    }
+}
+
+impl ServerAvatarObjectStoreProvider for TenantAvatarObjectStoreProvider {
+    fn for_tenant(&self, tenant_id: TenantId) -> ServerAvatarStorageCapability {
+        self.overrides.get(&tenant_id).cloned().unwrap_or_else(|| {
+            self.default
+                .as_ref()
+                .map_or(ServerAvatarStorageCapability::Disabled, |provider| {
+                    provider.for_tenant(tenant_id)
+                })
+        })
+    }
+}
+
 /// Concrete object-store launcher. S3 settings are parsed only in this crate;
 /// the authorization server receives a tenant-bound generic capability.
 #[derive(Clone, Copy, Debug, Default)]
@@ -230,7 +316,7 @@ pub struct AvatarObjectStoreLauncher;
 impl ServerAvatarObjectStoreLauncher for AvatarObjectStoreLauncher {
     fn server_config_extension(&self) -> ServerConfigExtension {
         ServerConfigExtension::configuration_only(
-            "AVATAR_OBJECT_STORE: \"local\"\n".to_owned(),
+            "# Optional shared avatar storage; omit to require tenant-specific storage.\n# AVATAR_OBJECT_STORE: \"local\"\n".to_owned(),
             vec![
                 "AVATAR_OBJECT_STORE",
                 "AVATAR_S3_ACCESS_KEY",
@@ -239,6 +325,7 @@ impl ServerAvatarObjectStoreLauncher for AvatarObjectStoreLauncher {
                 "AVATAR_S3_PATH_STYLE",
                 "AVATAR_S3_REGION",
                 "AVATAR_S3_SECRET_KEY",
+                "AVATAR_TENANT_STORAGE_JSON",
             ],
         )
     }
@@ -249,22 +336,9 @@ impl ServerAvatarObjectStoreLauncher for AvatarObjectStoreLauncher {
         _deployment_id: &'a str,
     ) -> LauncherFuture<'a, ServerAvatarObjectStoreBindings> {
         Box::pin(async move {
-            let provider: Arc<dyn ServerAvatarObjectStoreProvider> =
-                match source.string("AVATAR_OBJECT_STORE", "local").trim() {
-                    "local" => Arc::new(crate::LocalAvatarObjectStoreProvider),
-                    "s3" => Arc::new(S3AvatarObjectStoreProvider::new(
-                        S3AvatarObjectStoreConfig {
-                            endpoint: source.required_string("AVATAR_S3_ENDPOINT")?,
-                            region: source.required_string("AVATAR_S3_REGION")?,
-                            bucket: source.required_string("AVATAR_S3_BUCKET")?,
-                            access_key: source.required_string("AVATAR_S3_ACCESS_KEY")?,
-                            secret_key: source.required_string("AVATAR_S3_SECRET_KEY")?,
-                            path_style: source.bool("AVATAR_S3_PATH_STYLE", true)?,
-                        },
-                    )?),
-                    _ => anyhow::bail!("AVATAR_OBJECT_STORE must be local or s3"),
-                };
-            Ok(ServerAvatarObjectStoreBindings::new(provider))
+            Ok(ServerAvatarObjectStoreBindings::new(Arc::new(
+                TenantAvatarObjectStoreProvider::from_config(source)?,
+            )))
         })
     }
 }
@@ -536,3 +610,7 @@ fn s3_unavailable(error: s3::error::S3Error) -> AvatarStorageError {
 fn unavailable(error: impl std::fmt::Display) -> AvatarStorageError {
     AvatarStorageError::Unavailable(error.to_string())
 }
+
+#[cfg(test)]
+#[path = "../tests/unit/tenant_configuration.rs"]
+mod tenant_configuration_tests;

@@ -83,6 +83,38 @@ SHA-256 `74cf8be5f4ffb5f1fc5f5e3a26bc6d766a443d7549f8314ce076c163f3d162b0`.
 
 ## Storage compatibility
 
+The tenant storage configuration follow-up was verified on Hostinger with
+104 passing tests: four new configuration cases and two existing S3
+signing/isolation cases, 63 server settings tests, and 35 avatar HTTP tests.
+The HTTP run used this task's PostgreSQL and Valkey containers. An initial
+run failed because those containers were stopped; the complete HTTP target
+passed after they were started. The scoped verification commands were:
+
+```sh
+cargo test --locked -p nazo-oauth-server-object-store --all-features --lib --test provider --test s3
+cargo test --locked -p nazo-oauth-server --all-features --lib settings::tests
+cargo test --locked -p nazo-oauth-server --all-features --lib http::profile::avatar::tests
+cargo clippy --locked -p nazo-oauth-server-object-store -p nazo-oauth-server --all-features --all-targets -- -D warnings
+```
+
+Formatting, static contracts and persistence dependency isolation also passed.
+Logs are `tenant-storage-*.log` under the same task evidence directory.
+This follow-up did not rebuild the Release artifacts listed above, repeat the
+full workspace/R2 integration run, or migrate the deployed instance. See
+[tenant configuration and migration](avatar-direct-upload.md#global-default-and-tenant-overrides)
+before applying the new local directory layout.
+
+The subsequent optional-global-storage change passed 159 scoped tests on
+Hostinger: nine object-store cases, 63 settings cases, 40 configuration cases,
+ten CLI cases and 37 avatar HTTP cases. This includes the tenant allowlist,
+disabled storage when neither configuration applies, propagation of S3
+failure without local fallback, authenticated HTTP 403 responses before
+multipart consumption, preserved avatar references and unchanged login/CSRF
+guards. The same strict Clippy, formatting and architecture checks passed.
+Evidence uses `optional-storage-*.log`; the additional filters were
+`config::tests` and `cli::tests` on the same server library target. The scoped
+builds do not replace the earlier Release binaries or full workspace proof.
+
 R2 does not implement HTML form POST uploads. The concrete S3 adapter uses
 presigned PUT with an exact signed content length; the generic application
 contract requires a declared size within its avatar limit. Browsers send the

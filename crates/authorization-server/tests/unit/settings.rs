@@ -155,7 +155,7 @@ fn directory_tenant_uses_the_authoritative_host_and_tenant_storage_roots() {
 }
 
 #[test]
-fn directory_tenant_rejects_host_mismatch_and_shared_storage_roots() {
+fn directory_tenant_rejects_host_mismatch_but_namespaces_explicit_storage_roots() {
     let base = [
         ("TRANSPORT_MODE", "trusted-proxy"),
         ("TRUSTED_PROXY_CIDRS", "127.0.0.1/32"),
@@ -220,15 +220,55 @@ fn directory_tenant_rejects_host_mismatch_and_shared_storage_roots() {
         ("MTLS_CERTIFICATE_SOURCE", "rfc9440"),
         ("CLIENT_SECRET_PEPPER", "0123456789abcdef0123456789abcdef"),
     ]);
+    let avatar_settings = Settings::from_directory_binding(
+        &avatars,
+        &directory_binding("https://auth.example.test", "auth.example.test"),
+    )
+    .expect("directory tenant may use an explicitly configured avatar base");
+    assert_eq!(
+        avatar_settings.storage.avatar_storage_dir,
+        std::fs::canonicalize(".")
+            .unwrap()
+            .join("test-runtime/shared-avatars/00000000-0000-0000-0000-000000000011")
+    );
+}
+
+#[test]
+fn tenants_with_the_same_avatar_base_are_isolated_by_uuid() {
+    let config = ConfigSource::from_pairs_for_test([
+        ("AVATAR_STORAGE_DIR", "test-runtime/shared-avatars"),
+        ("TRANSPORT_MODE", "trusted-proxy"),
+        ("TRUSTED_PROXY_CIDRS", "127.0.0.1/32"),
+        ("MTLS_CERTIFICATE_SOURCE", "rfc9440"),
+        ("CLIENT_SECRET_PEPPER", "0123456789abcdef0123456789abcdef"),
+    ]);
+    let first = Settings::from_directory_binding(
+        &config,
+        &directory_binding("https://first.example.test", "first.example.test"),
+    )
+    .unwrap();
+    let mut second_binding =
+        directory_binding("https://second.example.test", "second.example.test");
+    second_binding.tenant.tenant_id = nazo_identity::TenantId::new(
+        uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000022").unwrap(),
+    )
+    .unwrap();
+    let second = Settings::from_directory_binding(&config, &second_binding).unwrap();
+    assert_ne!(
+        first.storage.avatar_storage_dir,
+        second.storage.avatar_storage_dir
+    );
     assert!(
-        Settings::from_directory_binding(
-            &avatars,
-            &directory_binding("https://auth.example.test", "auth.example.test"),
-        )
-        .err()
-        .expect("directory tenant must reject shared avatar path")
-        .to_string()
-        .contains("AVATAR_STORAGE_DIR must not be configured")
+        first
+            .storage
+            .avatar_storage_dir
+            .ends_with("00000000-0000-0000-0000-000000000011")
+    );
+    assert!(
+        second
+            .storage
+            .avatar_storage_dir
+            .ends_with("00000000-0000-0000-0000-000000000022")
     );
 }
 
@@ -1284,7 +1324,7 @@ fn data_dir_drives_default_persistent_storage_paths() {
 
     assert_eq!(
         settings.storage.avatar_storage_dir,
-        data_dir.join("avatars")
+        data_dir.join("tenants/00000000-0000-0000-0000-000000000001/avatars")
     );
     assert_eq!(settings.keys.jwk_keys_dir, data_dir.join("keys"));
 }
@@ -1301,7 +1341,7 @@ fn explicit_storage_paths_override_data_dir_derivations() {
 
     assert_eq!(
         settings.storage.avatar_storage_dir,
-        config_dir.join("test-runtime/avatars")
+        config_dir.join("test-runtime/avatars/00000000-0000-0000-0000-000000000001")
     );
     assert_eq!(
         settings.keys.jwk_keys_dir,

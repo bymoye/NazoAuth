@@ -4,7 +4,7 @@
   "schema_compatible": false,
   "database_restore": "backup",
   "irreversible_migration": true,
-  "minimum_supported_version": "0.2.7",
-  "migration_floor": "20260901000100",
-  "rationale": "Protocol v3 and migrations through 20260901000100 form one security boundary. Earlier releases cannot enforce dynamic tenant-directory control, tenant-local runtime modules, tenant-bound security state, or deployment-bound administrator receipts and must never reopen this database. Recovery requires the controller-verified pre-update database backup; artifact-only rollback is forbidden."
+  "minimum_supported_version": "0.2.11",
+  "migration_floor": "20260904000100",
+  "rationale": "Protocol v3 and migrations through 20260904000100 include authoritative encrypted tenant signing keysets. Earlier releases use local signing-key files and cannot preserve the current key authority or the tenant avatar storage layout. Recovery to an earlier release requires the controller-verified pre-update database and storage backup with the matching signing-key wrapping root; artifact-only rollback is forbidden."
 }

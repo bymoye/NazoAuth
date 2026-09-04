@@ -129,11 +129,6 @@ impl Settings {
                 "JWK_KEYS_DIR must not be configured for a directory-managed tenant; tenant key directories are derived from DATA_DIR"
             );
         }
-        if config.get("AVATAR_STORAGE_DIR").is_some() {
-            bail!(
-                "AVATAR_STORAGE_DIR must not be configured for a directory-managed tenant; tenant avatar directories are derived from DATA_DIR"
-            );
-        }
         Self::from_config_for_tenant(config, Some(TenantOverride::from_directory(binding)?))
     }
 
@@ -546,19 +541,12 @@ impl Settings {
                 .join(tenant.context.tenant_id.as_uuid().to_string())
                 .join("keys");
         }
-        let avatar_storage_dir = match (
-            tenant_specific,
-            config.optional_string("AVATAR_STORAGE_DIR"),
-        ) {
-            (true, Some(_)) => config
+        let tenant_id = tenant.context.tenant_id.as_uuid().to_string();
+        let avatar_storage_dir = match config.optional_string("AVATAR_STORAGE_DIR") {
+            Some(_) => config
                 .persistent_path("AVATAR_STORAGE_DIR", None)?
-                .join(tenant.context.tenant_id.as_uuid().to_string()),
-            (true, None) => data_dir
-                .join("tenants")
-                .join(tenant.context.tenant_id.as_uuid().to_string())
-                .join("avatars"),
-            (false, Some(_)) => config.persistent_path("AVATAR_STORAGE_DIR", None)?,
-            (false, None) => data_dir.join("avatars"),
+                .join(tenant_id),
+            None => data_dir.join("tenants").join(tenant_id).join("avatars"),
         };
         let scim_event_retention_seconds = positive_u64(
             config,

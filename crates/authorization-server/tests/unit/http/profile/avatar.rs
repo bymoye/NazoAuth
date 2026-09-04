@@ -18,7 +18,7 @@ use actix_web::error::PayloadError;
 use actix_web::{
     cookie::Cookie,
     http::{header, header::HeaderMap},
-    web::{Bytes, Data, Json},
+    web::{Bytes, Data, Json, Path},
 };
 use chrono::Utc;
 use diesel::prelude::*;
@@ -90,6 +90,10 @@ async fn upload_avatar(
         multipart,
     )
     .await
+}
+
+fn disabled_avatar_profiles() -> Data<crate::bootstrap::AvatarProfileService> {
+    Data::new(crate::bootstrap::AvatarProfileService::Disabled)
 }
 
 async fn begin_direct_avatar_upload(
@@ -364,6 +368,114 @@ async fn response_json(response: HttpResponse) -> (StatusCode, Value, bool) {
         .expect("response body should be readable");
     let json = serde_json::from_slice(&body).expect("response should be json");
     (status, json, has_set_cookie)
+}
+
+#[tokio::test]
+async fn disabled_avatar_storage_returns_forbidden_after_auth_without_consuming_or_mutating() {
+    let Some(fixture) = LiveAvatarFixture::new().await else {
+        return;
+    };
+    let suffix = Uuid::now_v7().simple().to_string();
+    let user = fixture
+        .create_user(&suffix, Some("/auth/me/avatar?v=existing"))
+        .await;
+    let sid = format!("avatar-disabled-{suffix}");
+    let csrf = format!("csrf-{suffix}");
+    fixture.store_session(&user, &sid).await;
+    let avatars = disabled_avatar_profiles();
+
+    let upload_response = super::upload_avatar(
+        crate::test_support::profile_sessions(&fixture.state),
+        avatars.clone(),
+        fixture.request(&sid, &csrf),
+        multipart_payload_with_stream_error("disabled-avatar-boundary", "avatar"),
+    )
+    .await;
+    let (status, body, _) = response_json(upload_response).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(body["error"], "access_denied");
+    assert_eq!(body["error_description"], AVATAR_STORAGE_DISABLED_MESSAGE);
+    assert!(
+        !tokio::fs::try_exists(avatar_user_dir(&fixture.state, user.id))
+            .await
+            .unwrap()
+    );
+
+    let begin_response = super::begin_direct_avatar_upload(
+        crate::test_support::profile_sessions(&fixture.state),
+        avatars.clone(),
+        fixture.request(&sid, &csrf),
+        Json(super::AvatarUploadBeginRequest { content_length: 1 }),
+    )
+    .await;
+    let (status, body, _) = response_json(begin_response).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(body["error"], "access_denied");
+    assert_eq!(body["error_description"], AVATAR_STORAGE_DISABLED_MESSAGE);
+
+    let complete_response = super::complete_direct_avatar_upload(
+        crate::test_support::profile_sessions(&fixture.state),
+        avatars.clone(),
+        fixture.request(&sid, &csrf),
+        Path::from(Uuid::now_v7().to_string()),
+    )
+    .await;
+    let (status, body, _) = response_json(complete_response).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(body["error"], "access_denied");
+    assert_eq!(body["error_description"], AVATAR_STORAGE_DISABLED_MESSAGE);
+
+    let get_response = super::get_avatar(
+        crate::test_support::profile_sessions(&fixture.state),
+        avatars.clone(),
+        fixture.request(&sid, &csrf),
+    )
+    .await;
+    let (status, body, _) = response_json(get_response).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(body["error"], "access_denied");
+    assert_eq!(body["error_description"], AVATAR_STORAGE_DISABLED_MESSAGE);
+
+    let delete_response = super::delete_avatar(
+        crate::test_support::profile_sessions(&fixture.state),
+        avatars,
+        fixture.request(&sid, &csrf),
+    )
+    .await;
+    let (status, body, _) = response_json(delete_response).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(body["error"], "access_denied");
+    assert_eq!(body["error_description"], AVATAR_STORAGE_DISABLED_MESSAGE);
+    assert_eq!(
+        fixture.fresh_user(user.id).await.avatar_url.as_deref(),
+        Some("/auth/me/avatar?v=existing")
+    );
+}
+
+#[tokio::test]
+async fn disabled_avatar_storage_keeps_csrf_and_login_guards() {
+    let state = test_state();
+    let avatars = disabled_avatar_profiles();
+    let missing_csrf = super::upload_avatar(
+        crate::test_support::profile_sessions(&state),
+        avatars.clone(),
+        request_with_session_but_no_csrf(&state),
+        multipart_payload("disabled-csrf-boundary", "avatar", valid_png()),
+    )
+    .await;
+    let (status, body, _) = response_json(missing_csrf).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"], "invalid_request");
+
+    let unauthenticated = super::get_avatar(
+        crate::test_support::profile_sessions(&state),
+        avatars,
+        actix_web::test::TestRequest::default().to_http_request(),
+    )
+    .await;
+    let (status, body, _) = response_json(unauthenticated).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(body["error"], "login_required");
 }
 
 async fn assert_avatar_write_rejects_missing_csrf(response: HttpResponse) {

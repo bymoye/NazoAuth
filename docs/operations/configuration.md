@@ -49,7 +49,7 @@ RUST_LOG: "info"
 
 ```text
 JWK_KEYS_DIR = DATA_DIR + "/keys"
-AVATAR_STORAGE_DIR = DATA_DIR + "/avatars"
+avatar directory = DATA_DIR + "/tenants/{tenant_uuid}/avatars"
 ```
 
 ## Startup settings
@@ -154,7 +154,9 @@ and its signer. Keep these records for the lifetime of the issued credentials.
 | `SIGNING_KEY_ENCRYPTION_KEY_ID` | required deployment-provided nonempty wrapping-key identifier |
 | `SIGNING_KEY_ENCRYPTION_KEY` | required deployment-provided unpadded base64url 32-byte signing-key wrapping key |
 | `SIGNING_KEY_PREVIOUS_ENCRYPTION_KEY_ID` / `SIGNING_KEY_PREVIOUS_ENCRYPTION_KEY` | optional matched previous wrapping-key pair while rewrapping persisted signing material |
-| `AVATAR_STORAGE_DIR` | `DATA_DIR + "/avatars"`, unless explicitly overridden |
+| `AVATAR_OBJECT_STORE` | Optional shared avatar storage: `local` or `s3`. Unset by default; tenants without their own configuration then have no avatar storage. |
+| `AVATAR_STORAGE_DIR` | Optional local base directory; each tenant uses `{base}/{tenant_uuid}`. Without it, use `DATA_DIR/tenants/{tenant_uuid}/avatars`. A directory alone does not enable local storage. |
+| `AVATAR_TENANT_STORAGE_JSON` | Optional complete tenant storage overrides keyed by tenant UUID; absent tenants inherit configured global storage, or have avatar storage disabled. With no global storage, these entries form the allowlist. See [avatar storage configuration and manual migration](avatar-direct-upload.md#global-default-and-tenant-overrides). |
 
 Explicit overrides are retained for advanced deployments. New deployments
 should prefer same-origin defaults.

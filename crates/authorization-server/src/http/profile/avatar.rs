@@ -12,6 +12,17 @@ use futures_util::StreamExt as _;
 use nazo_http_actix::{bytes_response, csrf_error, json_response, oauth_error};
 use serde::{Deserialize, Serialize};
 
+const AVATAR_STORAGE_DISABLED_MESSAGE: &str =
+    "Avatar storage is not configured for this tenant. Contact the system administrator.";
+
+fn avatar_storage_disabled_response() -> HttpResponse {
+    oauth_error(
+        StatusCode::FORBIDDEN,
+        "access_denied",
+        AVATAR_STORAGE_DISABLED_MESSAGE,
+    )
+}
+
 #[derive(Deserialize)]
 pub(crate) struct AvatarUploadBeginRequest {
     content_length: usize,
@@ -44,6 +55,9 @@ pub(crate) async fn begin_direct_avatar_upload(
         Ok(user) => user,
         Err(response) => return response,
     };
+    if avatars.is_disabled() {
+        return avatar_storage_disabled_response();
+    }
     match avatars
         .begin_direct_upload(&user, payload.content_length)
         .await
@@ -105,6 +119,9 @@ pub(crate) async fn complete_direct_avatar_upload(
         Ok(user) => user,
         Err(response) => return response,
     };
+    if avatars.is_disabled() {
+        return avatar_storage_disabled_response();
+    }
     match avatars
         .complete_direct_upload(&user, upload_id.as_str())
         .await
@@ -167,6 +184,9 @@ pub(crate) async fn upload_avatar(
         Ok(user) => user,
         Err(response) => return response,
     };
+    if avatars.is_disabled() {
+        return avatar_storage_disabled_response();
+    }
     while let Some(field) = multipart.next().await {
         let mut field = match field {
             Ok(field) => field,
@@ -264,6 +284,9 @@ pub(crate) async fn get_avatar(
             "跨站请求头像资源被拒绝.",
         );
     }
+    if avatars.is_disabled() {
+        return avatar_storage_disabled_response();
+    }
     let avatar = avatars.read(&user).await;
     let avatar = match avatar {
         Err(nazo_identity::ReadAvatarError::Storage(
@@ -334,6 +357,9 @@ pub(crate) async fn delete_avatar(
         Ok(user) => user,
         Err(response) => return response,
     };
+    if avatars.is_disabled() {
+        return avatar_storage_disabled_response();
+    }
     match avatars.delete(&user).await {
         Ok(overview) => json_response(auth_me_json_with_count(
             &overview.account,

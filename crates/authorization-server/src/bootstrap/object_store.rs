@@ -1,15 +1,16 @@
 //! Backend-neutral avatar object-store composition.
 
-use std::sync::Arc;
+use std::{path::PathBuf, sync::Arc};
 
 use nazo_identity::{TenantId, ports::AvatarDirectUploadPort};
 
-/// The selected provider either supports browser-direct upload for this
-/// tenant or retains the existing single-instance file capability. The server
-/// selects this capability, never a concrete storage protocol.
+/// A tenant has storage only when the administrator configured a global
+/// default or tenant override. The server selects a capability, never a
+/// concrete storage protocol.
 #[derive(Clone)]
 pub enum ServerAvatarStorageCapability {
-    Local,
+    Disabled,
+    Local { directory: Option<PathBuf> },
     Direct(Arc<dyn AvatarDirectUploadPort>),
 }
 

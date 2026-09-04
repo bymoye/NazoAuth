@@ -170,12 +170,15 @@ pub(super) async fn build(
     ));
     let account_profiles = web::Data::new(account_profile_service);
     let avatar_profiles = web::Data::new(match &startup.avatar_storage {
-        crate::bootstrap::ServerAvatarStorageCapability::Local => {
+        crate::bootstrap::ServerAvatarStorageCapability::Disabled => AvatarProfileService::Disabled,
+        crate::bootstrap::ServerAvatarStorageCapability::Local { directory } => {
             AvatarProfileService::Local(nazo_identity::AvatarService::from_ports(
                 persistence.avatars(),
                 persistence.grant_summaries(),
                 crate::adapters::avatar_files::LocalAvatarStorage::new(
-                    settings.storage.avatar_storage_dir.clone(),
+                    directory
+                        .clone()
+                        .unwrap_or_else(|| settings.storage.avatar_storage_dir.clone()),
                 ),
                 settings.storage.avatar_max_bytes,
             ))
