@@ -120,6 +120,9 @@ fn certificate_fixture_with_key(host: &str, leaf_key: KeyPair) -> CertificateFix
     leaf_params
         .distinguished_name
         .push(DnType::CommonName, host);
+    leaf_params
+        .distinguished_name
+        .push(DnType::CountryName, "US");
     leaf_params.is_ca = IsCa::NoCa;
     leaf_params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
     leaf_params.not_before = now - time::Duration::minutes(1);
@@ -649,6 +652,7 @@ async fn mdoc_signing_covers_holder_and_namespace_encoding_errors() {
         json!({
             "org.iso.18013.5.1": {
                 "name": "Ada",
+                "issuing_country": "US",
                 "age": 42,
                 "active": true,
                 "score": 1.5,
@@ -672,7 +676,7 @@ async fn mdoc_signing_covers_holder_and_namespace_encoding_errors() {
                 Some(HolderBinding::Jwk {
                     jwk: json!({"kty": "RSA"})
                 }),
-                json!({"ns": {}}),
+                json!({"org.iso.18013.5.1": {"issuing_country": "US"}}),
             ))
             .await,
         Err(CredentialTrustError::InvalidHolderBinding)
@@ -683,7 +687,7 @@ async fn mdoc_signing_covers_holder_and_namespace_encoding_errors() {
                 Some(HolderBinding::Jwk {
                     jwk: json!({"kty": "EC", "crv": "P-256", "x": "bad", "y": "bad"})
                 }),
-                json!({"ns": {}}),
+                json!({"org.iso.18013.5.1": {"issuing_country": "US"}}),
             ))
             .await,
         Err(CredentialTrustError::InvalidHolderBinding)
@@ -704,11 +708,49 @@ async fn mdoc_signing_covers_holder_and_namespace_encoding_errors() {
         crypto
             .sign(&mdoc_input(
                 Some(HolderBinding::Jwk { jwk: valid_jwk }),
-                json!({"ns": "not an object"}),
+                json!({"org.iso.18013.5.1": {"issuing_country": "US"}, "ns": "not an object"}),
             ))
             .await,
         Err(CredentialTrustError::InvalidEncoding)
     );
+    let _ = std::fs::remove_dir_all(key_dir);
+}
+
+#[tokio::test]
+async fn mdoc_signing_requires_the_issuing_country_from_the_leaf_certificate() {
+    let (holder_jwk, _) = es256_jwk(36);
+    let (crypto, _, key_dir, _) = real_crypto_fixture().await;
+    for claims in [
+        json!({"org.iso.18013.5.1": {"family_name":"Lovelace"}}),
+        json!({"org.iso.18013.5.1": {"issuing_country": 840}}),
+        json!({"org.iso.18013.5.1": {"issuing_country":"us"}}),
+        json!({"org.iso.18013.5.1": {"issuing_country":"CA"}}),
+    ] {
+        assert_eq!(
+            crypto
+                .sign(&mdoc_input(
+                    Some(HolderBinding::Jwk {
+                        jwk: holder_jwk.clone(),
+                    }),
+                    claims,
+                ))
+                .await,
+            Err(CredentialTrustError::InvalidEncoding)
+        );
+    }
+    let encoded = crypto
+        .sign(&mdoc_input(
+            Some(HolderBinding::Jwk { jwk: holder_jwk }),
+            json!({
+                "org.iso.18013.5.1": {
+                    "issuing_country":"US",
+                    "family_name":"Lovelace"
+                }
+            }),
+        ))
+        .await
+        .expect("matching mDL issuing country");
+    assert!(!encoded.is_empty());
     let _ = std::fs::remove_dir_all(key_dir);
 }
 

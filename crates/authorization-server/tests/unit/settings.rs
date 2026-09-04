@@ -5,6 +5,68 @@ const CLIENT_ATTESTATION_JWKS: &str = r#"{"keys":[{"kty":"EC","crv":"P-256","kid
 const KEY_ATTESTATION_JWKS: &str =
     r#"{"keys":[{"kty":"EC","crv":"P-256","kid":"key-attester","x":"holder-x","y":"holder-y"}]}"#;
 const ATTESTATION_CREDENTIAL_CONFIGURATIONS: &str = r#"{"pid":{"format":"dc+sd-jwt","scope":"pid","cryptographic_binding_methods_supported":["jwk"],"credential_signing_alg_values_supported":["ES256"],"proof_types_supported":{"attestation":{"proof_signing_alg_values_supported":["ES256"],"key_attestations_required":{"key_storage":["iso_18045_moderate"]}}},"vct":"https://issuer.example/credentials/pid"}}"#;
+const MDOC_CREDENTIAL_CONFIGURATIONS: &str = r#"{"mdl":{"format":"mso_mdoc","scope":"mdl","cryptographic_binding_methods_supported":["jwk"],"credential_signing_alg_values_supported":["ES256"],"proof_types_supported":{"jwt":{"proof_signing_alg_values_supported":["ES256"]}},"doctype":"org.iso.18013.5.1.mDL"}}"#;
+
+#[test]
+fn mdoc_issuing_country_helper_is_required_and_validated_for_local_generation() {
+    let missing = ConfigSource::from_pairs_for_test([(
+        "OPENID4VCI_CREDENTIAL_CONFIGURATIONS_JSON",
+        MDOC_CREDENTIAL_CONFIGURATIONS,
+    )]);
+    let configurations = credential_configurations_from_config(&missing).unwrap();
+    let error = mdoc_issuing_country_from_config(&missing, &configurations).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("OPENID4VC_MDOC_ISSUING_COUNTRY is required")
+    );
+
+    for country in ["us", "USA", "U1", "U-"] {
+        let config = ConfigSource::from_owned_pairs_for_test([
+            (
+                "OPENID4VCI_CREDENTIAL_CONFIGURATIONS_JSON".to_owned(),
+                MDOC_CREDENTIAL_CONFIGURATIONS.to_owned(),
+            ),
+            (
+                "OPENID4VC_MDOC_ISSUING_COUNTRY".to_owned(),
+                country.to_owned(),
+            ),
+        ]);
+        let configurations = credential_configurations_from_config(&config).unwrap();
+        let error = mdoc_issuing_country_from_config(&config, &configurations).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("OPENID4VC_MDOC_ISSUING_COUNTRY must be two uppercase ASCII letters")
+        );
+    }
+
+    let valid = ConfigSource::from_pairs_for_test([
+        (
+            "OPENID4VCI_CREDENTIAL_CONFIGURATIONS_JSON",
+            MDOC_CREDENTIAL_CONFIGURATIONS,
+        ),
+        ("OPENID4VC_MDOC_ISSUING_COUNTRY", "US"),
+    ]);
+    let configurations = credential_configurations_from_config(&valid).unwrap();
+    assert_eq!(
+        mdoc_issuing_country_from_config(&valid, &configurations)
+            .unwrap()
+            .as_deref(),
+        Some("US")
+    );
+}
+
+#[test]
+fn mdoc_issuing_country_helper_is_unused_without_mdoc_configuration() {
+    let config =
+        ConfigSource::from_pairs_for_test([("OPENID4VC_MDOC_ISSUING_COUNTRY", "not-a-country")]);
+    let configurations = credential_configurations_from_config(&config).unwrap();
+    assert_eq!(
+        mdoc_issuing_country_from_config(&config, &configurations).unwrap(),
+        None
+    );
+}
 
 #[test]
 fn process_settings_cannot_override_the_system_tenant_context() {

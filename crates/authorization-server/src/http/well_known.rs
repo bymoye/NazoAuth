@@ -113,6 +113,25 @@ pub(crate) async fn captcha_config() -> Json<Value> {
     }))
 }
 
+pub(crate) async fn mdoc_crl(
+    source: Option<Data<crate::keyctl::MdocCrlSource>>,
+    issuer_id: actix_web::web::Path<String>,
+) -> HttpResponse {
+    let Some(source) = source else {
+        return HttpResponse::NotFound().finish();
+    };
+    match crate::keyctl::signed_mdoc_crl(source.get_ref(), issuer_id.as_str()).await {
+        Ok(Some(crl)) => HttpResponse::Ok()
+            .content_type("application/pkix-crl")
+            .body(crl),
+        Ok(None) => HttpResponse::NotFound().finish(),
+        Err(error) => {
+            tracing::warn!(%error, "mdoc CRL is unavailable");
+            HttpResponse::ServiceUnavailable().finish()
+        }
+    }
+}
+
 #[cfg(test)]
 #[path = "../../tests/unit/http/well_known.rs"]
 mod tests;

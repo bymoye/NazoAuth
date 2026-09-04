@@ -20,6 +20,9 @@ use sha2::{Digest, Sha256};
 use super::super::crypto_helpers::{cbor_to_json, json_to_cbor, jwk_to_cose_key};
 use super::Openid4vcCredentialCrypto;
 
+const MDL_DOCTYPE: &str = "org.iso.18013.5.1.mDL";
+const MDL_NAMESPACE: &str = "org.iso.18013.5.1";
+
 pub(super) async fn sign(
     crypto: &Openid4vcCredentialCrypto,
     input: &CredentialSignInput,
@@ -32,6 +35,7 @@ pub(super) async fn sign(
         .subject_claims
         .as_object()
         .ok_or(CredentialTrustError::InvalidEncoding)?;
+    validate_mdl_issuing_country(crypto, &input.payload.credential_type, namespaces)?;
     let mut builder = DocumentBuilder::new(&input.payload.credential_type)
         .device_key(jwk_to_cose_key(jwk)?)
         .validity(ValidityInfo {
@@ -90,6 +94,41 @@ pub(super) async fn sign(
     Ok(URL_SAFE_NO_PAD.encode(
         encode_cbor_canonical(&issuer_signed).map_err(|_| CredentialTrustError::InvalidEncoding)?,
     ))
+}
+
+fn validate_mdl_issuing_country(
+    crypto: &Openid4vcCredentialCrypto,
+    credential_type: &str,
+    namespaces: &Map<String, Value>,
+) -> Result<(), CredentialTrustError> {
+    if credential_type != MDL_DOCTYPE {
+        return Ok(());
+    }
+
+    let (remainder, certificate) = x509_parser::parse_x509_certificate(crypto.leaf_der.as_slice())
+        .map_err(|_| CredentialTrustError::InvalidEncoding)?;
+    if !remainder.is_empty() {
+        return Err(CredentialTrustError::InvalidEncoding);
+    }
+    let mut country_attributes = certificate.subject().iter_country();
+    let Some(country_attribute) = country_attributes.next() else {
+        return Err(CredentialTrustError::InvalidEncoding);
+    };
+    if country_attributes.next().is_some() {
+        return Err(CredentialTrustError::InvalidEncoding);
+    }
+    let Some(country) = country_attribute.as_str().ok() else {
+        return Err(CredentialTrustError::InvalidEncoding);
+    };
+    let issuing_country = namespaces
+        .get(MDL_NAMESPACE)
+        .and_then(Value::as_object)
+        .and_then(|namespace| namespace.get("issuing_country"))
+        .and_then(Value::as_str);
+    if issuing_country != Some(country) {
+        return Err(CredentialTrustError::InvalidEncoding);
+    }
+    Ok(())
 }
 
 pub(super) fn mdoc_element_to_cbor(
