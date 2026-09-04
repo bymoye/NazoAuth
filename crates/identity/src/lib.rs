@@ -35,6 +35,10 @@ pub use avatar::{
     AvatarContentType, AvatarObject, AvatarService, DeleteAvatarError, ReadAvatarError,
     UploadAvatarError,
 };
+pub use ports::{
+    AvatarDirectUploadPort, AvatarStagedObject, AvatarUploadAuthorization, AvatarUploadClaim,
+    AvatarUploadStatePort, AvatarUploadTarget,
+};
 pub use federation::{
     FederationAuditEvent, FederationError, FederationService, FederationServiceConfig,
     OidcFederationStart, OidcFederationState, SocialFederationStart, SocialFederationState,
