@@ -859,3 +859,7 @@ fn validate_external_registration(registration: &ExternalKeyRegistration) -> any
 fn timestamp(value: DateTime<Utc>) -> String {
     value.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
+
+#[cfg(test)]
+#[path = "../tests/unit/database.rs"]
+mod tests;

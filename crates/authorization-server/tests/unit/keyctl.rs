@@ -1,81 +1,208 @@
+use std::{
+    path::{Path, PathBuf},
+    sync::{Arc, Mutex},
+};
+
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use nazo_key_management::{
+    KeyManager, KeySettings, PersistedSigningKeyset, SigningKeyRepository,
+    SigningKeyRepositoryFuture, SigningKeyWrappingKeyRing, SigningKeysetCompareAndSwapResult,
+    SigningKeysetCreateResult,
+};
+use uuid::Uuid;
+
 use super::*;
 
-fn key_task_config(
-    entries: impl IntoIterator<Item = (&'static str, &'static str)>,
-) -> ConfigSource {
-    ConfigSource::from_owned_pairs_for_test(
-        std::iter::once(("JWK_KEYS_DIR", "runtime/nazoauth-keyctl-config"))
-            .chain(entries)
-            .map(|(key, value)| (key.to_owned(), value.to_owned())),
-    )
+#[derive(Default)]
+struct MemorySigningKeyRepository(Mutex<Option<PersistedSigningKeyset>>);
+
+impl SigningKeyRepository for MemorySigningKeyRepository {
+    fn load(&self) -> SigningKeyRepositoryFuture<'_, Option<PersistedSigningKeyset>> {
+        Box::pin(async move { Ok(self.0.lock().expect("repository mutex").clone()) })
+    }
+
+    fn create_if_absent(
+        &self,
+        candidate: PersistedSigningKeyset,
+    ) -> SigningKeyRepositoryFuture<'_, SigningKeysetCreateResult> {
+        Box::pin(async move {
+            let mut record = self.0.lock().expect("repository mutex");
+            Ok(match record.clone() {
+                Some(existing) => SigningKeysetCreateResult::Existing(existing),
+                None => {
+                    *record = Some(candidate.clone());
+                    SigningKeysetCreateResult::Created(candidate)
+                }
+            })
+        })
+    }
+
+    fn compare_and_swap(
+        &self,
+        expected_revision: i64,
+        candidate: PersistedSigningKeyset,
+    ) -> SigningKeyRepositoryFuture<'_, SigningKeysetCompareAndSwapResult> {
+        Box::pin(async move {
+            let mut record = self.0.lock().expect("repository mutex");
+            let current = record
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("repository has no keyset"))?;
+            Ok(if current.revision == expected_revision {
+                *record = Some(candidate.clone());
+                SigningKeysetCompareAndSwapResult::Applied(candidate)
+            } else {
+                SigningKeysetCompareAndSwapResult::Conflict(current)
+            })
+        })
+    }
+}
+
+struct MemoryOperatorPersistence {
+    repository: Arc<MemorySigningKeyRepository>,
+}
+
+impl crate::operator_task::OperatorPersistence for MemoryOperatorPersistence {
+    fn signing_key_repository(
+        &self,
+        _tenant_id: Uuid,
+    ) -> Arc<dyn nazo_key_management::SigningKeyRepository> {
+        self.repository.clone()
+    }
+
+    fn controller_registry(&self) -> Arc<dyn nazo_persistence::ControllerRegistryPort> {
+        unimplemented!("keyctl tests do not use the controller registry")
+    }
+
+    fn recovery_invalidations(&self) -> Arc<dyn nazo_persistence::RecoveryInvalidationStore> {
+        unimplemented!("keyctl tests do not use recovery invalidations")
+    }
+
+    fn admin_clients(&self) -> Arc<dyn nazo_auth::AdminClientRepositoryPort> {
+        unimplemented!("keyctl tests do not use admin clients")
+    }
+
+    fn tenant_resource_executor(
+        &self,
+        _tenant: nazo_identity::TenantContext,
+        _data_encryption_key: Option<[u8; 32]>,
+        _preparation: Arc<dyn nazo_persistence::tenant_resources::TenantResourcePreparation>,
+    ) -> Arc<dyn nazo_persistence::tenant_resources::TenantResourceExecutorPort> {
+        unimplemented!("keyctl tests do not use tenant resources")
+    }
+
+    fn tenant_directory_executor(
+        &self,
+    ) -> Arc<dyn nazo_persistence::directory_control::TenantDirectoryControlPort> {
+        unimplemented!("keyctl tests do not use tenant directory execution")
+    }
+
+    fn tenant_directory(&self) -> Arc<dyn nazo_persistence::TenantDirectoryStore> {
+        unimplemented!("keyctl tests do not use tenant directory lookup")
+    }
+
+    fn run_migrations(&self) -> crate::operator_task::OperatorBackendFuture<'_, bool> {
+        unimplemented!("keyctl tests do not run migrations")
+    }
+
+    fn initialize_tenant_directory(
+        &self,
+        _binding: nazo_identity::TenantDirectoryBinding,
+    ) -> crate::operator_task::OperatorBackendFuture<'_, bool> {
+        unimplemented!("keyctl tests do not initialize tenant directories")
+    }
+}
+
+fn temporary_directory(label: &str) -> PathBuf {
+    std::env::temp_dir().join(format!("nazoauth-keyctl-{label}-{}", Uuid::now_v7()))
+}
+
+fn tenant_binding(issuer: &str) -> nazo_identity::TenantDirectoryBinding {
+    let tenant_id = Uuid::now_v7();
+    let realm_id = Uuid::now_v7();
+    let organization_id = Uuid::now_v7();
+    let tenant = nazo_identity::TenantContext {
+        tenant_id: nazo_identity::TenantId::new(tenant_id).expect("tenant id"),
+        realm_id: nazo_identity::RealmId::new(realm_id).expect("realm id"),
+        organization_id: nazo_identity::OrganizationId::new(organization_id)
+            .expect("organization id"),
+    };
+    let host = Url::parse(issuer)
+        .expect("issuer URL")
+        .host_str()
+        .expect("issuer host")
+        .to_owned();
+    nazo_identity::TenantDirectoryBinding {
+        tenant,
+        runtime_revision: 1,
+        issuer: issuer.to_owned(),
+        external_host: host,
+    }
+}
+
+fn database_config(data_dir: &Path) -> ConfigSource {
+    ConfigSource::from_owned_pairs_for_test([
+        ("DATA_DIR".to_owned(), data_dir.display().to_string()),
+        (
+            "SIGNING_KEY_ENCRYPTION_KEY".to_owned(),
+            URL_SAFE_NO_PAD.encode([0x42_u8; 32]),
+        ),
+        (
+            "SIGNING_KEY_ENCRYPTION_KEY_ID".to_owned(),
+            "keyctl-test-root".to_owned(),
+        ),
+    ])
+}
+
+fn database_key_settings(data_dir: &Path) -> KeySettings {
+    KeySettings {
+        keys_dir: data_dir.join("keys"),
+        external_command: Vec::new(),
+        external_timeout: std::time::Duration::from_secs(1),
+        rotation_interval: chrono::Duration::days(90),
+        prepublish_window: chrono::Duration::days(1),
+        verification_grace: chrono::Duration::hours(1),
+    }
+}
+
+fn all_openid4vc_purposes() -> Vec<String> {
+    vec!["credential".to_owned(), "presentation_request".to_owned()]
 }
 
 #[test]
-fn key_task_config_closes_the_openid4vc_certificate_contract() {
-    let (_, paths) = key_task_config_from(&key_task_config([])).unwrap();
-    assert!(paths.is_none());
+fn database_certificate_paths_require_atomic_trust_storage_and_tenant_dns() {
+    let config = ConfigSource::default();
+    let mut settings = Settings::from_config(&config).expect("default settings");
+    let binding = tenant_binding("https://tenant.example");
+    let options = parse_generate_local("ES256", &["presentation_request".to_owned()])
+        .expect("valid purpose-scoped options");
 
-    let (_, paths) = key_task_config_from(&key_task_config([
-        (
-            "OPENID4VC_SIGNING_CERTIFICATE_CHAIN_FILE",
-            "runtime/openid4vc-chain.pem",
-        ),
-        (
-            "OPENID4VC_TRUST_ANCHORS_FILE",
-            "runtime/openid4vc-anchors.pem",
-        ),
-        ("PUBLIC_BASE_URL", "https://auth.example"),
-    ]))
-    .unwrap();
-    let paths = paths.unwrap();
-    assert_eq!(paths.chain, PathBuf::from("runtime/openid4vc-chain.pem"));
-    assert_eq!(
-        paths.anchors,
-        PathBuf::from("runtime/openid4vc-anchors.pem")
+    assert!(
+        database_certificate_paths(&settings, &binding, &config, &options)
+            .expect("disabled OpenID4VC")
+            .is_none()
     );
-    assert_eq!(paths.hostname, "auth.example");
 
-    for entries in [
-        vec![(
-            "OPENID4VC_SIGNING_CERTIFICATE_CHAIN_FILE",
-            "runtime/openid4vc-chain.pem",
-        )],
-        vec![
-            (
-                "OPENID4VC_SIGNING_CERTIFICATE_CHAIN_FILE",
-                "runtime/openid4vc-chain.pem",
-            ),
-            (
-                "OPENID4VC_TRUST_ANCHORS_FILE",
-                "runtime/openid4vc-anchors.pem",
-            ),
-            ("PUBLIC_BASE_URL", "http://auth.example"),
-        ],
-        vec![
-            (
-                "OPENID4VC_SIGNING_CERTIFICATE_CHAIN_FILE",
-                "runtime/openid4vc-chain.pem",
-            ),
-            (
-                "OPENID4VC_TRUST_ANCHORS_FILE",
-                "runtime/openid4vc-anchors.pem",
-            ),
-            ("ISSUER", "https://127.0.0.1"),
-        ],
-        vec![
-            (
-                "OPENID4VC_SIGNING_CERTIFICATE_CHAIN_FILE",
-                "runtime/openid4vc-chain.pem",
-            ),
-            (
-                "OPENID4VC_TRUST_ANCHORS_FILE",
-                "runtime/openid4vc-anchors.pem",
-            ),
-            ("PUBLIC_BASE_URL", "not-an-absolute-url"),
-        ],
-    ] {
-        assert!(key_task_config_from(&key_task_config(entries)).is_err());
-    }
+    settings.openid4vc.signing_certificate_chain_file =
+        Some(PathBuf::from("runtime/certificate-bundle.pem"));
+    settings.openid4vc.trust_anchors_file = Some(PathBuf::from("runtime/other-anchors.pem"));
+    let paths = database_certificate_paths(&settings, &binding, &config, &options)
+        .expect("certificate paths")
+        .expect("configured certificate paths");
+    assert_eq!(paths.chain, PathBuf::from("runtime/certificate-bundle.pem"));
+    assert_eq!(paths.anchors, PathBuf::from("runtime/other-anchors.pem"));
+    assert_eq!(paths.hostname, "tenant.example");
+    assert!(paths.mdoc_profile.is_none());
+
+    settings.openid4vc.trust_anchors_file = None;
+    let error = database_certificate_paths(&settings, &binding, &config, &options)
+        .expect_err("certificate generation without trust storage must fail");
+    assert!(error.to_string().contains("trust storage"));
+
+    settings.openid4vc.trust_anchors_file = Some(PathBuf::from("runtime/anchors.pem"));
+    let ipv4_binding = tenant_binding("https://127.0.0.1");
+    let error = database_certificate_paths(&settings, &ipv4_binding, &config, &options)
+        .expect_err("tenant certificate generation requires a DNS hostname");
+    assert!(error.to_string().contains("DNS hostname"));
 }
 
 #[test]
@@ -101,6 +228,241 @@ fn rejects_empty_duplicate_or_runtime_signing_purposes() {
 #[test]
 fn rejects_unsupported_algorithms() {
     assert!(parse_generate_local("none", &["credential".to_owned()]).is_err());
+}
+
+#[tokio::test]
+async fn database_operator_keyctl_roundtrip_keeps_keys_in_the_repository() {
+    let data_dir = temporary_directory("database-roundtrip");
+    let config = database_config(&data_dir);
+    let binding = tenant_binding("http://127.0.0.1:43123");
+    let repository = Arc::new(MemorySigningKeyRepository::default());
+    let persistence = MemoryOperatorPersistence {
+        repository: repository.clone(),
+    };
+    let purposes = all_openid4vc_purposes();
+
+    let (first_kid, first_revision, certificate_chain) =
+        operator_generate_local_database_for_tenant(
+            &config,
+            &binding,
+            &persistence,
+            "ES256",
+            &purposes,
+        )
+        .await
+        .expect("database local key generation");
+    assert!(!first_kid.is_empty());
+    assert!(!first_revision.is_empty());
+    assert!(certificate_chain.is_none());
+    assert!(
+        !data_dir.join("keys").exists(),
+        "database key management must not create a local key directory"
+    );
+
+    let (second_kid, second_revision, certificate_chain) =
+        operator_generate_local_database_for_tenant(
+            &config,
+            &binding,
+            &persistence,
+            "ES256",
+            &purposes,
+        )
+        .await
+        .expect("repeated database local key generation");
+    assert_eq!(second_kid, first_kid);
+    assert_eq!(second_revision, first_revision);
+    assert!(certificate_chain.is_none());
+
+    let listed_revision = operator_list_database_for_tenant(&config, &binding, &persistence)
+        .await
+        .expect("database key listing");
+    assert_eq!(listed_revision, first_revision);
+    let validated_revision = operator_validate_database_for_tenant(&config, &binding, &persistence)
+        .await
+        .expect("database key validation");
+    assert_eq!(validated_revision, first_revision);
+
+    let external_registration = serde_json::json!({
+        "kty": "EC",
+        "crv": "P-256",
+        "x": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        "y": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE",
+        "kid": "external-key",
+        "use": "sig",
+        "alg": "ES256"
+    });
+    let external_revision = operator_register_external_database_for_tenant(
+        &config,
+        &binding,
+        &persistence,
+        "external-key",
+        "ES256",
+        "kms://unit/external-key",
+        &serde_json::to_vec(&external_registration).unwrap(),
+    )
+    .await
+    .expect("external database key registration");
+    assert_ne!(external_revision, first_revision);
+
+    let persisted = repository
+        .load()
+        .await
+        .expect("repository load")
+        .expect("persisted database keyset");
+    assert!(
+        persisted.public_metadata["keys"]
+            .as_array()
+            .expect("key metadata array")
+            .iter()
+            .any(|key| {
+                key["kid"] == "external-key"
+                    && key["backend"] == "external-command"
+                    && key["key_ref"] == "kms://unit/external-key"
+            })
+    );
+
+    let repeated_external_revision = operator_register_external_database_for_tenant(
+        &config,
+        &binding,
+        &persistence,
+        "external-key",
+        "ES256",
+        "kms://unit/external-key",
+        &serde_json::to_vec(&external_registration).unwrap(),
+    )
+    .await
+    .expect("repeated external database key registration");
+    assert_eq!(repeated_external_revision, external_revision);
+
+    assert!(
+        operator_register_external_database_for_tenant(
+            &config,
+            &binding,
+            &persistence,
+            "invalid",
+            "none",
+            "kms://unit/invalid",
+            br"{}",
+        )
+        .await
+        .is_err()
+    );
+    assert!(
+        operator_register_external_database_for_tenant(
+            &config,
+            &binding,
+            &persistence,
+            "invalid",
+            "ES256",
+            "kms://unit/invalid",
+            b"not-json",
+        )
+        .await
+        .is_err()
+    );
+
+    let _ = tokio::fs::remove_dir_all(&data_dir).await;
+}
+
+#[tokio::test]
+async fn database_import_preserves_legacy_kid_as_an_explicit_operation() {
+    let data_dir = temporary_directory("database-import");
+    let legacy_dir = data_dir.join("legacy");
+    let legacy = KeyManager::load_or_create(database_key_settings(&legacy_dir))
+        .await
+        .expect("legacy keyset generation");
+    let expected_kid = legacy.snapshot().active_kid.clone();
+    let config = database_config(&data_dir);
+    let binding = tenant_binding("http://127.0.0.1:43124");
+    let repository = Arc::new(MemorySigningKeyRepository::default());
+    let persistence = MemoryOperatorPersistence {
+        repository: repository.clone(),
+    };
+
+    let revision = operator_import_legacy_file_keyset(
+        &config,
+        &binding,
+        &persistence,
+        legacy_dir.join("keys"),
+    )
+    .await
+    .expect("explicit legacy keyset import");
+    assert!(!revision.is_empty());
+    assert!(legacy_dir.join("keys").join("keyset.json").exists());
+    assert!(!data_dir.join("keys").exists());
+
+    let persisted = repository
+        .load()
+        .await
+        .expect("repository load")
+        .expect("imported keyset");
+    assert_eq!(persisted.public_metadata["active_kid"], expected_kid);
+
+    let _ = tokio::fs::remove_dir_all(&data_dir).await;
+}
+
+#[tokio::test]
+async fn database_certificate_generation_is_idempotent_and_requires_both_purposes() {
+    let data_dir = temporary_directory("database-certificate");
+    let repository = Arc::new(MemorySigningKeyRepository::default());
+    let ring = SigningKeyWrappingKeyRing::new("certificate-root", [0x43; 32], None)
+        .expect("wrapping key ring");
+    let manager = KeyManager::load_or_create_database(
+        database_key_settings(&data_dir),
+        Uuid::now_v7(),
+        repository,
+        ring,
+    )
+    .await
+    .expect("database key manager");
+    let certificate = data_dir.join("openid4vc").join("certificate-bundle.pem");
+    let paths = Openid4vcCertificatePaths {
+        chain: certificate.clone(),
+        anchors: certificate.clone(),
+        revocation_snapshot: None,
+        hostname: "tenant.example".to_owned(),
+        mdoc_profile: None,
+    };
+
+    let error = generate_local_with_database_manager(
+        &manager,
+        Some(&paths),
+        parse_generate_local("ES256", &["credential".to_owned()]).unwrap(),
+    )
+    .await
+    .expect_err("certificate generation must require both OpenID4VC purposes");
+    assert!(
+        error
+            .to_string()
+            .contains("both credential and presentation_request")
+    );
+
+    let options = parse_generate_local("ES256", &all_openid4vc_purposes()).unwrap();
+    let kid = generate_local_with_database_manager(&manager, Some(&paths), options)
+        .await
+        .expect("database certificate generation");
+    assert!(certificate.is_file());
+    let contents = tokio::fs::read_to_string(&certificate)
+        .await
+        .expect("generated certificate bundle");
+    assert_eq!(contents.matches("BEGIN CERTIFICATE").count(), 2);
+
+    let repeated_kid = generate_local_with_database_manager(
+        &manager,
+        Some(&paths),
+        parse_generate_local("ES256", &all_openid4vc_purposes()).unwrap(),
+    )
+    .await
+    .expect("repeated database certificate generation");
+    assert_eq!(repeated_kid, kid);
+    assert_eq!(
+        tokio::fs::read_to_string(&certificate)
+            .await
+            .expect("retained certificate bundle"),
+        contents
+    );
+
+    let _ = tokio::fs::remove_dir_all(&data_dir).await;
 }
 
 #[tokio::test]

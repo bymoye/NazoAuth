@@ -1,9 +1,12 @@
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicUsize, Ordering},
+};
 
 use nazo_key_management::{
     KeyManager, KeySettings, PersistedSigningKeyset, SealedKeyMaterial, SigningKeyRepository,
-    SigningKeyRepositoryFuture, SigningKeyWrappingKeyRing, SigningKeysetCompareAndSwapResult,
-    SigningKeysetCreateResult,
+    SigningKeyRepositoryFuture, SigningKeyWrappingKeyError, SigningKeyWrappingKeyRing,
+    SigningKeysetCompareAndSwapResult, SigningKeysetCreateResult,
 };
 use uuid::Uuid;
 
@@ -44,6 +47,60 @@ fn encrypted_generation_rejects_swapped_public_metadata() {
     );
 }
 
+#[test]
+fn wrapping_key_ring_rejects_invalid_ids_and_malformed_material() {
+    assert_eq!(
+        SigningKeyWrappingKeyRing::new("", [0_u8; 32], None).err(),
+        Some(SigningKeyWrappingKeyError::EmptyId)
+    );
+    assert_eq!(
+        SigningKeyWrappingKeyRing::new("x".repeat(129), [0_u8; 32], None).err(),
+        Some(SigningKeyWrappingKeyError::IdTooLong)
+    );
+    assert_eq!(
+        SigningKeyWrappingKeyRing::new("same", [0_u8; 32], Some(("same".to_owned(), [1_u8; 32])))
+            .err(),
+        Some(SigningKeyWrappingKeyError::DuplicateId)
+    );
+
+    let ring = SigningKeyWrappingKeyRing::new(
+        "current",
+        [2_u8; 32],
+        Some(("previous".to_owned(), [3_u8; 32])),
+    )
+    .unwrap();
+    let tenant = Uuid::now_v7();
+    let sealed = ring.seal(tenant, "test", b"private-material").unwrap();
+    assert_eq!(
+        ring.open(tenant, "test", &sealed).unwrap(),
+        b"private-material"
+    );
+
+    let unknown_key = SealedKeyMaterial {
+        wrapping_key_id: "removed".to_owned(),
+        nonce: sealed.nonce,
+        ciphertext: sealed.ciphertext.clone(),
+    };
+    assert!(ring.open(tenant, "test", &unknown_key).is_err());
+
+    let short_ciphertext = SealedKeyMaterial {
+        wrapping_key_id: sealed.wrapping_key_id.clone(),
+        nonce: sealed.nonce,
+        ciphertext: vec![0_u8; 15],
+    };
+    assert!(ring.open(tenant, "test", &short_ciphertext).is_err());
+    assert!(SealedKeyMaterial::from_persisted_bytes("current".to_owned(), &[0_u8; 11]).is_err());
+    assert!(
+        ring.open_generation(
+            tenant,
+            1,
+            &serde_json::json!({"active_kid":"active"}),
+            &short_ciphertext,
+        )
+        .is_err()
+    );
+}
+
 #[derive(Default)]
 struct MemoryRepository(Mutex<Option<PersistedSigningKeyset>>);
 
@@ -74,6 +131,72 @@ impl SigningKeyRepository for MemoryRepository {
         Box::pin(async move {
             let mut record = self.0.lock().unwrap();
             let current = record.clone().unwrap();
+            Ok(if current.revision == expected {
+                *record = Some(candidate.clone());
+                SigningKeysetCompareAndSwapResult::Applied(candidate)
+            } else {
+                SigningKeysetCompareAndSwapResult::Conflict(current)
+            })
+        })
+    }
+}
+
+struct ConflictRepository {
+    record: Mutex<Option<PersistedSigningKeyset>>,
+    conflicts_remaining: AtomicUsize,
+}
+
+impl ConflictRepository {
+    fn with_conflicts(conflicts: usize) -> Self {
+        Self {
+            record: Mutex::new(None),
+            conflicts_remaining: AtomicUsize::new(conflicts),
+        }
+    }
+}
+
+impl SigningKeyRepository for ConflictRepository {
+    fn load(&self) -> SigningKeyRepositoryFuture<'_, Option<PersistedSigningKeyset>> {
+        Box::pin(async move { Ok(self.record.lock().unwrap().clone()) })
+    }
+
+    fn create_if_absent(
+        &self,
+        candidate: PersistedSigningKeyset,
+    ) -> SigningKeyRepositoryFuture<'_, SigningKeysetCreateResult> {
+        Box::pin(async move {
+            let mut record = self.record.lock().unwrap();
+            Ok(match record.clone() {
+                Some(existing) => SigningKeysetCreateResult::Existing(existing),
+                None => {
+                    *record = Some(candidate.clone());
+                    SigningKeysetCreateResult::Created(candidate)
+                }
+            })
+        })
+    }
+
+    fn compare_and_swap(
+        &self,
+        expected: i64,
+        candidate: PersistedSigningKeyset,
+    ) -> SigningKeyRepositoryFuture<'_, SigningKeysetCompareAndSwapResult> {
+        Box::pin(async move {
+            let mut record = self.record.lock().unwrap();
+            let current = record.clone().expect("keyset exists before CAS");
+            if self
+                .conflicts_remaining
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
+                    if remaining > 0 {
+                        Some(remaining - 1)
+                    } else {
+                        None
+                    }
+                })
+                .is_ok()
+            {
+                return Ok(SigningKeysetCompareAndSwapResult::Conflict(current));
+            }
             Ok(if current.revision == expected {
                 *record = Some(candidate.clone());
                 SigningKeysetCompareAndSwapResult::Applied(candidate)
@@ -453,4 +576,69 @@ async fn refresh_reseals_an_old_generation_before_previous_wrapping_key_is_remov
     )
     .await
     .unwrap();
+}
+
+#[tokio::test]
+async fn database_update_retries_compare_and_swap_conflicts_before_applying() {
+    let settings = KeySettings {
+        keys_dir: std::env::temp_dir().join(format!("nazoauth-db-conflict-{}", Uuid::now_v7())),
+        external_command: Vec::new(),
+        external_timeout: std::time::Duration::from_secs(1),
+        rotation_interval: chrono::Duration::days(90),
+        prepublish_window: chrono::Duration::days(1),
+        verification_grace: chrono::Duration::minutes(10),
+    };
+    let repository = Arc::new(ConflictRepository::with_conflicts(2));
+    let manager = KeyManager::load_or_create_database(
+        settings,
+        Uuid::now_v7(),
+        repository.clone(),
+        SigningKeyWrappingKeyRing::new("current", [12_u8; 32], None).unwrap(),
+    )
+    .await
+    .unwrap();
+
+    let kid = manager
+        .database_register_local(nazo_key_management::LocalKeyRegistration {
+            algorithm: jsonwebtoken::Algorithm::ES256,
+            purposes: [nazo_auth::SigningPurpose::Credential]
+                .into_iter()
+                .collect(),
+        })
+        .await
+        .expect("a bounded number of repository conflicts should converge");
+    assert!(kid.starts_with("es256-"));
+    assert_eq!(repository.load().await.unwrap().unwrap().revision, 2);
+}
+
+#[tokio::test]
+async fn database_update_stops_after_the_cas_conflict_budget() {
+    let settings = KeySettings {
+        keys_dir: std::env::temp_dir().join(format!("nazoauth-db-no-converge-{}", Uuid::now_v7())),
+        external_command: Vec::new(),
+        external_timeout: std::time::Duration::from_secs(1),
+        rotation_interval: chrono::Duration::days(90),
+        prepublish_window: chrono::Duration::days(1),
+        verification_grace: chrono::Duration::minutes(10),
+    };
+    let repository = Arc::new(ConflictRepository::with_conflicts(8));
+    let manager = KeyManager::load_or_create_database(
+        settings,
+        Uuid::now_v7(),
+        repository,
+        SigningKeyWrappingKeyRing::new("current", [13_u8; 32], None).unwrap(),
+    )
+    .await
+    .unwrap();
+
+    let error = manager
+        .database_register_local(nazo_key_management::LocalKeyRegistration {
+            algorithm: jsonwebtoken::Algorithm::ES256,
+            purposes: [nazo_auth::SigningPurpose::Credential]
+                .into_iter()
+                .collect(),
+        })
+        .await
+        .expect_err("an unbounded conflict stream must fail closed");
+    assert!(error.to_string().contains("did not converge"));
 }

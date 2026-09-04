@@ -1040,3 +1040,7 @@ async fn ensure_openid4vc_certificates_from_database(
         ensure_openid4vc_revocation_snapshot(paths).await
     }
 }
+
+#[cfg(test)]
+#[path = "../tests/unit/keyctl.rs"]
+mod tests;

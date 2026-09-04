@@ -31,6 +31,11 @@ case "$RUST_HOST" in
   *) EXECUTABLE_SUFFIX="" ;;
 esac
 SERVER_BIN="$BIN_DIR/nazoauth$EXECUTABLE_SUFFIX"
+# `cargo test --no-run` below is allowed to rebuild the server binary while
+# compiling integration-test harnesses.  Keep the exact instrumented image
+# that wrote the long-lived server profiles so llvm-cov never tries to map
+# those counters onto a later binary with a different coverage map.
+E2E_SERVER_BIN="$COVERAGE_DIR/nazoauth-e2e$EXECUTABLE_SUFFIX"
 PYTHON_BIN="${PYTHON:-}"
 if [[ -z "$PYTHON_BIN" ]]; then
   if command -v python3 >/dev/null 2>&1; then
@@ -302,6 +307,8 @@ export LLVM_PROFILE_FILE="$(profile_path 'cargo-%p-%m.profraw')"
 cargo test --locked -p nazo-postgres --test migrations \
   pending_migrations_create_all_runtime_module_state_tables
 cargo build --locked --workspace --all-features --package nazoauth --bin nazoauth
+cp "$SERVER_BIN" "$E2E_SERVER_BIN"
+chmod +x "$E2E_SERVER_BIN"
 "$SERVER_BIN" tenant-bootstrap
 
 INSTANCE_IDENTITY_DIR="$PRIMARY_INSTANCE_IDENTITY_DIR" \
@@ -415,8 +422,8 @@ if payload:
 PY
 )
 
-if [[ ! -x "$SERVER_BIN" ]]; then
-  echo "Instrumented server binary was not found at $SERVER_BIN." >&2
+if [[ ! -x "$E2E_SERVER_BIN" ]]; then
+  echo "Preserved instrumented E2E server binary was not found at $E2E_SERVER_BIN." >&2
   exit 1
 fi
 if [[ "${#test_objects[@]}" -eq 0 ]]; then
@@ -427,7 +434,7 @@ fi
 "$LLVM_TOOLS_DIR/llvm-cov" export --format=lcov \
   --instr-profile "$COVERAGE_DIR/server.profdata" \
   --ignore-filename-regex "$IGNORE_REGEX" \
-  "$SERVER_BIN" > lcov-e2e.info
+  "$E2E_SERVER_BIN" > lcov-e2e.info
 
 # Some integration tests deliberately execute the production binary as a child
 # process. Those profiles belong to the test run, not the long-lived E2E server

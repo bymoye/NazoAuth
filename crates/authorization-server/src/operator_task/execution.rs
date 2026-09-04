@@ -484,7 +484,7 @@ async fn run_directory_control_operation(
     })
 }
 
-fn map_directory_control_error(error: TenantDirectoryControlError) -> SideEffectError {
+pub(super) fn map_directory_control_error(error: TenantDirectoryControlError) -> SideEffectError {
     match error {
         TenantDirectoryControlError::Conflict => SideEffectError::Terminal(anyhow::anyhow!(
             "tenant directory operation lost its consistency fence"
@@ -656,7 +656,7 @@ async fn system_tenant_binding(
     active_tenant_binding(persistence, &tenant_id).await
 }
 
-fn map_tenant_directory_read_error(
+pub(super) fn map_tenant_directory_read_error(
     error: nazo_identity::ports::RepositoryError,
 ) -> SideEffectError {
     match error {

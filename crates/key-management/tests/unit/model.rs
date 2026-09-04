@@ -8,7 +8,8 @@ use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use nazo_auth::{SignRequest, Signer, SigningPurpose};
 
 use super::{
-    KeyGeneration, KeyHandle, KeyManager, KeyRecordStatus, KeySettings, KeyState, ManagedKey,
+    ExternalKeyRegistration, KeyGeneration, KeyHandle, KeyManager, KeyRecordStatus, KeySettings,
+    KeyState, LocalKeyRegistration, ManagedKey, StoredVerificationKey, TestSigningBehavior,
 };
 use crate::{
     PersistedSigningKeyset, SigningKeyRepository, SigningKeyRepositoryFuture,
@@ -401,4 +402,89 @@ async fn database_rotation_retains_old_public_key_for_grace_and_snapshot_bounds(
                 + crate::lifecycle::MAX_DATABASE_SNAPSHOT_STALENESS
                 - chrono::Duration::seconds(1)
     );
+}
+
+#[test]
+fn key_record_status_has_stable_operator_labels() {
+    assert_eq!(KeyRecordStatus::Prepublished.as_str(), "prepublished");
+    assert_eq!(KeyRecordStatus::PurposeScoped.as_str(), "purpose-scoped");
+    assert_eq!(KeyRecordStatus::Active.as_str(), "active");
+    assert_eq!(KeyRecordStatus::Grace.as_str(), "grace");
+    assert_eq!(KeyRecordStatus::Retired.as_str(), "retired");
+}
+
+#[test]
+fn external_purpose_key_is_not_selected_as_a_local_signer() {
+    let manager = KeyManager::for_test(jsonwebtoken::Algorithm::EdDSA);
+    let mut loaded = manager.inner.generation.load().loaded.clone();
+    loaded.verification_keys.push(StoredVerificationKey {
+        public_jwk: serde_json::json!({"kid":"external", "alg":"RS256", "use":"sig"}),
+        retire_at: None,
+        managed: ManagedKey {
+            kid: "external".to_owned(),
+            algorithm: "RS256".to_owned(),
+            purposes: [SigningPurpose::HttpMessage].into_iter().collect(),
+            state: KeyState::Active,
+            handle: KeyHandle::External {
+                key_ref: "kms://test/external".to_owned(),
+            },
+        },
+    });
+
+    assert!(
+        loaded
+            .selected_key(SigningPurpose::HttpMessage, jsonwebtoken::Algorithm::RS256)
+            .is_none(),
+        "the local Signer path must not pretend it can invoke an external key"
+    );
+}
+
+#[tokio::test]
+async fn database_operator_methods_reject_file_backed_managers() {
+    let manager = KeyManager::for_test(jsonwebtoken::Algorithm::EdDSA);
+    let registration = ExternalKeyRegistration {
+        kid: "unused".to_owned(),
+        algorithm: jsonwebtoken::Algorithm::EdDSA,
+        key_ref: "kms://unused".to_owned(),
+        public_jwk: serde_json::Value::Null,
+    };
+
+    assert!(manager.database_list_keys().await.is_err());
+    assert!(
+        manager
+            .database_register_external(registration)
+            .await
+            .is_err()
+    );
+    assert!(
+        manager
+            .database_register_local(LocalKeyRegistration {
+                algorithm: jsonwebtoken::Algorithm::ES256,
+                purposes: [SigningPurpose::Credential].into_iter().collect(),
+            })
+            .await
+            .is_err()
+    );
+    assert!(manager.database_validate().await.is_err());
+    assert!(manager.database_revision().await.is_err());
+    assert!(manager.database_local_private_key_pem("unused").is_err());
+}
+
+#[tokio::test]
+async fn external_signing_failure_is_returned_without_successful_signature() {
+    let manager = KeyManager::for_test_behavior(
+        jsonwebtoken::Algorithm::EdDSA,
+        TestSigningBehavior::ExternalFailure {
+            stderr: "external signer rejected request".to_owned(),
+        },
+    );
+    let error = manager
+        .sign(SignRequest {
+            purpose: SigningPurpose::IdToken,
+            algorithm: "EdDSA",
+            signing_input: b"must fail",
+        })
+        .await
+        .expect_err("the configured external signer failure must propagate");
+    assert_eq!(error, nazo_auth::SignError::SigningFailed);
 }

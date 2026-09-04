@@ -433,3 +433,7 @@ impl AvatarUploadStatePort for AvatarUploadStateStore {
         })
     }
 }
+
+#[cfg(test)]
+#[path = "../tests/unit/avatar_upload_state.rs"]
+mod tests;

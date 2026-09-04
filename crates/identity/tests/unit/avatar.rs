@@ -5,12 +5,20 @@ use std::sync::{
 };
 
 use crate::ports::{
-    AvatarDirectUploadPort, AvatarRepositoryPort, AvatarStagedObject, AvatarStorageFuture,
-    AvatarUploadAuthorization, AvatarUploadClaim, AvatarUploadStatePort, AvatarUploadTarget,
-    GrantSummaryRepositoryPort, RepositoryFuture,
+    AvatarDirectUploadPort, AvatarRepositoryPort, AvatarStagedObject, AvatarStorageError,
+    AvatarStorageFuture, AvatarUploadAuthorization, AvatarUploadClaim, AvatarUploadStatePort,
+    AvatarUploadTarget, GrantSummaryRepositoryPort, RepositoryError, RepositoryFuture,
 };
 use crate::{AccountIdentity, Principal, TenantContext, UserId, UserProfile, UserRole};
 use uuid::Uuid;
+
+fn valid_png() -> Vec<u8> {
+    let mut encoded = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::new_rgba8(1, 1)
+        .write_to(&mut encoded, image::ImageFormat::Png)
+        .expect("fixture image should encode");
+    encoded.into_inner()
+}
 
 #[test]
 fn avatar_reference_rejects_extra_query_or_path_components() {
@@ -33,6 +41,7 @@ fn content_detection_uses_file_signatures() {
     let png = encode(image::ImageFormat::Png);
     let jpeg = encode(image::ImageFormat::Jpeg);
     let webp = encode(image::ImageFormat::WebP);
+    let gif = b"GIF89a";
     assert_eq!(
         AvatarContentType::detect(&png),
         Some(AvatarContentType::Png)
@@ -45,11 +54,28 @@ fn content_detection_uses_file_signatures() {
         AvatarContentType::detect(&webp),
         Some(AvatarContentType::Webp)
     );
+    assert_eq!(AvatarContentType::detect(gif), None);
     assert_eq!(
         AvatarContentType::detect(b"\x89PNG\r\n\x1a\nnot-an-image"),
         None
     );
     assert_eq!(AvatarContentType::detect(b"not-an-image"), None);
+    assert_eq!(AvatarContentType::Png.as_str(), "image/png");
+    assert_eq!(AvatarContentType::Jpeg.as_str(), "image/jpeg");
+    assert_eq!(AvatarContentType::Webp.as_str(), "image/webp");
+    assert_eq!(
+        AvatarContentType::parse("image/png"),
+        Some(AvatarContentType::Png)
+    );
+    assert_eq!(
+        AvatarContentType::parse("image/jpeg"),
+        Some(AvatarContentType::Jpeg)
+    );
+    assert_eq!(
+        AvatarContentType::parse("image/webp"),
+        Some(AvatarContentType::Webp)
+    );
+    assert_eq!(AvatarContentType::parse("image/gif"), None);
 }
 
 #[test]
@@ -246,6 +272,235 @@ impl GrantSummaryRepositoryPort for NoGrants {
     }
 }
 
+#[derive(Clone)]
+struct ScriptedDirectStorage {
+    authorize: Result<AvatarUploadTarget, AvatarStorageError>,
+    staged: Result<AvatarStagedObject, AvatarStorageError>,
+    publish: Result<(), AvatarStorageError>,
+    final_object: Result<AvatarObject, AvatarStorageError>,
+    delete_staging: Result<(), AvatarStorageError>,
+    delete_final: Result<(), AvatarStorageError>,
+    publish_calls: Arc<AtomicUsize>,
+    delete_staging_calls: Arc<AtomicUsize>,
+}
+
+impl Default for ScriptedDirectStorage {
+    fn default() -> Self {
+        Self {
+            authorize: Ok(AvatarUploadTarget {
+                url: "https://object-store.test/upload".to_owned(),
+                method: "PUT".to_owned(),
+                headers: Default::default(),
+            }),
+            staged: Ok(AvatarStagedObject {
+                bytes: valid_png(),
+                version: "etag-scripted".to_owned(),
+            }),
+            publish: Ok(()),
+            final_object: Ok(AvatarObject {
+                bytes: valid_png(),
+                content_type: AvatarContentType::Png,
+                version: "final".to_owned(),
+            }),
+            delete_staging: Ok(()),
+            delete_final: Ok(()),
+            publish_calls: Arc::new(AtomicUsize::new(0)),
+            delete_staging_calls: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+}
+
+impl AvatarDirectUploadPort for ScriptedDirectStorage {
+    fn authorize_upload<'a>(
+        &'a self,
+        _staging_object_id: &'a str,
+        _content_length: usize,
+        _expires_at: chrono::DateTime<chrono::Utc>,
+    ) -> AvatarStorageFuture<'a, AvatarUploadTarget> {
+        let result = self.authorize.clone();
+        Box::pin(async move { result })
+    }
+
+    fn read_staged<'a>(
+        &'a self,
+        _staging_object_id: &'a str,
+        _max_bytes: usize,
+    ) -> AvatarStorageFuture<'a, AvatarStagedObject> {
+        let result = self.staged.clone();
+        Box::pin(async move { result })
+    }
+
+    fn publish_staged<'a>(
+        &'a self,
+        _staging_object_id: &'a str,
+        _expected_version: &'a str,
+        _final_object_id: &'a str,
+        _content_type: AvatarContentType,
+    ) -> AvatarStorageFuture<'a, ()> {
+        self.publish_calls.fetch_add(1, Ordering::Relaxed);
+        let result = self.publish.clone();
+        Box::pin(async move { result })
+    }
+
+    fn read_final<'a>(
+        &'a self,
+        _final_object_id: &'a str,
+    ) -> AvatarStorageFuture<'a, AvatarObject> {
+        let result = self.final_object.clone();
+        Box::pin(async move { result })
+    }
+
+    fn delete_staging<'a>(&'a self, _staging_object_id: &'a str) -> AvatarStorageFuture<'a, ()> {
+        self.delete_staging_calls.fetch_add(1, Ordering::Relaxed);
+        let result = self.delete_staging.clone();
+        Box::pin(async move { result })
+    }
+
+    fn delete_final<'a>(&'a self, _final_object_id: &'a str) -> AvatarStorageFuture<'a, ()> {
+        let result = self.delete_final.clone();
+        Box::pin(async move { result })
+    }
+}
+
+#[derive(Clone)]
+struct ScriptedDirectState {
+    claim: Arc<Mutex<AvatarUploadClaim>>,
+    claim_error: Option<RepositoryError>,
+    create: Result<(), RepositoryError>,
+    record_candidate: Result<bool, RepositoryError>,
+    complete: Result<bool, RepositoryError>,
+    release: Result<bool, RepositoryError>,
+    releases: Arc<AtomicUsize>,
+}
+
+impl ScriptedDirectState {
+    fn pending(authorization: AvatarUploadAuthorization) -> Self {
+        Self {
+            claim: Arc::new(Mutex::new(AvatarUploadClaim::Pending {
+                authorization,
+                ownership_token: "owner-scripted".to_owned(),
+            })),
+            claim_error: None,
+            create: Ok(()),
+            record_candidate: Ok(true),
+            complete: Ok(true),
+            release: Ok(true),
+            releases: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+}
+
+impl AvatarUploadStatePort for ScriptedDirectState {
+    fn create<'a>(
+        &'a self,
+        _authorization: &'a AvatarUploadAuthorization,
+        _ttl_seconds: u64,
+    ) -> RepositoryFuture<'a, ()> {
+        let result = self.create.clone();
+        Box::pin(async move { result })
+    }
+
+    fn claim<'a>(
+        &'a self,
+        _user_id: UserId,
+        _upload_id: &'a str,
+        _lease_until: chrono::DateTime<chrono::Utc>,
+    ) -> RepositoryFuture<'a, AvatarUploadClaim> {
+        let claim = self.claim.lock().unwrap().clone();
+        let error = self.claim_error.clone();
+        Box::pin(async move { error.map_or(Ok(claim), Err) })
+    }
+
+    fn record_candidate<'a>(
+        &'a self,
+        _user_id: UserId,
+        _upload_id: &'a str,
+        _ownership_token: &'a str,
+        _staged_version: &'a str,
+        _final_object_id: &'a str,
+    ) -> RepositoryFuture<'a, bool> {
+        let result = self.record_candidate.clone();
+        Box::pin(async move { result })
+    }
+
+    fn complete<'a>(
+        &'a self,
+        _user_id: UserId,
+        _upload_id: &'a str,
+        _ownership_token: &'a str,
+        _final_object_id: &'a str,
+    ) -> RepositoryFuture<'a, bool> {
+        let result = self.complete.clone();
+        Box::pin(async move { result })
+    }
+
+    fn release<'a>(
+        &'a self,
+        _user_id: UserId,
+        _upload_id: &'a str,
+        _ownership_token: &'a str,
+    ) -> RepositoryFuture<'a, bool> {
+        self.releases.fetch_add(1, Ordering::Relaxed);
+        let result = self.release.clone();
+        Box::pin(async move { result })
+    }
+}
+
+#[derive(Clone)]
+enum AvatarRepositoryResult {
+    Update,
+    Conflict,
+    Error(RepositoryError),
+}
+
+#[derive(Clone)]
+struct ScriptedAvatarRepository {
+    account: Arc<Mutex<PublicAccount>>,
+    result: AvatarRepositoryResult,
+}
+
+impl AvatarRepositoryPort for ScriptedAvatarRepository {
+    fn compare_and_set_avatar<'a>(
+        &'a self,
+        _tenant_id: crate::TenantId,
+        _user_id: UserId,
+        expected_avatar_url: Option<&'a str>,
+        avatar_url: Option<String>,
+    ) -> RepositoryFuture<'a, Option<PublicAccount>> {
+        let result = self.result.clone();
+        let account = Arc::clone(&self.account);
+        let expected = expected_avatar_url.map(ToOwned::to_owned);
+        Box::pin(async move {
+            match result {
+                AvatarRepositoryResult::Update => {
+                    let mut account = account.lock().unwrap();
+                    if account.profile.avatar_url.as_deref() != expected.as_deref() {
+                        return Ok(None);
+                    }
+                    account.profile.avatar_url = avatar_url;
+                    Ok(Some(account.clone()))
+                }
+                AvatarRepositoryResult::Conflict => Ok(None),
+                AvatarRepositoryResult::Error(error) => Err(error),
+            }
+        })
+    }
+}
+
+#[derive(Clone)]
+struct ScriptedGrants(Result<i64, RepositoryError>);
+
+impl GrantSummaryRepositoryPort for ScriptedGrants {
+    fn authorized_client_count(
+        &self,
+        _tenant_id: crate::TenantId,
+        _user_id: Uuid,
+    ) -> RepositoryFuture<'_, i64> {
+        let result = self.0.clone();
+        Box::pin(async move { result })
+    }
+}
+
 fn direct_account() -> PublicAccount {
     let now = chrono::Utc::now();
     PublicAccount {
@@ -265,6 +520,41 @@ fn direct_account() -> PublicAccount {
         created_at: now,
         updated_at: now,
     }
+}
+
+fn upload_authorization(
+    account: &PublicAccount,
+    expires_at: chrono::DateTime<chrono::Utc>,
+) -> AvatarUploadAuthorization {
+    AvatarUploadAuthorization {
+        upload_id: "upload-scripted".to_owned(),
+        tenant_id: account.tenant().tenant_id,
+        user_id: account.user_id(),
+        expected_avatar_url: account.profile.avatar_url.clone(),
+        staging_object_id: "staging-scripted".to_owned(),
+        expires_at,
+    }
+}
+
+fn scripted_direct_service(
+    account: &PublicAccount,
+    storage: ScriptedDirectStorage,
+    state: ScriptedDirectState,
+    grants: Result<i64, RepositoryError>,
+    repository_result: AvatarRepositoryResult,
+) -> AvatarDirectUploadService {
+    AvatarDirectUploadService::from_ports(
+        Arc::new(ScriptedAvatarRepository {
+            account: Arc::new(Mutex::new(account.clone())),
+            result: repository_result,
+        }),
+        Arc::new(ScriptedGrants(grants)),
+        Arc::new(storage),
+        Arc::new(state),
+        1024,
+        300,
+        30,
+    )
 }
 
 fn direct_service_for_length_test(
@@ -467,5 +757,583 @@ async fn direct_upload_retry_from_another_service_returns_the_selected_candidate
     assert_eq!(
         retry.account.profile.avatar_url,
         accepted.account.profile.avatar_url
+    );
+}
+
+#[tokio::test]
+async fn direct_upload_begin_rejects_invalid_references_and_provider_failures() {
+    let account = direct_account();
+    let mut invalid_reference = account.clone();
+    invalid_reference.profile.avatar_url = Some("/auth/me/avatar?v=bad/path".to_owned());
+    let service = scripted_direct_service(
+        &invalid_reference,
+        ScriptedDirectStorage::default(),
+        ScriptedDirectState::pending(upload_authorization(
+            &invalid_reference,
+            chrono::Utc::now() + chrono::Duration::minutes(5),
+        )),
+        Ok(0),
+        AvatarRepositoryResult::Update,
+    );
+    assert_eq!(
+        service.begin_upload(&invalid_reference, 1).await,
+        Err(DirectAvatarUploadError::InvalidCurrentReference)
+    );
+
+    let storage_failure = ScriptedDirectStorage {
+        authorize: Err(AvatarStorageError::Unavailable("signed URL".to_owned())),
+        ..Default::default()
+    };
+    let service = scripted_direct_service(
+        &account,
+        storage_failure,
+        ScriptedDirectState::pending(upload_authorization(
+            &account,
+            chrono::Utc::now() + chrono::Duration::minutes(5),
+        )),
+        Ok(0),
+        AvatarRepositoryResult::Update,
+    );
+    assert_eq!(
+        service.begin_upload(&account, 1).await,
+        Err(DirectAvatarUploadError::Storage(
+            AvatarStorageError::Unavailable("signed URL".to_owned())
+        ))
+    );
+
+    let mut state_failure = ScriptedDirectState::pending(upload_authorization(
+        &account,
+        chrono::Utc::now() + chrono::Duration::minutes(5),
+    ));
+    state_failure.create = Err(RepositoryError::Unavailable);
+    let service = scripted_direct_service(
+        &account,
+        ScriptedDirectStorage::default(),
+        state_failure,
+        Ok(0),
+        AvatarRepositoryResult::Update,
+    );
+    assert_eq!(
+        service.begin_upload(&account, 1).await,
+        Err(DirectAvatarUploadError::State(RepositoryError::Unavailable))
+    );
+
+    let mut overflow_ttl_state = ScriptedDirectState::pending(upload_authorization(
+        &account,
+        chrono::Utc::now() + chrono::Duration::minutes(5),
+    ));
+    overflow_ttl_state.create = Ok(());
+    let service = AvatarDirectUploadService::from_ports(
+        Arc::new(ScriptedAvatarRepository {
+            account: Arc::new(Mutex::new(account.clone())),
+            result: AvatarRepositoryResult::Update,
+        }),
+        Arc::new(NoGrants),
+        Arc::new(ScriptedDirectStorage::default()),
+        Arc::new(overflow_ttl_state),
+        1024,
+        u64::MAX,
+        30,
+    );
+    assert_eq!(
+        service.begin_upload(&account, 1).await,
+        Err(DirectAvatarUploadError::Expired)
+    );
+}
+
+#[tokio::test]
+async fn direct_upload_claim_states_fail_closed_and_release_invalid_pending_claims() {
+    let account = direct_account();
+    for claim in [AvatarUploadClaim::Busy, AvatarUploadClaim::Missing] {
+        let mut state = ScriptedDirectState::pending(upload_authorization(
+            &account,
+            chrono::Utc::now() + chrono::Duration::minutes(5),
+        ));
+        state.claim = Arc::new(Mutex::new(claim.clone()));
+        let service = scripted_direct_service(
+            &account,
+            ScriptedDirectStorage::default(),
+            state,
+            Ok(0),
+            AvatarRepositoryResult::Update,
+        );
+        let expected = match claim {
+            AvatarUploadClaim::Busy => DirectAvatarUploadError::Busy,
+            AvatarUploadClaim::Missing => DirectAvatarUploadError::Missing,
+            _ => unreachable!(),
+        };
+        assert_eq!(
+            service.complete_upload(&account, "upload-scripted").await,
+            Err(expected)
+        );
+    }
+
+    let mut wrong_account =
+        upload_authorization(&account, chrono::Utc::now() + chrono::Duration::minutes(5));
+    wrong_account.user_id = UserId::new(Uuid::now_v7()).unwrap();
+    let state = ScriptedDirectState::pending(wrong_account);
+    let releases = Arc::clone(&state.releases);
+    let service = scripted_direct_service(
+        &account,
+        ScriptedDirectStorage::default(),
+        state,
+        Ok(0),
+        AvatarRepositoryResult::Update,
+    );
+    assert_eq!(
+        service.complete_upload(&account, "upload-scripted").await,
+        Err(DirectAvatarUploadError::Missing)
+    );
+    assert_eq!(releases.load(Ordering::Relaxed), 1);
+
+    let expired = upload_authorization(&account, chrono::Utc::now() - chrono::Duration::seconds(1));
+    let state = ScriptedDirectState::pending(expired);
+    let releases = Arc::clone(&state.releases);
+    let service = scripted_direct_service(
+        &account,
+        ScriptedDirectStorage::default(),
+        state,
+        Ok(0),
+        AvatarRepositoryResult::Update,
+    );
+    assert_eq!(
+        service.complete_upload(&account, "upload-scripted").await,
+        Err(DirectAvatarUploadError::Expired)
+    );
+    assert_eq!(releases.load(Ordering::Relaxed), 1);
+
+    let mut state = ScriptedDirectState::pending(upload_authorization(
+        &account,
+        chrono::Utc::now() + chrono::Duration::minutes(5),
+    ));
+    state.claim_error = Some(RepositoryError::Unavailable);
+    let service = scripted_direct_service(
+        &account,
+        ScriptedDirectStorage::default(),
+        state,
+        Ok(0),
+        AvatarRepositoryResult::Update,
+    );
+    assert_eq!(
+        service.complete_upload(&account, "upload-scripted").await,
+        Err(DirectAvatarUploadError::State(RepositoryError::Unavailable))
+    );
+}
+
+#[tokio::test]
+async fn direct_upload_validates_staged_snapshots_and_storage_transitions() {
+    let account = direct_account();
+    let storage = ScriptedDirectStorage {
+        staged: Err(AvatarStorageError::Missing),
+        ..Default::default()
+    };
+    let state = ScriptedDirectState::pending(upload_authorization(
+        &account,
+        chrono::Utc::now() + chrono::Duration::minutes(5),
+    ));
+    let releases = Arc::clone(&state.releases);
+    let service = scripted_direct_service(
+        &account,
+        storage,
+        state,
+        Ok(0),
+        AvatarRepositoryResult::Update,
+    );
+    assert_eq!(
+        service.complete_upload(&account, "upload-scripted").await,
+        Err(DirectAvatarUploadError::Storage(
+            AvatarStorageError::Missing
+        ))
+    );
+    assert_eq!(releases.load(Ordering::Relaxed), 1);
+
+    let mut state = ScriptedDirectState::pending(upload_authorization(
+        &account,
+        chrono::Utc::now() + chrono::Duration::minutes(5),
+    ));
+    state.record_candidate = Ok(false);
+    let service = scripted_direct_service(
+        &account,
+        ScriptedDirectStorage::default(),
+        state,
+        Ok(0),
+        AvatarRepositoryResult::Update,
+    );
+    assert_eq!(
+        service.complete_upload(&account, "upload-scripted").await,
+        Err(DirectAvatarUploadError::ConcurrentChange)
+    );
+
+    let bytes = valid_png();
+    let authorization =
+        upload_authorization(&account, chrono::Utc::now() + chrono::Duration::minutes(5));
+    let mut publishing_state = ScriptedDirectState::pending(authorization.clone());
+    publishing_state.claim = Arc::new(Mutex::new(AvatarUploadClaim::Publishing {
+        authorization: authorization.clone(),
+        ownership_token: "owner-scripted".to_owned(),
+        staged_version: "etag-scripted".to_owned(),
+        final_object_id: "wrong-candidate".to_owned(),
+    }));
+    let storage = ScriptedDirectStorage {
+        staged: Ok(AvatarStagedObject {
+            bytes: bytes.clone(),
+            version: "etag-scripted".to_owned(),
+        }),
+        ..Default::default()
+    };
+    let service = scripted_direct_service(
+        &account,
+        storage,
+        publishing_state,
+        Ok(0),
+        AvatarRepositoryResult::Update,
+    );
+    assert_eq!(
+        service.complete_upload(&account, "upload-scripted").await,
+        Err(DirectAvatarUploadError::ConcurrentChange)
+    );
+
+    let mut publishing_state = ScriptedDirectState::pending(authorization.clone());
+    publishing_state.claim = Arc::new(Mutex::new(AvatarUploadClaim::Publishing {
+        authorization: authorization.clone(),
+        ownership_token: "owner-scripted".to_owned(),
+        staged_version: "expected-etag".to_owned(),
+        final_object_id: final_object_id("upload-scripted", &bytes),
+    }));
+    let storage = ScriptedDirectStorage {
+        staged: Ok(AvatarStagedObject {
+            bytes: bytes.clone(),
+            version: "actual-etag".to_owned(),
+        }),
+        ..Default::default()
+    };
+    let service = scripted_direct_service(
+        &account,
+        storage,
+        publishing_state,
+        Ok(0),
+        AvatarRepositoryResult::Update,
+    );
+    assert_eq!(
+        service.complete_upload(&account, "upload-scripted").await,
+        Err(DirectAvatarUploadError::ConcurrentChange)
+    );
+
+    let mut publishing_state = ScriptedDirectState::pending(authorization.clone());
+    publishing_state.claim = Arc::new(Mutex::new(AvatarUploadClaim::Publishing {
+        authorization,
+        ownership_token: "owner-scripted".to_owned(),
+        staged_version: "etag-scripted".to_owned(),
+        final_object_id: final_object_id("upload-scripted", b"not-an-image"),
+    }));
+    let storage = ScriptedDirectStorage {
+        staged: Ok(AvatarStagedObject {
+            bytes: b"not-an-image".to_vec(),
+            version: "etag-scripted".to_owned(),
+        }),
+        ..Default::default()
+    };
+    let service = scripted_direct_service(
+        &account,
+        storage,
+        publishing_state,
+        Ok(0),
+        AvatarRepositoryResult::Update,
+    );
+    assert_eq!(
+        service.complete_upload(&account, "upload-scripted").await,
+        Err(DirectAvatarUploadError::UnsupportedContent)
+    );
+}
+
+#[tokio::test]
+async fn direct_upload_handles_retries_repository_failures_and_overview_failures() {
+    let account = direct_account();
+    let authorization =
+        upload_authorization(&account, chrono::Utc::now() + chrono::Duration::minutes(5));
+    let mut state = ScriptedDirectState::pending(authorization.clone());
+    state.claim = Arc::new(Mutex::new(AvatarUploadClaim::Publishing {
+        authorization,
+        ownership_token: "owner-scripted".to_owned(),
+        staged_version: "etag-scripted".to_owned(),
+        final_object_id: final_object_id("upload-scripted", &valid_png()),
+    }));
+    let storage = ScriptedDirectStorage {
+        publish: Err(AvatarStorageError::Unavailable("publish".to_owned())),
+        ..Default::default()
+    };
+    let service = scripted_direct_service(
+        &account,
+        storage,
+        state,
+        Ok(0),
+        AvatarRepositoryResult::Update,
+    );
+    assert_eq!(
+        service.complete_upload(&account, "upload-scripted").await,
+        Err(DirectAvatarUploadError::Storage(
+            AvatarStorageError::Unavailable("publish".to_owned())
+        ))
+    );
+
+    for repository_result in [
+        AvatarRepositoryResult::Conflict,
+        AvatarRepositoryResult::Error(RepositoryError::Unavailable),
+    ] {
+        let state = ScriptedDirectState::pending(upload_authorization(
+            &account,
+            chrono::Utc::now() + chrono::Duration::minutes(5),
+        ));
+        let service = scripted_direct_service(
+            &account,
+            ScriptedDirectStorage::default(),
+            state,
+            Ok(0),
+            repository_result.clone(),
+        );
+        let error = service
+            .complete_upload(&account, "upload-scripted")
+            .await
+            .expect_err("repository result must stop completion");
+        assert!(matches!(
+            (repository_result, error),
+            (
+                AvatarRepositoryResult::Conflict,
+                DirectAvatarUploadError::ConcurrentChange
+            ) | (
+                AvatarRepositoryResult::Error(RepositoryError::Unavailable),
+                DirectAvatarUploadError::Repository(RepositoryError::Unavailable)
+            )
+        ));
+    }
+
+    let mut state = ScriptedDirectState::pending(upload_authorization(
+        &account,
+        chrono::Utc::now() + chrono::Duration::minutes(5),
+    ));
+    state.complete = Err(RepositoryError::Unavailable);
+    let service = scripted_direct_service(
+        &account,
+        ScriptedDirectStorage::default(),
+        state,
+        Ok(0),
+        AvatarRepositoryResult::Update,
+    );
+    assert_eq!(
+        service.complete_upload(&account, "upload-scripted").await,
+        Err(DirectAvatarUploadError::State(RepositoryError::Unavailable))
+    );
+
+    let service = scripted_direct_service(
+        &account,
+        ScriptedDirectStorage::default(),
+        ScriptedDirectState::pending(upload_authorization(
+            &account,
+            chrono::Utc::now() + chrono::Duration::minutes(5),
+        )),
+        Err(RepositoryError::Unavailable),
+        AvatarRepositoryResult::Update,
+    );
+    assert_eq!(
+        service.complete_upload(&account, "upload-scripted").await,
+        Err(DirectAvatarUploadError::Overview(
+            RepositoryError::Unavailable
+        ))
+    );
+}
+
+#[tokio::test]
+async fn direct_upload_recognizes_completed_and_already_recorded_candidates() {
+    let bytes = valid_png();
+    let candidate = final_object_id("upload-scripted", &bytes);
+    let mut account = direct_account();
+    account.profile.avatar_url = Some(avatar_url(&candidate));
+    let mut state = ScriptedDirectState::pending(upload_authorization(
+        &account,
+        chrono::Utc::now() + chrono::Duration::minutes(5),
+    ));
+    state.complete = Ok(false);
+    let service = scripted_direct_service(
+        &account,
+        ScriptedDirectStorage::default(),
+        state,
+        Ok(0),
+        AvatarRepositoryResult::Update,
+    );
+    assert_eq!(
+        service.complete_upload(&account, "upload-scripted").await,
+        Err(DirectAvatarUploadError::ConcurrentChange)
+    );
+
+    let mut state = ScriptedDirectState::pending(upload_authorization(
+        &account,
+        chrono::Utc::now() + chrono::Duration::minutes(5),
+    ));
+    state.claim = Arc::new(Mutex::new(AvatarUploadClaim::Completed {
+        final_object_id: candidate.clone(),
+    }));
+    let service = scripted_direct_service(
+        &account,
+        ScriptedDirectStorage::default(),
+        state,
+        Ok(0),
+        AvatarRepositoryResult::Update,
+    );
+    assert!(
+        service
+            .complete_upload(&account, "upload-scripted")
+            .await
+            .is_ok()
+    );
+
+    let mut mismatched_account = direct_account();
+    mismatched_account.profile.avatar_url = Some(avatar_url("different"));
+    let mut state = ScriptedDirectState::pending(upload_authorization(
+        &mismatched_account,
+        chrono::Utc::now() + chrono::Duration::minutes(5),
+    ));
+    state.claim = Arc::new(Mutex::new(AvatarUploadClaim::Completed {
+        final_object_id: candidate,
+    }));
+    let service = scripted_direct_service(
+        &mismatched_account,
+        ScriptedDirectStorage::default(),
+        state,
+        Ok(0),
+        AvatarRepositoryResult::Update,
+    );
+    assert_eq!(
+        service
+            .complete_upload(&mismatched_account, "upload-scripted")
+            .await,
+        Err(DirectAvatarUploadError::ConcurrentChange)
+    );
+}
+
+#[tokio::test]
+async fn direct_avatar_read_and_delete_preserve_repository_and_storage_boundaries() {
+    let account = direct_account();
+    let service = scripted_direct_service(
+        &account,
+        ScriptedDirectStorage::default(),
+        ScriptedDirectState::pending(upload_authorization(
+            &account,
+            chrono::Utc::now() + chrono::Duration::minutes(5),
+        )),
+        Ok(0),
+        AvatarRepositoryResult::Update,
+    );
+    assert_eq!(
+        service.read(&account).await,
+        Err(ReadAvatarError::NotUploaded)
+    );
+
+    let mut invalid = account.clone();
+    invalid.profile.avatar_url = Some("/auth/me/avatar?v=bad/path".to_owned());
+    assert_eq!(
+        service.read(&invalid).await,
+        Err(ReadAvatarError::InvalidReference)
+    );
+
+    let storage_failure = ScriptedDirectStorage {
+        final_object: Err(AvatarStorageError::Missing),
+        ..Default::default()
+    };
+    let with_avatar = {
+        let mut account = account.clone();
+        account.profile.avatar_url = Some(avatar_url("final"));
+        account
+    };
+    let service = scripted_direct_service(
+        &with_avatar,
+        storage_failure,
+        ScriptedDirectState::pending(upload_authorization(
+            &with_avatar,
+            chrono::Utc::now() + chrono::Duration::minutes(5),
+        )),
+        Ok(0),
+        AvatarRepositoryResult::Update,
+    );
+    assert_eq!(
+        service.read(&with_avatar).await,
+        Err(ReadAvatarError::Storage(AvatarStorageError::Missing))
+    );
+
+    for repository_result in [
+        AvatarRepositoryResult::Conflict,
+        AvatarRepositoryResult::Error(RepositoryError::Unavailable),
+    ] {
+        let service = scripted_direct_service(
+            &with_avatar,
+            ScriptedDirectStorage::default(),
+            ScriptedDirectState::pending(upload_authorization(
+                &with_avatar,
+                chrono::Utc::now() + chrono::Duration::minutes(5),
+            )),
+            Ok(0),
+            repository_result.clone(),
+        );
+        let error = service
+            .delete(&with_avatar)
+            .await
+            .expect_err("delete must stop on a stale repository reference");
+        assert!(matches!(
+            (repository_result, error),
+            (
+                AvatarRepositoryResult::Conflict,
+                DeleteAvatarError::ConcurrentChange
+            ) | (
+                AvatarRepositoryResult::Error(RepositoryError::Unavailable),
+                DeleteAvatarError::Repository(RepositoryError::Unavailable)
+            )
+        ));
+    }
+
+    let mut invalid_delete = with_avatar.clone();
+    invalid_delete.profile.avatar_url = Some("/auth/me/avatar?v=bad/path".to_owned());
+    let service = scripted_direct_service(
+        &invalid_delete,
+        ScriptedDirectStorage::default(),
+        ScriptedDirectState::pending(upload_authorization(
+            &invalid_delete,
+            chrono::Utc::now() + chrono::Duration::minutes(5),
+        )),
+        Ok(0),
+        AvatarRepositoryResult::Update,
+    );
+    assert_eq!(
+        service.delete(&invalid_delete).await,
+        Err(DeleteAvatarError::InvalidCurrentReference)
+    );
+
+    let storage_failure = ScriptedDirectStorage {
+        delete_final: Err(AvatarStorageError::Unavailable("delete".to_owned())),
+        ..Default::default()
+    };
+    let service = scripted_direct_service(
+        &with_avatar,
+        storage_failure,
+        ScriptedDirectState::pending(upload_authorization(
+            &with_avatar,
+            chrono::Utc::now() + chrono::Duration::minutes(5),
+        )),
+        Ok(0),
+        AvatarRepositoryResult::Update,
+    );
+    assert!(service.delete(&with_avatar).await.is_ok());
+
+    let service = scripted_direct_service(
+        &with_avatar,
+        ScriptedDirectStorage::default(),
+        ScriptedDirectState::pending(upload_authorization(
+            &with_avatar,
+            chrono::Utc::now() + chrono::Duration::minutes(5),
+        )),
+        Err(RepositoryError::Unavailable),
+        AvatarRepositoryResult::Update,
+    );
+    assert_eq!(
+        service.delete(&with_avatar).await,
+        Err(DeleteAvatarError::Overview(RepositoryError::Unavailable))
     );
 }
