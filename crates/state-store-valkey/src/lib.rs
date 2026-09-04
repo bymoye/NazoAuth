@@ -3,6 +3,7 @@
 mod authentication;
 mod authorization;
 mod authorization_state;
+mod avatar_upload_state;
 mod ciba;
 mod command;
 mod connection;
@@ -22,6 +23,7 @@ mod token_state;
 pub use authentication::AuthenticationStore;
 pub use authorization::{AuthorizationCodeBegin, AuthorizationStore, AuthorizationTransition};
 pub use authorization_state::AuthorizationStateAdapter;
+pub use avatar_upload_state::AvatarUploadStateStore;
 pub use ciba::{
     AtomicResult, CibaPingDelivery, CibaPingFinishOutcome, CibaPingFinishResult, CibaStore,
     StoredCibaRequest,
