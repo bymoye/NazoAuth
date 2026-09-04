@@ -12,8 +12,14 @@ timeout, and partial-outage rules for both.
 | --- | --- | --- | --- |
 | PostgreSQL | users, clients, grants, refresh tokens, access-token revocation state, client metadata, audit-relevant durable rows | durable account, client, token, and grant state can be lost or rolled back | restore from tested backups or promote a consistent replica |
 | Valkey | sessions, authorization codes, PAR handles, DPoP proof replay keys, client assertion replay keys, rate-limit counters, consent transaction state | in-flight browser/API transactions fail; replay/rate controls must not silently weaken | fail closed for security-sensitive paths; restart transactions after recovery |
-| Key directory | active and previous token-signing private keys | issued tokens can become unverifiable or signing continuity can break | restore from key backup before serving traffic |
+| PostgreSQL signing-key generation + deployment wrapping root | active, prepublished, and retained token-signing private/public keys plus request-object recipient | issued tokens can become unverifiable or signing continuity can break | restore the matching encrypted row and wrapping root before serving traffic |
 | Avatar directory | user-uploaded avatar files | profile media can be lost or desynchronized from PostgreSQL metadata | restore file backup consistent with PostgreSQL metadata |
+
+OpenID4VC mdoc certificate bundles and their IACA private material remain a
+separate deployment-owned authority. Every instance that serves the same mdoc
+tenant must mount the identical read-only certificate/IACA material; do not let
+separate instances mint replacement IACAs. The signing-key database generation
+does not store or synchronize that CA lifecycle.
 
 ## PostgreSQL High Availability
 
@@ -53,7 +59,7 @@ Point-in-time restore can roll back security events. After any PostgreSQL restor
 When PostgreSQL is unavailable or the pool is exhausted:
 
 - `/health` can remain a process-health check; external readiness checks include a database probe outside this service.
-- Discovery and JWKS can still serve if the process has loaded the keyset and configuration.
+- Discovery and JWKS can still serve if the process has loaded the keyset and configuration. A signing instance can use its last verified database generation for at most two hours after its last successful lifecycle refresh; after that it refuses signing until PostgreSQL and the wrapping root are available again.
 - Login, consent, authorization code issuance, token issuance, refresh, introspection, revocation, admin APIs, profile APIs, and userinfo that requires durable lookup fail with server errors.
 - The service must not mint tokens, mark grants, or accept revocation/introspection decisions from stale or partial durable state.
 

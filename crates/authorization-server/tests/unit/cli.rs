@@ -102,6 +102,22 @@ fn parses_all_product_commands() {
         parse(&["nazoauth", "admin-provision"]).unwrap(),
         Command::AdminProvision
     );
+    let tenant = uuid::Uuid::now_v7();
+    assert_eq!(
+        parse(&[
+            "nazoauth",
+            "keys-import",
+            "--tenant",
+            &tenant.to_string(),
+            "--from",
+            "legacy-keys",
+        ])
+        .unwrap(),
+        Command::KeysImport {
+            tenant_id: tenant,
+            source: std::path::PathBuf::from("legacy-keys"),
+        }
+    );
 }
 
 #[test]
@@ -162,6 +178,12 @@ fn public_commands_reject_accidental_arguments() {
             .unwrap_err()
             .to_string(),
         "admin-provision does not accept argument now"
+    );
+    assert_eq!(
+        parse(&["nazoauth", "keys-import", "--tenant", "not-a-uuid"])
+            .unwrap_err()
+            .to_string(),
+        "keys-import --tenant must be a UUID"
     );
 }
 

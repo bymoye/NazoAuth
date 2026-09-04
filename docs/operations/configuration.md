@@ -150,18 +150,41 @@ and its signer. Keep these records for the lifetime of the issued credentials.
 | `PASSKEY_ORIGIN` | issuer, unless explicitly overridden |
 | `PASSKEY_RP_ID` | host of `PASSKEY_ORIGIN`, unless explicitly overridden |
 | `PROTECTED_RESOURCE_IDENTIFIER` | `ISSUER + "/fapi/resource"`, unless explicitly overridden |
-| `JWK_KEYS_DIR` | `DATA_DIR + "/keys"`, unless explicitly overridden |
+| `JWK_KEYS_DIR` | `DATA_DIR + "/keys"`, only as an explicit one-shot legacy key import source |
+| `SIGNING_KEY_ENCRYPTION_KEY_ID` | required deployment-provided nonempty wrapping-key identifier |
+| `SIGNING_KEY_ENCRYPTION_KEY` | required deployment-provided unpadded base64url 32-byte signing-key wrapping key |
+| `SIGNING_KEY_PREVIOUS_ENCRYPTION_KEY_ID` / `SIGNING_KEY_PREVIOUS_ENCRYPTION_KEY` | optional matched previous wrapping-key pair while rewrapping persisted signing material |
 | `AVATAR_STORAGE_DIR` | `DATA_DIR + "/avatars"`, unless explicitly overridden |
 
 Explicit overrides are retained for advanced deployments. New deployments
 should prefer same-origin defaults.
 
-`JWK_KEYS_DIR` is persistent state, not a disposable cache. On first start,
-NazoAuth atomically creates both its signing keyset and a dedicated
-`request-object-encryption.pem` recipient key. Existing key directories are
-upgraded automatically when first loaded. Back up or mount this directory
-together with the database; replacing the recipient key makes already-issued
-encrypted Request Objects undecryptable.
+Signing keys, their dedicated request-object decryption key, and their public
+projection are one encrypted generation in PostgreSQL. `JWK_KEYS_DIR` is not a
+runtime authority and is never created or read during ordinary startup. An
+operator may explicitly import a complete old directory once; that preserves
+every existing `kid` and leaves the source directory untouched for rollback.
+
+Every server instance for a deployment must receive the same
+`SIGNING_KEY_ENCRYPTION_KEY_ID` and `SIGNING_KEY_ENCRYPTION_KEY`. The key is
+exactly 32 unpadded base64url bytes. Do not generate it per instance or replace
+it before the database generation is rewrapped. During a wrapping-key change,
+deploy the current and previous pair to every instance, let an operator publish
+a new generation, verify all instances can load it, then remove the previous
+pair. Back up the encrypted PostgreSQL row and the wrapping root together;
+losing both makes token-signing and Request Object decryption unrecoverable.
+
+For a file-backed deployment upgrade, stop old writers and run the one-shot
+offline import before starting the database-backed server:
+
+```
+nazoauth keys-import --tenant <tenant-uuid> --from <legacy-jwk-keys-directory>
+```
+
+The target tenant must already be active in the directory and the process must
+have the deployment wrapping-key configuration. The command does not delete,
+rewrite, or keep reading the source directory. Keep it and a PostgreSQL backup
+until rollback is no longer required.
 
 ## Composable capability defaults
 

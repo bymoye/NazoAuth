@@ -36,6 +36,10 @@ pub trait ServerPersistenceProvider: Send + Sync {
         &self,
         tenant_id: uuid::Uuid,
     ) -> Arc<dyn nazo_persistence::RuntimeModuleStore>;
+    fn signing_key_repository(
+        &self,
+        tenant_id: uuid::Uuid,
+    ) -> Arc<dyn nazo_key_management::SigningKeyRepository>;
 
     fn authorization_repository(
         &self,

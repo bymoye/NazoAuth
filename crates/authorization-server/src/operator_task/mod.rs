@@ -69,6 +69,11 @@ pub type OperatorBackendFuture<'a, T> =
 /// The application owns operation admission and journaling; each database
 /// adapter owns its connection lifecycle and the atomic persistence commands.
 pub trait OperatorPersistence: Send + Sync {
+    fn signing_key_repository(
+        &self,
+        tenant_id: uuid::Uuid,
+    ) -> Arc<dyn nazo_key_management::SigningKeyRepository>;
+
     fn controller_registry(&self) -> Arc<dyn nazo_persistence::ControllerRegistryPort>;
 
     fn recovery_invalidations(&self) -> Arc<dyn nazo_persistence::RecoveryInvalidationStore>;

@@ -37,6 +37,16 @@ impl PostgresProvider {
 }
 
 impl ServerPersistenceProvider for PostgresProvider {
+    fn signing_key_repository(
+        &self,
+        tenant_id: uuid::Uuid,
+    ) -> Arc<dyn nazo_key_management::SigningKeyRepository> {
+        Arc::new(nazo_postgres::SigningKeysetRepository::for_tenant(
+            self.pool.clone(),
+            tenant_id,
+        ))
+    }
+
     fn active_tenant_boundary(&self) -> Arc<dyn nazo_persistence::ActiveTenantBoundaryStore> {
         Arc::new(ActiveTenantBoundaryRepository::new(self.pool.clone()))
     }
@@ -287,6 +297,16 @@ struct PostgresOperatorPersistence {
 }
 
 impl OperatorPersistence for PostgresOperatorPersistence {
+    fn signing_key_repository(
+        &self,
+        tenant_id: uuid::Uuid,
+    ) -> Arc<dyn nazo_key_management::SigningKeyRepository> {
+        Arc::new(nazo_postgres::SigningKeysetRepository::for_tenant(
+            self.pool.clone(),
+            tenant_id,
+        ))
+    }
+
     fn controller_registry(&self) -> Arc<dyn nazo_persistence::ControllerRegistryPort> {
         Arc::new(ControllerRegistryRepository::new(self.pool.clone()))
     }

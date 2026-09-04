@@ -61,6 +61,10 @@ impl KeyManager {
 
 const MIN_FAILURE_BACKOFF: Duration = Duration::from_secs(1);
 const MAX_FAILURE_BACKOFF: Duration = Duration::from_secs(60);
+/// A database-backed generation may sign only until this stale-snapshot bound.
+pub(crate) const MAX_DATABASE_SNAPSHOT_STALENESS_SECONDS: i64 = 2 * 60 * 60;
+pub(crate) const MAX_DATABASE_SNAPSHOT_STALENESS: chrono::Duration =
+    chrono::Duration::seconds(MAX_DATABASE_SNAPSHOT_STALENESS_SECONDS);
 
 fn next_failure_backoff(current: Duration) -> Duration {
     current

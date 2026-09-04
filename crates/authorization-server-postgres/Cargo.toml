@@ -10,6 +10,7 @@ publish = false
 anyhow.workspace = true
 nazo-auth.workspace = true
 nazo-identity.workspace = true
+nazo-key-management.workspace = true
 nazo-oauth-server.workspace = true
 nazo-openid4vci.workspace = true
 nazo-persistence.workspace = true

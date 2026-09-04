@@ -5,7 +5,7 @@ use std::{
         Arc,
         atomic::{AtomicBool, AtomicU32, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use crate::local::SigningBackend;
@@ -29,6 +29,12 @@ pub enum KeyHealthStatus {
     Healthy,
     Unhealthy,
 }
+
+// The lifecycle refresh interval is capped at one hour. Two intervals keep a
+// transient database outage available without allowing indefinite signing from
+// an obsolete generation.
+pub(crate) const DATABASE_MAX_STALE: Duration =
+    Duration::from_secs(crate::lifecycle::MAX_DATABASE_SNAPSHOT_STALENESS_SECONDS as u64);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct KeyHealth {
@@ -264,6 +270,7 @@ pub struct LocalKeyRegistration {
 pub(crate) struct KeyGeneration {
     pub(crate) loaded: LoadedKeyset,
     pub(crate) snapshot: Arc<KeySnapshot>,
+    expires_at: Option<Instant>,
 }
 
 pub(crate) struct KeyManagerInner {
@@ -299,7 +306,7 @@ impl HttpSigningLease {
     }
 
     pub async fn sign(&self, signing_input: &[u8]) -> anyhow::Result<Signature> {
-        if !self.health.snapshot().is_healthy() {
+        if self.generation.is_expired() || !self.health.snapshot().is_healthy() {
             anyhow::bail!("signing key lifecycle is unhealthy");
         }
         let selected = self
@@ -387,6 +394,16 @@ impl KeyManager {
         crate::store::list_keys(settings).await
     }
 
+    /// Read operator key metadata from the repository-backed keyset.
+    pub async fn database_list_keys(&self) -> anyhow::Result<Vec<KeyRecord>> {
+        let database = self
+            .inner
+            .database
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("key manager is not repository-backed"))?;
+        crate::database::list(&self.inner.settings, database).await
+    }
+
     pub async fn register_external(
         settings: &KeySettings,
         registration: ExternalKeyRegistration,
@@ -394,11 +411,57 @@ impl KeyManager {
         crate::store::register_external_key(settings, registration).await
     }
 
+    /// Register an external signer in the repository-backed keyset.
+    pub async fn database_register_external(
+        &self,
+        registration: ExternalKeyRegistration,
+    ) -> anyhow::Result<()> {
+        let database = self
+            .inner
+            .database
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("key manager is not repository-backed"))?;
+        let loaded =
+            crate::database::register_external(&self.inner.settings, database, registration)
+                .await?;
+        self.inner
+            .generation
+            .store(Arc::new(KeyGeneration::database(loaded)));
+        Ok(())
+    }
+
     pub async fn register_local(
         settings: &KeySettings,
         registration: LocalKeyRegistration,
     ) -> anyhow::Result<String> {
         crate::store::register_local_key(settings, registration).await
+    }
+
+    /// Register a purpose-scoped local key in the repository-backed keyset.
+    pub async fn database_register_local(
+        &self,
+        registration: LocalKeyRegistration,
+    ) -> anyhow::Result<String> {
+        let database = self
+            .inner
+            .database
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("key manager is not repository-backed"))?;
+        let (kid, loaded) =
+            crate::database::register_local(&self.inner.settings, database, registration).await?;
+        self.inner
+            .generation
+            .store(Arc::new(KeyGeneration::database(loaded)));
+        Ok(kid)
+    }
+
+    /// Return an in-memory local key only for material that must be handed to
+    /// the mdoc certificate generator. It never reads a key file.
+    pub fn database_local_private_key_pem(&self, kid: &str) -> anyhow::Result<String> {
+        if self.inner.database.is_none() {
+            anyhow::bail!("key manager is not repository-backed");
+        }
+        crate::database::local_private_key_pem(&self.inner.generation.load().loaded, kid)
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -529,6 +592,27 @@ impl KeyManager {
         Ok(())
     }
 
+    /// Validate the sealed repository generation, including its public/private
+    /// correspondence and request-object key material.
+    pub async fn database_validate(&self) -> anyhow::Result<()> {
+        let database = self
+            .inner
+            .database
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("key manager is not repository-backed"))?;
+        crate::database::validate(&self.inner.settings, database).await
+    }
+
+    /// Opaque repository generation revision for an operator result.
+    pub async fn database_revision(&self) -> anyhow::Result<String> {
+        let database = self
+            .inner
+            .database
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("key manager is not repository-backed"))?;
+        crate::database::revision(database).await
+    }
+
     pub async fn load_or_create(settings: KeySettings) -> anyhow::Result<Self> {
         let loaded = crate::store::load_or_create_keyset(&settings).await?;
         Ok(Self::from_loaded(settings, loaded))
@@ -540,7 +624,29 @@ impl KeyManager {
         repository: Arc<dyn crate::SigningKeyRepository>,
         wrapping_keys: crate::SigningKeyWrappingKeyRing,
     ) -> anyhow::Result<Self> {
-        let (loaded, database) = crate::database::load_or_create(
+        let (loaded, database) =
+            crate::database::load_or_create(&settings, tenant_id, repository, wrapping_keys)
+                .await?;
+        Ok(Self {
+            inner: Arc::new(KeyManagerInner {
+                generation: ArcSwap::from_pointee(KeyGeneration::database(loaded)),
+                settings,
+                health: Arc::new(LifecycleHealth::new()),
+                lifecycle_shutdown: watch::channel(false).0,
+                database: Some(database),
+            }),
+        })
+    }
+
+    /// Import the legacy file keyset once, preserving every kid and public
+    /// projection. The files are read only and are never used by DB startup.
+    pub async fn import_legacy_file_keyset(
+        settings: KeySettings,
+        tenant_id: uuid::Uuid,
+        repository: Arc<dyn crate::SigningKeyRepository>,
+        wrapping_keys: crate::SigningKeyWrappingKeyRing,
+    ) -> anyhow::Result<Self> {
+        let (loaded, database) = crate::database::import_legacy_file_keyset(
             &settings,
             tenant_id,
             repository,
@@ -549,7 +655,7 @@ impl KeyManager {
         .await?;
         Ok(Self {
             inner: Arc::new(KeyManagerInner {
-                generation: ArcSwap::from_pointee(KeyGeneration::new(loaded)),
+                generation: ArcSwap::from_pointee(KeyGeneration::database(loaded)),
                 settings,
                 health: Arc::new(LifecycleHealth::new()),
                 lifecycle_shutdown: watch::channel(false).0,
@@ -572,7 +678,15 @@ impl KeyManager {
 
     #[must_use]
     pub fn health(&self) -> KeyHealth {
-        self.inner.health.snapshot()
+        let health = self.inner.health.snapshot();
+        if self.inner.database.is_some() && self.inner.generation.load().is_expired() {
+            KeyHealth {
+                status: KeyHealthStatus::Unhealthy,
+                consecutive_failures: health.consecutive_failures,
+            }
+        } else {
+            health
+        }
     }
 
     #[must_use]
@@ -673,9 +787,12 @@ impl KeyManager {
         };
         match result {
             Ok(loaded) => {
-                self.inner
-                    .generation
-                    .store(Arc::new(KeyGeneration::new(loaded)));
+                let generation = if self.inner.database.is_some() {
+                    KeyGeneration::database(loaded)
+                } else {
+                    KeyGeneration::new(loaded)
+                };
+                self.inner.generation.store(Arc::new(generation));
                 self.inner.health.mark_success();
                 Ok(())
             }
@@ -768,7 +885,25 @@ fn sign_error_to_jwt(error: SignError) -> jsonwebtoken::errors::Error {
 impl KeyGeneration {
     fn new(loaded: LoadedKeyset) -> Self {
         let snapshot = Arc::new(snapshot_from_loaded(&loaded));
-        Self { loaded, snapshot }
+        Self {
+            loaded,
+            snapshot,
+            expires_at: None,
+        }
+    }
+
+    fn database(loaded: LoadedKeyset) -> Self {
+        let snapshot = Arc::new(snapshot_from_loaded(&loaded));
+        Self {
+            loaded,
+            snapshot,
+            expires_at: Some(Instant::now() + DATABASE_MAX_STALE),
+        }
+    }
+
+    fn is_expired(&self) -> bool {
+        self.expires_at
+            .is_some_and(|deadline| Instant::now() > deadline)
     }
 }
 
