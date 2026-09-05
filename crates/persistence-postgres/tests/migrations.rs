@@ -697,7 +697,8 @@ async fn pending_migrations_create_all_runtime_module_state_tables() {
     // The runtime-module migration establishes its clean-install baseline once
     // per schema. Other integration tests deliberately mutate the shared
     // default schema, so this assertion needs its own fresh migration ledger.
-    const PUBLIC_SECURITY_AUDIT_MIGRATION_VERSION: &str = "20260805000100";
+    const PUBLIC_SECURITY_AUDIT_MIGRATION_VERSIONS: [&str; 2] =
+        ["20260805000100", "20260905000100"];
     nazo_postgres::run_pending_migrations(&database_url)
         .await
         .expect("public migrations needed by the isolated schema should apply");
@@ -721,15 +722,17 @@ async fn pending_migrations_create_all_runtime_module_state_tables() {
             .batch_execute(diesel::migration::CREATE_MIGRATIONS_TABLE)
             .await
             .expect("isolated migration ledger should create");
-        sql_query(
-            "INSERT INTO __diesel_schema_migrations (version)
-             VALUES ($1)
-             ON CONFLICT (version) DO NOTHING",
-        )
-        .bind::<Text, _>(PUBLIC_SECURITY_AUDIT_MIGRATION_VERSION)
-        .execute(&mut connection)
-        .await
-        .expect("public-only migration should be excluded from the isolated ledger");
+        for version in PUBLIC_SECURITY_AUDIT_MIGRATION_VERSIONS {
+            sql_query(
+                "INSERT INTO __diesel_schema_migrations (version)
+                 VALUES ($1)
+                 ON CONFLICT (version) DO NOTHING",
+            )
+            .bind::<Text, _>(version)
+            .execute(&mut connection)
+            .await
+            .expect("public-only migration should be excluded from the isolated ledger");
+        }
     }
     nazo_postgres::run_pending_migrations(&isolated_url)
         .await
