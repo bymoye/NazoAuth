@@ -325,6 +325,9 @@ async fn keys_import_applies_pending_schema_before_reading_legacy_material() {
             command.env(name, value);
         }
     }
+    if let Some(value) = std::env::var_os("LLVM_PROFILE_FILE") {
+        command.env("LLVM_PROFILE_FILE", value);
+    }
     let output = command.output().expect("keys-import process should run");
     assert!(
         !output.status.success(),
