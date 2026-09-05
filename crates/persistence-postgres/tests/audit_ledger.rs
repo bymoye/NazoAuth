@@ -102,9 +102,6 @@ async fn audit_ledger_append_is_chained_and_outboxed() {
         .anchor_health()
         .await
         .expect("initial shared anchor health should be readable");
-    nazo_persistence::SecurityAuditExporter::observe_anchor(&repository, "test-deployment")
-        .await
-        .expect("the exporter should observe the shared anchor");
     let genesis = nazo_persistence::SecurityAuditExporter::record_genesis(
         &repository,
         "test-deployment",
@@ -116,6 +113,9 @@ async fn audit_ledger_append_is_chained_and_outboxed() {
     } else {
         assert!(matches!(genesis, Err(RepositoryError::Consistency(_))));
     }
+    nazo_persistence::SecurityAuditExporter::observe_anchor(&repository, "test-deployment")
+        .await
+        .expect("the exporter should observe the complete shared anchor");
     loop {
         let existing = repository
             .claim_due(256, 60)

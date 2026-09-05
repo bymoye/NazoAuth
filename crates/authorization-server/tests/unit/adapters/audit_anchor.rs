@@ -264,7 +264,10 @@ fn repository_error(message: &str) -> RepositoryError {
 async fn worker_iteration_anchors_genesis_before_polling_empty_outbox() {
     let (endpoint, server) = local_anchor_endpoint(202).await;
     let config = iteration_config(endpoint);
-    let repository = ScriptedRepository::with_health(Ok(genesis_snapshot()), Ok(Vec::new()));
+    let repository = ScriptedRepository::with_health(Ok(genesis_snapshot()), Ok(Vec::new()))
+        .with_observation(Err(repository_error(
+            "an incomplete checkpoint must not be observed",
+        )));
     let client = test_client();
     let mut last_anchored = None;
 
@@ -287,6 +290,15 @@ async fn worker_iteration_anchors_genesis_before_polling_empty_outbox() {
     );
     assert_eq!(body["checkpoint_kind"], "genesis");
     assert_eq!(body["sequence"], 0);
+    assert_eq!(
+        repository
+            .observations
+            .lock()
+            .expect("scripted repository mutex is not poisoned")
+            .len(),
+        1,
+        "genesis must establish the complete checkpoint before observation"
+    );
 }
 
 #[tokio::test]

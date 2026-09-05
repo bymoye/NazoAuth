@@ -81,15 +81,14 @@ pub(super) async fn run_iteration<R: AuditAnchorRepository + ?Sized>(
         }
     };
 
-    if let Err(error) = repository
-        .observe_anchor(&config.preflight.deployment_id)
-        .await
-    {
-        tracing::warn!(target: "audit.anchor", error_kind = %error_kind(&error), "audit anchor observation could not be persisted");
-        return IterationOutcome::Retry(retry_delay(1));
-    }
-
     if let Some(exported) = AnchorCheckpoint::from_snapshot(&snapshot) {
+        if let Err(error) = repository
+            .observe_anchor(&config.preflight.deployment_id)
+            .await
+        {
+            tracing::warn!(target: "audit.anchor", error_kind = %error_kind(&error), "audit anchor observation could not be persisted");
+            return IterationOutcome::Retry(retry_delay(1));
+        }
         *last_anchored = Some(exported);
     } else if snapshot.head_sequence == 0 {
         let expected_hash = super::protocol::encode_hash(&snapshot.head_hash);
