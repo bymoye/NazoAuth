@@ -30,8 +30,72 @@ pub(super) struct DirectTlsListeners {
     pub(super) public: ServerConfig,
     pub(super) mtls_bind: SocketAddr,
     pub(super) mtls: ServerConfig,
+    pub(super) client_verifier: Arc<dyn rustls::server::danger::ClientCertVerifier>,
     pub(super) snapshots: Arc<DirectTlsSnapshotStore>,
     pub(super) reload_interval: Duration,
+}
+
+/// TLS proves possession of the presented key. OAuth then selects the client
+/// and verifies either its registered key or the tenant's current PKI trust.
+/// A process-start CA allowlist cannot make that tenant/client decision.
+#[derive(Debug)]
+struct ClientCertificateProofVerifier {
+    signatures: Arc<dyn rustls::server::danger::ClientCertVerifier>,
+}
+
+impl rustls::server::danger::ClientCertVerifier for ClientCertificateProofVerifier {
+    fn client_auth_mandatory(&self) -> bool {
+        false
+    }
+
+    fn root_hint_subjects(&self) -> &[rustls::DistinguishedName] {
+        &[]
+    }
+
+    fn verify_client_cert(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _now: rustls::pki_types::UnixTime,
+    ) -> Result<rustls::server::danger::ClientCertVerified, rustls::Error> {
+        let (remainder, _) =
+            x509_parser::parse_x509_certificate(end_entity.as_ref()).map_err(|_| {
+                rustls::Error::InvalidCertificate(rustls::CertificateError::BadEncoding)
+            })?;
+        if !remainder.is_empty() {
+            return Err(rustls::Error::InvalidCertificate(
+                rustls::CertificateError::BadEncoding,
+            ));
+        }
+        // This is not a PKI identity assertion. Both signature callbacks below
+        // remain mandatory, and the request adapter retains the chain for the
+        // selected tenant's authorization decision.
+        Ok(rustls::server::danger::ClientCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        signature: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        self.signatures
+            .verify_tls12_signature(message, cert, signature)
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        signature: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        self.signatures
+            .verify_tls13_signature(message, cert, signature)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        self.signatures.supported_verify_schemes()
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -186,7 +250,9 @@ pub(super) fn direct_tls_listeners(
     let mut mtls = ServerConfig::builder_with_provider(provider)
         .with_protocol_versions(rustls::DEFAULT_VERSIONS)
         .context("failed to configure TLS protocol versions")?
-        .with_client_cert_verifier(client_verifier)
+        .with_client_cert_verifier(Arc::new(ClientCertificateProofVerifier {
+            signatures: Arc::clone(&client_verifier),
+        }))
         .with_cert_resolver(resolver);
     // A resumed handshake can bypass the active server identity generation.
     // Disable server-side resumption so every new connection selects the
@@ -208,6 +274,7 @@ pub(super) fn direct_tls_listeners(
         public,
         mtls_bind,
         mtls,
+        client_verifier,
         snapshots,
         reload_interval: Duration::from_secs(reload_interval_seconds),
     }))
@@ -349,7 +416,7 @@ fn validate_tls_server_chain(
     Ok(())
 }
 
-fn load_client_verifier(
+pub(super) fn load_client_verifier(
     client_ca: &Path,
     provider: Arc<rustls::crypto::CryptoProvider>,
 ) -> anyhow::Result<Arc<dyn rustls::server::danger::ClientCertVerifier>> {
@@ -454,12 +521,15 @@ fn read_bounded(
     }
     #[cfg(unix)]
     if require_private_permissions {
-        use std::os::unix::fs::PermissionsExt as _;
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 
         let mode = metadata.permissions().mode();
-        if mode & 0o077 != 0 {
+        let service_group_read = mode & 0o7777 == 0o640
+            && metadata.uid() == 0
+            && metadata.gid() == rustix::process::getegid().as_raw();
+        if mode & 0o077 != 0 && !service_group_read {
             anyhow::bail!(
-                "{label} {} must not be accessible by group or other users (mode {:o})",
+                "{label} {} must be owner-only or root-owned mode 0640 for the service's effective group (mode {:o})",
                 path.display(),
                 mode & 0o777
             );

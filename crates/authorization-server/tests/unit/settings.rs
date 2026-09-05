@@ -155,6 +155,32 @@ fn directory_tenant_uses_the_authoritative_host_and_tenant_storage_roots() {
 }
 
 #[test]
+fn directory_direct_tls_advertises_the_deployment_mtls_port_for_each_tenant_host() {
+    for (mtls_base, expected_port) in [
+        ("https://deployment.example.test:38444", ":38444"),
+        ("https://deployment.example.test", ""),
+    ] {
+        let config = ConfigSource::from_pairs_for_test([
+            ("TRANSPORT_MODE", "direct-tls"),
+            ("PUBLIC_BASE_URL", "https://deployment.example.test:38443"),
+            ("MTLS_ENDPOINT_BASE_URL", mtls_base),
+            ("CLIENT_SECRET_PEPPER", "0123456789abcdef0123456789abcdef"),
+        ]);
+        for host in ["alpha.example.test", "beta.example.test"] {
+            let issuer = format!("https://{host}:38443/issuer");
+            let settings =
+                Settings::from_directory_binding(&config, &directory_binding(&issuer, host))
+                    .unwrap();
+            assert_eq!(settings.endpoint.issuer, issuer);
+            assert_eq!(
+                settings.endpoint.mtls_endpoint_base_url,
+                format!("https://{host}{expected_port}/issuer")
+            );
+        }
+    }
+}
+
+#[test]
 fn directory_tenant_rejects_host_mismatch_but_namespaces_explicit_storage_roots() {
     let base = [
         ("TRANSPORT_MODE", "trusted-proxy"),

@@ -541,6 +541,99 @@ fn self_signed_client_certificate_rejects_expired_x5c() {
 }
 
 #[test]
+fn pki_certificate_requires_the_selected_trust_anchor_and_valid_chain() {
+    use rcgen::{
+        BasicConstraints, CertifiedIssuer, ExtendedKeyUsagePurpose, IsCa, KeyUsagePurpose,
+    };
+    let mut root_params = CertificateParams::new(Vec::<String>::new()).unwrap();
+    root_params.is_ca = IsCa::Ca(BasicConstraints::Constrained(1));
+    root_params.key_usages = vec![KeyUsagePurpose::KeyCertSign];
+    let root =
+        CertifiedIssuer::self_signed(root_params.clone(), KeyPair::generate().unwrap()).unwrap();
+    let other_root =
+        CertifiedIssuer::self_signed(root_params, KeyPair::generate().unwrap()).unwrap();
+    let mut intermediate_params = CertificateParams::new(Vec::<String>::new()).unwrap();
+    intermediate_params
+        .distinguished_name
+        .push(DnType::CommonName, "Client intermediate");
+    intermediate_params.is_ca = IsCa::Ca(BasicConstraints::Constrained(0));
+    intermediate_params.key_usages = vec![KeyUsagePurpose::KeyCertSign];
+    let intermediate =
+        CertifiedIssuer::signed_by(intermediate_params, KeyPair::generate().unwrap(), &root)
+            .unwrap();
+    let mut leaf_params = CertificateParams::new(vec!["client.example".to_owned()]).unwrap();
+    leaf_params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
+    leaf_params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
+    let leaf = leaf_params
+        .signed_by(&KeyPair::generate().unwrap(), &intermediate)
+        .unwrap();
+    let mut headers = header::HeaderMap::new();
+    headers.insert(
+        header::HeaderName::from_static("client-cert"),
+        HeaderValue::from_str(&format!(":{}:", STANDARD.encode(leaf.der()))).unwrap(),
+    );
+    headers.insert(
+        header::HeaderName::from_static("client-cert-chain"),
+        HeaderValue::from_str(&format!(":{}:", STANDARD.encode(intermediate.der()))).unwrap(),
+    );
+    let certificate = request_mtls_client_certificate_from_rfc9440(&headers).unwrap();
+    assert!(
+        !certificate.deployment_trusted_chain,
+        "forwarding does not attest PKI verification"
+    );
+    assert!(certificate_chain_trusted(&certificate, &root.pem()));
+    assert!(!certificate_chain_trusted(&certificate, &other_root.pem()));
+    let mut roots = rustls::RootCertStore::empty();
+    roots.add(root.der().clone()).unwrap();
+    let verifier: std::sync::Arc<dyn rustls::server::danger::ClientCertVerifier> =
+        rustls::server::WebPkiClientVerifier::builder_with_provider(
+            std::sync::Arc::new(roots),
+            std::sync::Arc::new(rustls::crypto::aws_lc_rs::default_provider()),
+        )
+        .build()
+        .unwrap();
+    let proxy_request = |peer: &str| {
+        actix_web::test::TestRequest::default()
+            .app_data(Data::new(MtlsCertificateSource::new(
+                MtlsCertificateSourceMode::Rfc9440,
+            )))
+            .app_data(Data::from(verifier.clone()))
+            .peer_addr(peer.parse().unwrap())
+            .insert_header(("client-cert", headers.get("client-cert").unwrap().clone()))
+            .insert_header((
+                "client-cert-chain",
+                headers.get("client-cert-chain").unwrap().clone(),
+            ))
+            .to_http_request()
+    };
+    let trusted_peers = [IpCidr::parse("127.0.0.1/32").unwrap()];
+    assert!(
+        request_mtls_client_certificate(&proxy_request("127.0.0.1:1234"), &trusted_peers)
+            .unwrap()
+            .deployment_trusted_chain
+    );
+    assert!(
+        request_mtls_client_certificate(&proxy_request("192.0.2.1:1234"), &trusted_peers).is_none(),
+        "a valid chain does not authorize caller-supplied proxy headers"
+    );
+    assert!(
+        !certificate_chain_trusted(&certificate, ""),
+        "revoked trust cannot be cached in certificate facts"
+    );
+    let mut missing_intermediate = certificate.clone();
+    missing_intermediate.certificate_chain_der.truncate(1);
+    assert!(!certificate_chain_trusted(
+        &missing_intermediate,
+        &root.pem()
+    ));
+    headers.insert(
+        header::HeaderName::from_static("client-cert-chain"),
+        HeaderValue::from_static(":not base64:"),
+    );
+    assert!(request_mtls_client_certificate_from_rfc9440(&headers).is_none());
+}
+
+#[test]
 fn mtls_ipaddress_parser_rejects_invalid_san_lengths() {
     assert!(ipaddress_to_string(&[192, 0, 2]).is_none());
 }

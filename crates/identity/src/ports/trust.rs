@@ -60,5 +60,9 @@ pub trait MtlsTrustAnchorStore: Send + Sync {
         note: String,
     ) -> RepositoryFuture<'_, MtlsTrustAnchorRequest>;
 
-    fn active_bundle(&self, tenant_id: TenantId) -> RepositoryFuture<'_, String>;
+    fn active_bundle(
+        &self,
+        tenant_id: TenantId,
+        client_id: Option<Uuid>,
+    ) -> RepositoryFuture<'_, String>;
 }

@@ -38,17 +38,11 @@ async fn proxy_probe(
     backend_url: web::Data<String>,
     client: web::Data<reqwest::Client>,
 ) -> HttpResponse {
-    let Some(certificate) = request.conn_data::<Vec<u8>>() else {
-        return HttpResponse::InternalServerError()
-            .body("proxy did not capture client TLS identity");
-    };
-    let header_value = format!(":{}:", STANDARD.encode(certificate));
-    let response = match client
-        .get(backend_url.get_ref())
-        .header("client-cert", header_value)
-        .send()
-        .await
-    {
+    let mut upstream = client.get(backend_url.get_ref());
+    if let Some(certificate) = request.conn_data::<Vec<u8>>() {
+        upstream = upstream.header("client-cert", format!(":{}:", STANDARD.encode(certificate)));
+    }
+    let response = match upstream.send().await {
         Ok(response) => response,
         Err(error) => return HttpResponse::BadGateway().body(error.to_string()),
     };
@@ -102,7 +96,9 @@ async fn direct_tls_and_trusted_proxy_share_the_same_real_mtls_identity_contract
             .route("/probe", web::get().to(mtls_probe))
     };
     let direct_public_builder = HttpServer::new(direct_app)
-        .on_connect(crate::http::mtls::capture_direct_tls_client_certificate)
+        .on_connect(|io, extensions| {
+            crate::http::mtls::capture_direct_tls_client_certificate(io, extensions, None);
+        })
         .bind_rustls_0_23(("127.0.0.1", 0), direct_listeners.public)
         .unwrap();
     let direct_public_address = direct_public_builder.addrs()[0];
@@ -111,7 +107,9 @@ async fn direct_tls_and_trusted_proxy_share_the_same_real_mtls_identity_contract
     actix_web::rt::spawn(direct_public_server);
 
     let direct_mtls_builder = HttpServer::new(direct_app)
-        .on_connect(crate::http::mtls::capture_direct_tls_client_certificate)
+        .on_connect(|io, extensions| {
+            crate::http::mtls::capture_direct_tls_client_certificate(io, extensions, None);
+        })
         .bind_rustls_0_23(("127.0.0.1", 0), direct_listeners.mtls)
         .unwrap();
     let direct_mtls_address = direct_mtls_builder.addrs()[0];
@@ -168,6 +166,7 @@ async fn direct_tls_and_trusted_proxy_share_the_same_real_mtls_identity_contract
         .expect("test root certificate");
     let anonymous_client = reqwest::Client::builder()
         .no_proxy()
+        .pool_max_idle_per_host(0)
         .https_only(true)
         .tls_backend_rustls()
         .tls_certs_only([root_certificate.clone()])
@@ -184,12 +183,9 @@ async fn direct_tls_and_trusted_proxy_share_the_same_real_mtls_identity_contract
         .identity(identity)
         .build()
         .unwrap();
-    assert!(
-        anonymous_client
-            .get(format!("https://localhost:{}/probe", proxy_address.port()))
-            .send()
-            .await
-            .is_err()
+    assert_eq!(
+        probe(&anonymous_client, proxy_address.port(), None).await,
+        probe(&anonymous_client, direct_mtls_address.port(), None).await
     );
 
     let direct_result = probe(&client, direct_mtls_address.port(), None).await;

@@ -245,7 +245,7 @@ async fn mtls_trust_lifecycle_is_owned_two_person_current_and_revocable() {
     );
     assert!(
         repository
-            .active_bundle(tenant.tenant_id)
+            .active_bundle(tenant.tenant_id, Some(client_database_id))
             .await
             .unwrap()
             .contains("TEST")
@@ -265,11 +265,25 @@ async fn mtls_trust_lifecycle_is_owned_two_person_current_and_revocable() {
     );
     assert!(
         repository
-            .active_bundle(tenant.tenant_id)
+            .active_bundle(tenant.tenant_id, None)
             .await
             .unwrap()
             .contains("TEST"),
         "revoking one client trust request must not remove another client's active anchor"
+    );
+    assert!(
+        repository
+            .active_bundle(tenant.tenant_id, Some(client_database_id))
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        !repository
+            .active_bundle(tenant.tenant_id, Some(bound_client_database_id))
+            .await
+            .unwrap()
+            .is_empty()
     );
 
     for digest_digit in ['0', '1', '2', '3'] {

@@ -244,12 +244,27 @@ pub(crate) async fn authenticate_client_with_dependencies(
                 log_client_auth_rejection(request, client, credentials, "missing_mtls_certificate");
                 return Err(TokenManagementClientAuthError::InvalidClient);
             };
-            if client_mtls_certificate_matches(client, certificate) {
-                Ok(None)
-            } else {
+            if !client_mtls_certificate_matches(client, certificate) {
                 log_client_auth_rejection(request, client, credentials, "mtls_certificate");
-                Err(TokenManagementClientAuthError::InvalidClient)
+                return Err(TokenManagementClientAuthError::InvalidClient);
             }
+            if client.token_endpoint_auth_method == "tls_client_auth"
+                && !certificate.deployment_trusted_chain
+            {
+                let anchors =
+                    service
+                        .mtls_trust_anchor_bundle(client.id)
+                        .await
+                        .map_err(|error| {
+                            tracing::warn!(%error, "failed to read tenant mTLS trust anchors");
+                            TokenManagementClientAuthError::StoreUnavailable
+                        })?;
+                if !crate::http::mtls::certificate_chain_trusted(certificate, &anchors) {
+                    log_client_auth_rejection(request, client, credentials, "mtls_trust");
+                    return Err(TokenManagementClientAuthError::InvalidClient);
+                }
+            }
+            Ok(None)
         }
     }
 }

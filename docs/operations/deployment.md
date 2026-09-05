@@ -99,7 +99,8 @@ For a standalone deployment without a reverse proxy, write the following to
 dedicated unprivileged service account. Replace the database and Valkey
 placeholders and the example UUIDv7 with deployment values. The certificate
 must cover `auth.example.com`; the private key must be readable by the service
-account and have no group or other permission bits.
+account and be owner-only, or root-owned mode `0640` with the service's effective
+group as its group owner. Keep all parent directories traversable by that group.
 
 ```yaml
 BIND: "0.0.0.0:8443"

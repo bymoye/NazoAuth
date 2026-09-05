@@ -488,7 +488,7 @@ async fn mtls_client_auth_requires_certificate_from_trusted_request_context() {
 }
 
 #[actix_web::test]
-async fn mtls_client_auth_accepts_matching_rfc9440_certificate() {
+async fn self_signed_client_auth_accepts_registered_rfc9440_certificate() {
     let state = token_management_state_with_trusted_proxy();
     let certificate = crate::test_support::rfc9440_certificate_fixture("trusted-proxy");
     let req = TestRequest::default()
@@ -501,16 +501,17 @@ async fn mtls_client_auth_accepts_matching_rfc9440_certificate() {
         .insert_header(("client-cert", certificate.header.as_str()))
         .to_http_request();
     let mut client = confidential_client_with_secret(&fixture_secret("unused"));
-    client.token_endpoint_auth_method = "tls_client_auth".to_owned();
-    client.tls_client_auth_subject_dn = Some("CN=trusted-proxy".to_owned());
-    client.tls_client_auth_cert_sha256 = Some(certificate.thumbprint);
-    let credentials = client_credentials("tls_client_auth");
+    client.token_endpoint_auth_method = "self_signed_tls_client_auth".to_owned();
+    client.jwks = Some(
+        json!({"keys": [{"kid": "registered-client-cert", "x5c": [certificate.header.trim_matches(':')]}]}),
+    );
+    let credentials = client_credentials("self_signed_tls_client_auth");
 
     assert!(
         verify_confidential_client(&state, &request_facts(&state, &req), &client, &credentials)
             .await
             .is_ok(),
-        "matching direct TLS certificate should authenticate the client"
+        "the registered self-signed certificate should authenticate through a trusted proxy"
     );
 }
 

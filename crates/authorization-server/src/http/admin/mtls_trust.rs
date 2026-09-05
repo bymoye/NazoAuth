@@ -303,7 +303,7 @@ pub(crate) async fn admin_mtls_trust_bundle(
         Err(response) => return response,
     };
     match service
-        .active_bundle(admin.principal.tenant.tenant_id)
+        .active_bundle(admin.principal.tenant.tenant_id, None)
         .await
     {
         Ok(bundle) => {

@@ -8,7 +8,7 @@ use uuid::Uuid;
 
 use crate::DbPool;
 
-use super::{GrantRepository, OAuthClientRepository};
+use super::{GrantRepository, MtlsTrustAnchorRepository, OAuthClientRepository};
 
 /// PostgreSQL implementation of the persistence boundary used by authorization flows.
 ///
@@ -18,6 +18,7 @@ use super::{GrantRepository, OAuthClientRepository};
 pub struct AuthorizationFlowRepository {
     clients: OAuthClientRepository,
     grants: GrantRepository,
+    mtls_trust: MtlsTrustAnchorRepository,
     tenant_id: Uuid,
 }
 
@@ -26,13 +27,25 @@ impl AuthorizationFlowRepository {
     pub fn new(pool: DbPool, tenant_id: Uuid) -> Self {
         Self {
             clients: OAuthClientRepository::new(pool.clone()),
-            grants: GrantRepository::new(pool),
+            grants: GrantRepository::new(pool.clone()),
+            mtls_trust: MtlsTrustAnchorRepository::new(pool),
             tenant_id,
         }
     }
 }
 
 impl AuthorizationRepositoryPort for AuthorizationFlowRepository {
+    fn mtls_trust_anchor_bundle(&self, client_id: Uuid) -> AuthorizationFuture<'_, String> {
+        Box::pin(async move {
+            let tenant_id = nazo_identity::TenantId::new(self.tenant_id)
+                .map_err(|_| AuthorizationPortError::CorruptData)?;
+            self.mtls_trust
+                .active_bundle(tenant_id, Some(client_id))
+                .await
+                .map_err(map_repository_error)
+        })
+    }
+
     fn client_by_id<'a>(
         &'a self,
         client_id: &'a str,

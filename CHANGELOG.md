@@ -3,6 +3,18 @@
 Project changes are recorded in Keep a Changelog style. Versioned releases use
 semantic versioning once public release tags are cut.
 
+## 0.2.15 - 2026-09-06
+
+### Fixed
+
+- Preserve the configured mTLS listener port in each tenant's endpoint aliases.
+- Accept root-owned Direct TLS keys readable only by the dedicated service
+  group, while rejecting broader key access.
+- Verify client-certificate possession during the TLS handshake and require
+  deployment or currently approved client-specific CA trust for PKI mTLS
+  authentication. Direct TLS and trusted RFC 9440 forwarding now apply the
+  same client authorization checks; registered self-signed keys remain supported.
+
 ## 0.2.14 - 2026-09-05
 
 ### Fixed

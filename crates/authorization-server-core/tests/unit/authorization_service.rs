@@ -31,6 +31,10 @@ struct RepositoryState {
 struct FakeRepository(Arc<RepositoryState>);
 
 impl AuthorizationRepositoryPort for FakeRepository {
+    fn mtls_trust_anchor_bundle(&self, _client_id: Uuid) -> AuthorizationFuture<'_, String> {
+        Box::pin(async { Ok(String::new()) })
+    }
+
     fn client_by_id<'a>(
         &'a self,
         _client_id: &'a str,

@@ -27,10 +27,11 @@ pub struct TokenClientAuthForm<'a> {
     pub client_assertion: Option<&'a str>,
 }
 
-/// Verified client-certificate identity extracted by the deployment-specific HTTP adapter.
+/// Certificate and possession facts extracted by the deployment-specific HTTP adapter.
 ///
 /// The token-management core receives these facts after the adapter has established that the
-/// forwarding peer is trusted. Keeping the value framework-neutral prevents `HttpRequest` and
+/// forwarding peer is trusted. PKI trust and registered-key binding are separate authorization
+/// decisions. Keeping the value framework-neutral prevents `HttpRequest` and
 /// `HeaderMap` from crossing into authentication policy.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ClientCertificateFacts {
@@ -41,6 +42,12 @@ pub struct ClientCertificateFacts {
     pub san_ip: Vec<String>,
     pub san_email: Vec<String>,
     pub verified_certificate_expiry: bool,
+    /// Public certificates presented by the TLS peer, leaf first. A trusted
+    /// forwarding adapter may supply the same RFC 9440 certificate chain.
+    pub certificate_chain_der: Vec<Vec<u8>>,
+    /// Chain verification against an explicitly configured deployment CA.
+    /// This never follows merely from receiving a certificate header.
+    pub deployment_trusted_chain: bool,
 }
 
 #[derive(Clone)]
