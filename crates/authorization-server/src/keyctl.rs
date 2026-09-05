@@ -12,8 +12,9 @@ use nazo_key_management::{
 };
 use rcgen::{
     BasicConstraints, CertificateParams, CertificateRevocationListParams, CertifiedIssuer,
-    CustomExtension, DistinguishedName, DnType, IsCa, Issuer, KeyIdMethod, KeyPair,
+    CustomExtension, DistinguishedName, DnType, DnValue, IsCa, Issuer, KeyIdMethod, KeyPair,
     KeyUsagePurpose, PKCS_ECDSA_P256_SHA256, RevokedCertParams, SerialNumber,
+    string::PrintableString,
 };
 use rustls::pki_types::{CertificateDer, pem::PemObject};
 use sha1::{Digest as _, Sha1};
@@ -161,7 +162,10 @@ fn is_mdoc_document_signing_certificate(
             && matches!(
                 &extension.parsed_extension(),
                 x509_parser::extensions::ParsedExtension::ExtendedKeyUsage(usage)
-                    if usage.other.iter().any(|oid| oid.to_id_string() == "2.23.136.1.1.1")
+                    if usage.other.iter().any(|oid| matches!(
+                        oid.to_id_string().as_str(),
+                        "1.0.18013.5.1.2" | "2.23.136.1.1.1"
+                    ))
             )
     })
 }
@@ -314,9 +318,10 @@ fn build_openid4vc_certificate_bundle(
         .distinguished_name
         .push(DnType::CommonName, "NazoAuth OpenID4VC Local CA");
     if let Some(profile) = mdoc_profile {
-        ca_params
-            .distinguished_name
-            .push(DnType::CountryName, &profile.issuing_country);
+        ca_params.distinguished_name.push(
+            DnType::CountryName,
+            printable_country_name(&profile.issuing_country)?,
+        );
         ca_params
             .custom_extensions
             .push(issuer_alternative_name(&profile.issuer_contact_uri));
@@ -342,12 +347,16 @@ fn build_openid4vc_certificate_bundle(
         .distinguished_name
         .push(DnType::CommonName, hostname);
     if let Some(profile) = mdoc_profile {
-        leaf_params
-            .distinguished_name
-            .push(DnType::CountryName, &profile.issuing_country);
+        leaf_params.distinguished_name.push(
+            DnType::CountryName,
+            printable_country_name(&profile.issuing_country)?,
+        );
         leaf_params
             .custom_extensions
             .push(document_signing_extended_key_usage());
+        leaf_params
+            .custom_extensions
+            .push(subject_key_identifier_extension(signing_key));
         leaf_params
             .custom_extensions
             .push(issuer_alternative_name(&profile.issuer_contact_uri));
@@ -361,11 +370,7 @@ fn build_openid4vc_certificate_bundle(
                 )],
             });
     }
-    leaf_params.is_ca = if mdoc_profile.is_some() {
-        IsCa::ExplicitNoCa
-    } else {
-        IsCa::NoCa
-    };
+    leaf_params.is_ca = IsCa::NoCa;
     leaf_params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
     leaf_params.not_before = now;
     leaf_params.not_after = if mdoc_profile.is_some() {
@@ -374,10 +379,6 @@ fn build_openid4vc_certificate_bundle(
         ca_not_after
     };
     leaf_params.serial_number = Some(SerialNumber::from(rand::random::<[u8; 19]>().to_vec()));
-    if mdoc_profile.is_some() {
-        leaf_params.key_identifier_method =
-            KeyIdMethod::PreSpecified(subject_key_identifier(signing_key));
-    }
     leaf_params.use_authority_key_identifier_extension = mdoc_profile.is_some();
     let leaf = leaf_params.signed_by(signing_key, &ca)?;
 
@@ -397,12 +398,24 @@ fn subject_key_identifier(key: &KeyPair) -> Vec<u8> {
     subject_key_identifier_from_public_key(key.public_key_raw())
 }
 
+fn subject_key_identifier_extension(key: &KeyPair) -> CustomExtension {
+    let content = yasna::construct_der(|writer| writer.write_bytes(&subject_key_identifier(key)));
+    CustomExtension::from_oid_content(&[2, 5, 29, 14], content)
+}
+
+fn printable_country_name(country: &str) -> anyhow::Result<DnValue> {
+    Ok(DnValue::PrintableString(
+        PrintableString::try_from(country)
+            .context("mDoc issuing country is not PrintableString")?,
+    ))
+}
+
 fn document_signing_extended_key_usage() -> CustomExtension {
     let content = yasna::construct_der(|writer| {
         writer.write_sequence(|writer| {
             writer
                 .next()
-                .write_oid(&ObjectIdentifier::from_slice(&[2, 23, 136, 1, 1, 1]));
+                .write_oid(&ObjectIdentifier::from_slice(&[1, 0, 18013, 5, 1, 2]));
         });
     });
     let mut extension = CustomExtension::from_oid_content(&[2, 5, 29, 37], content);

@@ -13,6 +13,7 @@ use nazo_key_management::{
 use rcgen::{KeyPair, PKCS_ECDSA_P256_SHA256};
 use rustls::pki_types::{CertificateDer, pem::PemObject};
 use uuid::Uuid;
+use x509_parser::der_parser::asn1_rs::Tag;
 
 use super::*;
 
@@ -262,6 +263,54 @@ fn assert_complete_managed_material(material: &Openid4vcMaterial) {
     for pem in material.iaca_private_materials.values() {
         assert_eq!(parse_certificates(pem).len(), 2);
     }
+    assert_iso_mdoc_certificate_profile(material);
+}
+
+fn assert_iso_mdoc_certificate_profile(material: &Openid4vcMaterial) {
+    let certificates = parse_certificates(&material.public.certificate_chain_pem);
+    let (_, leaf) = x509_parser::parse_x509_certificate(certificates[0].as_ref())
+        .expect("parse managed DS certificate");
+    let (_, iaca) = x509_parser::parse_x509_certificate(certificates[1].as_ref())
+        .expect("parse managed IACA certificate");
+
+    for certificate in [&leaf, &iaca] {
+        let country = certificate
+            .subject()
+            .iter_country()
+            .next()
+            .expect("managed mDoc certificate countryName");
+        assert_eq!(country.attr_value().tag(), Tag::PrintableString);
+    }
+
+    let extended_key_usage = leaf
+        .extensions()
+        .iter()
+        .find_map(|extension| match extension.parsed_extension() {
+            x509_parser::extensions::ParsedExtension::ExtendedKeyUsage(usage) => {
+                Some((extension.critical, usage))
+            }
+            _ => None,
+        })
+        .expect("managed DS extended key usage");
+    assert!(extended_key_usage.0);
+    assert_eq!(extended_key_usage.1.other.len(), 1);
+    assert_eq!(
+        extended_key_usage.1.other[0].to_id_string(),
+        "1.0.18013.5.1.2"
+    );
+    assert!(
+        leaf.basic_constraints()
+            .expect("parse managed DS basic constraints")
+            .is_none()
+    );
+
+    let basic_constraints = iaca
+        .basic_constraints()
+        .expect("parse managed IACA basic constraints")
+        .expect("managed IACA basic constraints");
+    assert!(basic_constraints.critical);
+    assert!(basic_constraints.value.ca);
+    assert_eq!(basic_constraints.value.path_len_constraint, Some(0));
 }
 
 fn assert_same_material(left: &Openid4vcMaterial, right: &Openid4vcMaterial) {
