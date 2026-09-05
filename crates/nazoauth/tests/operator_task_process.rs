@@ -282,6 +282,69 @@ fn assert_rejection(output: &Output, class: &str) {
     );
 }
 
+/// A file-backed deployment reaches `keys-import` before normal startup. The
+/// import command must therefore create its database table without generating
+/// a replacement keyset that would make the legacy material impossible to
+/// import.
+#[tokio::test]
+async fn keys_import_applies_pending_schema_before_reading_legacy_material() {
+    let Some((database_url, _registry)) = isolated_registry("keys_import_upgrade").await else {
+        return;
+    };
+    let mut connection = AsyncPgConnection::establish(&database_url)
+        .await
+        .expect("test database should connect");
+    connection
+        .batch_execute(
+            "DROP TABLE tenant_signing_keysets;\
+             DELETE FROM __diesel_schema_migrations \
+             WHERE version = '20260904000100';",
+        )
+        .await
+        .expect("pre-database-keyset deployment state should be reproducible");
+
+    let root = temporary_directory("keys-import-upgrade");
+    write_runtime_fixtures(&root);
+    let mut command = Command::new(env!("CARGO_BIN_EXE_nazoauth"));
+    command
+        .arg("keys-import")
+        .arg("--tenant")
+        .arg("00000000-0000-0000-0000-000000000001")
+        .arg("--from")
+        .arg(root.join("missing-legacy-keys"))
+        .current_dir(&root)
+        .env_clear()
+        .env("NAZOAUTH_SERVER_CONFIG_FILE", root.join("server.yaml"))
+        .env("NAZOAUTH_MIGRATION_RUNTIME_ROLE", MIGRATION_RUNTIME_ROLE)
+        .env("DATABASE_URL", &database_url)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(windows)]
+    for name in ["PATH", "SystemRoot", "WINDIR"] {
+        if let Some(value) = std::env::var_os(name) {
+            command.env(name, value);
+        }
+    }
+    if let Some(value) = std::env::var_os("LLVM_PROFILE_FILE") {
+        command.env("LLVM_PROFILE_FILE", value);
+    }
+    let output = command.output().expect("keys-import process should run");
+    assert!(
+        !output.status.success(),
+        "a missing legacy key directory must fail the import"
+    );
+
+    let keyset = sql_query("SELECT EXISTS (SELECT 1 FROM tenant_signing_keysets) AS exists")
+        .get_result::<ExistsRow>(&mut connection)
+        .await
+        .expect("keys-import should apply its pending schema before reading the source");
+    assert!(
+        !keyset.exists,
+        "schema preparation must not generate replacement signing keys"
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
 /// Happy path plus the journal guarantees that matter most at process level:
 /// response-loss recovery returns the identical durable result without
 /// touching the registry again, and a conflicting request under the same id is
