@@ -189,7 +189,6 @@ pub async fn run(
                 action,
             )
             .await?;
-            println!("mdoc signing keyset updated");
             Ok(())
         }
         Command::AdminProvision => run_admin_provision(persistence.as_ref()).await,
