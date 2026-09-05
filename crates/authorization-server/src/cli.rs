@@ -148,6 +148,10 @@ pub async fn run(
         Command::KeysImport { tenant_id, source } => {
             let migration_config = ConfigSource::load_for_migrations()?;
             let operator_persistence = persistence.operator_persistence(&migration_config).await?;
+            crate::operator_task::migrate_and_initialize_tenant_directory(
+                operator_persistence.as_ref(),
+            )
+            .await?;
             let config = ConfigSource::load()?;
             let directory = operator_persistence
                 .tenant_directory()
