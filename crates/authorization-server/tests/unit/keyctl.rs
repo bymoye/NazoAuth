@@ -943,6 +943,68 @@ async fn mdoc_import_fails_explicitly_when_iaca_material_is_missing() {
 }
 
 #[tokio::test]
+async fn pre_iaca_bundle_import_then_rotation_preserves_legacy_verification() {
+    let data_dir = temporary_directory("mdoc-pre-iaca-import");
+    let source = temporary_directory("mdoc-pre-iaca-import-source");
+    let repository = Arc::new(MemorySigningKeyRepository::default());
+    let tenant_id = Uuid::now_v7();
+    let (manager, legacy_kid, signing_key) =
+        database_manager_with_mdoc_key(repository, &data_dir, tenant_id).await;
+    let legacy_profile = Openid4vcCertificateProfile {
+        hostname: "tenant.example".to_owned(),
+        mdoc_profile: None,
+    };
+    let legacy = write_mdoc_import_fixture(&source, &signing_key, &legacy_profile, false)
+        .await
+        .expect("pre-IACA import fixture");
+    let legacy_ca =
+        pem_certificate(parse_certificates(&legacy.public.certificate_chain_pem)[1].as_ref());
+
+    import_mdoc_directory(&manager, &legacy_profile, &source)
+        .await
+        .expect("pre-IACA certificate import");
+    let imported = manager
+        .database_openid4vc_state()
+        .await
+        .expect("imported legacy state")
+        .material
+        .expect("legacy material");
+    assert_eq!(imported.public.signing_kid, legacy_kid);
+    assert!(imported.iaca_private_materials.is_empty());
+    assert!(imported.public.trust_anchors_pem.contains(&legacy_ca));
+
+    rotate_managed_material(&manager, &managed_profile("tenant.example"))
+        .await
+        .expect("first managed mdoc rotation");
+    let rotated = manager
+        .database_openid4vc_state()
+        .await
+        .expect("rotated managed state")
+        .material
+        .expect("managed material");
+    assert_complete_managed_material(&rotated);
+    assert_ne!(rotated.public.signing_kid, legacy_kid);
+    assert!(rotated.public.trust_anchors_pem.contains(&legacy_ca));
+    let legacy_record = manager
+        .database_list_keys()
+        .await
+        .expect("database keys")
+        .into_iter()
+        .find(|record| record.kid == legacy_kid)
+        .expect("legacy verification key");
+    assert_eq!(
+        legacy_record.status,
+        nazo_key_management::KeyRecordStatus::Grace
+    );
+    assert!(legacy_record.retire_at.is_some());
+    assert!(!data_dir.exists());
+
+    tokio::fs::remove_dir_all(source)
+        .await
+        .expect("pre-IACA fixture cleanup");
+}
+
+#[tokio::test]
 async fn rotation_retains_old_and_new_ca_crls_and_trust_anchors() {
     let data_dir = temporary_directory("mdoc-rotation");
     let repository = Arc::new(MemorySigningKeyRepository::default());

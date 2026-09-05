@@ -55,6 +55,33 @@ on the target host, not hidden in server startup.
    against the shared database. Verify credential issuance and old CRL URLs.
    Source files are not deleted by import; retain them with the migration backup.
 
+### Upgrade from a pre-IACA bundle
+
+NazoAuth v0.2.9 generated a local CA only while creating
+`certificate-bundle.pem`; it did not retain the CA private key or create an
+`iaca-keys/` directory. Its certificate also predates the managed mdoc
+certificate profile. Those bytes cannot be treated as a current IACA record or
+used to sign a CRL.
+
+For that released format, keep the old service stopped and use two explicit
+steps after `keys-import`:
+
+1. Make a migration-only copy of the final configuration whose
+   `OPENID4VCI_CREDENTIAL_CONFIGURATIONS_JSON` omits every `mso_mdoc`
+   configuration. Run `mdoc-import` with that copy. This preserves the existing
+   ES256 `kid`, certificate and public CA as historical verification material;
+   it does not invent the unavailable CA private key.
+2. Run `mdoc-rotate` with the final configuration, including the intended
+   `mso_mdoc` configuration. The single database commit creates a new conformant
+   DS/IACA generation and revocation state, retains the old CA trust anchor, and
+   keeps the old ES256 key through the configured verification grace period.
+
+Do not use this path for a source that already contains `iaca-keys/`, or when a
+locally owned revocation record must remain serviceable under its old IACA.
+Import those complete records with the ordinary procedure instead. Verify the
+old `kid` remains in JWKS, the new active `kid` issues credentials, and the new
+IACA CRL endpoint succeeds before starting the managed update.
+
 Import checks certificate/key relationships and keeps the existing signing kid.
 A legacy revoked entry without its own timestamp uses the old snapshot observation
 time once during import; subsequent CRL refreshes and rotation preserve it.

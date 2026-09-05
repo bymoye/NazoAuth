@@ -15,7 +15,9 @@ semantic versioning once public release tags are cut.
 
 - Replace managed OpenID4VC certificate and revocation files with explicit
   one-shot `keys-import` and `mdoc-import` migration commands for existing
-  deployments. Ordinary startup does not infer or copy legacy material.
+  deployments. Pre-IACA bundles retain their old key and trust anchor through
+  import, then use an explicit mdoc rotation to create current IACA material.
+  Ordinary startup does not infer or copy legacy material.
 
 ### Fixed
 
