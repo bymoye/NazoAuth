@@ -460,7 +460,11 @@ async fn database_operator_keyctl_roundtrip_keeps_keys_in_the_repository() {
         .await
         .expect("database local key generation");
     assert!(!first_kid.is_empty());
-    assert!(!first_revision.is_empty());
+    assert!(
+        first_revision
+            .parse::<i64>()
+            .is_ok_and(|revision| revision > 0)
+    );
     assert!(certificate_chain.is_none());
     assert!(!data_dir.exists());
 
