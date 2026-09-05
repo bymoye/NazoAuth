@@ -3,6 +3,26 @@
 Project changes are recorded in Keep a Changelog style. Versioned releases use
 semantic versioning once public release tags are cut.
 
+## 0.2.12 - 2026-09-05
+
+### Added
+
+- Persist managed OpenID4VC certificate, IACA and revocation material in the
+  tenant's encrypted signing-key aggregate, and persist the audit-anchor
+  checkpoint in PostgreSQL so every instance observes the same authority.
+
+### Changed
+
+- Replace managed OpenID4VC certificate and revocation files with explicit
+  one-shot `keys-import` and `mdoc-import` migration commands for existing
+  deployments. Ordinary startup does not infer or copy legacy material.
+
+### Fixed
+
+- Apply pending database migrations and initialize the tenant directory before
+  `keys-import` reads legacy keys. This allows an offline upgrade from a
+  file-backed deployment whose database predates the signing-key table.
+
 ## 0.2.11 - 2026-09-04
 
 ### Added
