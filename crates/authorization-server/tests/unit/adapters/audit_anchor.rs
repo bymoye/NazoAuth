@@ -65,6 +65,8 @@ fn delivery() -> SecurityAuditOutboxDelivery {
 #[derive(Default)]
 struct ScriptedRepository {
     health: Mutex<VecDeque<Result<SecurityAuditAnchorHealth, RepositoryError>>>,
+    observations: Mutex<VecDeque<Result<(), RepositoryError>>>,
+    genesis_records: Mutex<VecDeque<Result<(), RepositoryError>>>,
     claims: Mutex<VecDeque<Result<Vec<SecurityAuditOutboxDelivery>, RepositoryError>>>,
     acknowledgements: Mutex<VecDeque<Result<(), RepositoryError>>>,
     reschedules: Mutex<Vec<(Uuid, i32, String)>>,
@@ -92,6 +94,22 @@ impl ScriptedRepository {
                 .expect("scripted repository mutex is not poisoned");
             acknowledgements.push_back(acknowledgement);
         }
+        self
+    }
+
+    fn with_observation(self, observation: Result<(), RepositoryError>) -> Self {
+        self.observations
+            .lock()
+            .expect("scripted repository mutex is not poisoned")
+            .push_back(observation);
+        self
+    }
+
+    fn with_genesis_record(self, record: Result<(), RepositoryError>) -> Self {
+        self.genesis_records
+            .lock()
+            .expect("scripted repository mutex is not poisoned")
+            .push_back(record);
         self
     }
 
@@ -135,7 +153,13 @@ impl AuditAnchorRepository for ScriptedRepository {
     }
 
     fn observe_anchor<'a>(&'a self, _deployment_id: &'a str) -> RepositoryFuture<'a, ()> {
-        Box::pin(async { Ok(()) })
+        Box::pin(async move {
+            self.observations
+                .lock()
+                .expect("scripted repository mutex is not poisoned")
+                .pop_front()
+                .unwrap_or(Ok(()))
+        })
     }
 
     fn record_genesis<'a>(
@@ -143,7 +167,13 @@ impl AuditAnchorRepository for ScriptedRepository {
         _deployment_id: &'a str,
         _head_hash: &'a [u8],
     ) -> RepositoryFuture<'a, ()> {
-        Box::pin(async { Ok(()) })
+        Box::pin(async move {
+            self.genesis_records
+                .lock()
+                .expect("scripted repository mutex is not poisoned")
+                .pop_front()
+                .unwrap_or(Ok(()))
+        })
     }
 
     fn claim_due(
@@ -280,6 +310,37 @@ async fn worker_iteration_retries_failed_genesis_without_claiming_deliveries() {
         "failed genesis must not claim durable deliveries"
     );
     server.await.expect("failed genesis endpoint completes");
+}
+
+#[tokio::test]
+async fn worker_iteration_retries_database_observation_and_genesis_failures() {
+    let config =
+        iteration_config(Url::parse("https://unused-anchor.example.test/checkpoint").unwrap());
+    let observation_failure =
+        ScriptedRepository::with_health(Ok(health_snapshot()), Ok(Vec::new()))
+            .with_observation(Err(repository_error("observation failed")));
+    assert_eq!(
+        run_iteration(&observation_failure, &test_client(), &config, &mut None,).await,
+        IterationOutcome::Retry(Duration::from_secs(1))
+    );
+
+    let (endpoint, server) = local_anchor_endpoint(202).await;
+    let config = iteration_config(endpoint);
+    let genesis_failure = ScriptedRepository::with_health(Ok(genesis_snapshot()), Ok(Vec::new()))
+        .with_genesis_record(Err(repository_error("genesis record failed")));
+    let mut last_anchored = None;
+    assert_eq!(
+        run_iteration(
+            &genesis_failure,
+            &test_client(),
+            &config,
+            &mut last_anchored,
+        )
+        .await,
+        IterationOutcome::Retry(Duration::from_secs(1))
+    );
+    assert!(last_anchored.is_none());
+    server.await.expect("genesis endpoint completes");
 }
 
 #[tokio::test]
@@ -800,6 +861,14 @@ fn preflight_accepts_shared_health_and_rejects_stale_or_unanchored_state() {
     let mut pending = current.clone();
     pending.pending_count = 1;
     assert!(validate_health(&config, &pending, now).is_err());
+
+    let mut missing_occurrence = current.clone();
+    missing_occurrence.last_exported_occurred_at = None;
+    assert!(validate_health(&config, &missing_occurrence, now).is_err());
+
+    let mut missing_delivery = current.clone();
+    missing_delivery.last_exported_at = None;
+    assert!(validate_health(&config, &missing_delivery, now).is_err());
 
     let mut behind = current;
     behind.last_exported_sequence = Some(6);
