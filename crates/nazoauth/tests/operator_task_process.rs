@@ -42,12 +42,13 @@ struct ExistsRow {
 }
 
 /// Mirror of the persistence-layer isolated-schema fixture: the public
-/// security-audit migration is pre-marked applied because its state table is
+/// security-audit migrations are pre-marked applied because their state table is
 /// shared across schemas and must never be recreated per test.
 async fn isolated_registry(
     case: &str,
 ) -> Option<(String, nazo_postgres::ControllerRegistryRepository)> {
-    const PUBLIC_SECURITY_AUDIT_MIGRATION_VERSION: &str = "20260805000100";
+    const PUBLIC_SECURITY_AUDIT_MIGRATION_VERSIONS: [&str; 2] =
+        ["20260805000100", "20260905000100"];
 
     let base = std::env::var("NAZO_TEST_DATABASE_URL")
         .or_else(|_| std::env::var("DATABASE_URL"))
@@ -93,15 +94,17 @@ async fn isolated_registry(
             .batch_execute(CREATE_MIGRATIONS_TABLE)
             .await
             .expect("isolated migration ledger should create");
-        sql_query(
-            "INSERT INTO __diesel_schema_migrations (version)
-             VALUES ($1)
-             ON CONFLICT (version) DO NOTHING",
-        )
-        .bind::<Text, _>(PUBLIC_SECURITY_AUDIT_MIGRATION_VERSION)
-        .execute(&mut connection)
-        .await
-        .expect("public-only migration should be excluded from this fixture");
+        for version in PUBLIC_SECURITY_AUDIT_MIGRATION_VERSIONS {
+            sql_query(
+                "INSERT INTO __diesel_schema_migrations (version)
+                 VALUES ($1)
+                 ON CONFLICT (version) DO NOTHING",
+            )
+            .bind::<Text, _>(version)
+            .execute(&mut connection)
+            .await
+            .expect("public-only migration should be excluded from this fixture");
+        }
     }
     nazo_postgres::run_pending_migrations(&url)
         .await
@@ -126,7 +129,7 @@ fn write_runtime_fixtures(root: &Path) {
     fs::write(
         root.join("server.yaml"),
         format!(
-            "DATA_DIR: runtime\nDEPLOYMENT_ID: {DEPLOYMENT}\nSIGNING_KEY_ENCRYPTION_KEY_ID: {SIGNING_KEY_ENCRYPTION_KEY_ID}\nSIGNING_KEY_ENCRYPTION_KEY: {SIGNING_KEY_ENCRYPTION_KEY}\n"
+            "DATA_DIR: runtime\nDEPLOYMENT_ID: {DEPLOYMENT}\nPUBLIC_BASE_URL: http://localhost\nISSUER: http://localhost\nSIGNING_KEY_ENCRYPTION_KEY_ID: {SIGNING_KEY_ENCRYPTION_KEY_ID}\nSIGNING_KEY_ENCRYPTION_KEY: {SIGNING_KEY_ENCRYPTION_KEY}\n"
         ),
     )
     .unwrap();
