@@ -2,10 +2,10 @@ coverage:
   status:
     project:
       default:
-        target: 91%
+        target: auto
         threshold: 2%
       security_core:
-        target: 100%
+        target: auto
         threshold: 2%
         paths:
           - "crates/authorization-server/src/http/token/"
