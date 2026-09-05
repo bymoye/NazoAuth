@@ -182,7 +182,8 @@ pub async fn run(
                 .ok_or_else(|| {
                     anyhow::anyhow!("mdoc management requires an active tenant binding")
                 })?;
-            crate::keyctl::operator_manage_mdoc(
+            #[allow(unused_variables)]
+            let revision = crate::keyctl::operator_manage_mdoc(
                 &config,
                 binding,
                 operator_persistence.as_ref(),
