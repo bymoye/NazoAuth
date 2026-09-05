@@ -123,7 +123,7 @@ class ReleaseAttestationBuilderTests(unittest.TestCase):
             value["operator_protocol"],
             {
                 "version": 3,
-                "minimum_ctl_version": "0.2.24",
+                "minimum_ctl_version": "0.2.26",
                 "maximum_ctl_version_exclusive": "0.3.0",
             },
         )

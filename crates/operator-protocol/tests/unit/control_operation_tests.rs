@@ -889,9 +889,37 @@ fn tenant_key_generation_is_tenant_bound_and_returns_public_material_only() {
     result.result = Some(ControlResultData::TenantKeyGenerated {
         tenant_id: "00000000-0000-0000-0000-000000000001".to_owned(),
         kid: "tenant-key".to_owned(),
-        keyset_revision: "a".repeat(64),
+        keyset_revision: "2".to_owned(),
         certificate_chain_pem:
             "-----BEGIN CERTIFICATE-----\npublic-only\n-----END CERTIFICATE-----\n".to_owned(),
     });
     validate_control_result(&result).unwrap();
+
+    for invalid_revision in ["0", "02", "-1", "a"] {
+        let mut invalid = result.clone();
+        let Some(ControlResultData::TenantKeyGenerated {
+            keyset_revision, ..
+        }) = invalid.result.as_mut()
+        else {
+            unreachable!("tenant key result")
+        };
+        *keyset_revision = invalid_revision.to_owned();
+        assert!(matches!(
+            validate_control_result(&invalid),
+            Err(ProtocolError::Policy("invalid keyset revision"))
+        ));
+    }
+
+    let mut invalid_operation = operation;
+    invalid_operation.operation = ControlOperationPayload::TenantKeysGenerateLocal {
+        tenant_id: "00000000-0000-0000-0000-000000000001".to_owned(),
+        alg: "ES256".to_owned(),
+        purposes: vec!["credential".to_owned()],
+    };
+    assert!(matches!(
+        validate_control_operation(&invalid_operation),
+        Err(ProtocolError::Policy(
+            "tenant key generation requires the OpenID4VC signing profile"
+        ))
+    ));
 }

@@ -562,6 +562,8 @@ pub enum ControlResultData {
     TenantKeyGenerated {
         tenant_id: String,
         kid: String,
+        /// Canonical positive decimal revision of the tenant keyset
+        /// repository generation.
         keyset_revision: String,
         certificate_chain_pem: String,
     },
@@ -824,6 +826,17 @@ fn validate_control_payload(payload: &ControlOperationPayload) -> Result<(), Pro
         } => {
             validate_uuid(tenant_id)?;
             validate_generate_local_fields(alg, purposes)?;
+            if alg != "ES256"
+                || purposes.len() != 2
+                || !purposes.iter().any(|purpose| purpose == "credential")
+                || !purposes
+                    .iter()
+                    .any(|purpose| purpose == "presentation_request")
+            {
+                return Err(ProtocolError::Policy(
+                    "tenant key generation requires the OpenID4VC signing profile",
+                ));
+            }
         }
         ControlOperationPayload::KeysRegisterExternal {
             kid,
@@ -1057,6 +1070,16 @@ fn validate_lower_hex_digest(value: &str) -> Result<(), ProtocolError> {
             .all(|character| character.is_ascii_digit() || ('a'..='f').contains(&character))
     {
         return Err(ProtocolError::Policy("invalid digest"));
+    }
+    Ok(())
+}
+
+fn validate_keyset_revision(value: &str) -> Result<(), ProtocolError> {
+    let revision = value
+        .parse::<i64>()
+        .map_err(|_| ProtocolError::Policy("invalid keyset revision"))?;
+    if revision < 1 || revision.to_string() != value {
+        return Err(ProtocolError::Policy("invalid keyset revision"));
     }
     Ok(())
 }
@@ -1368,7 +1391,7 @@ fn validate_control_result_data(data: &ControlResultData) -> Result<(), Protocol
         } => {
             validate_uuid(tenant_id)?;
             validate_file_identifier(kid)?;
-            validate_lower_hex(keyset_revision, 64)?;
+            validate_keyset_revision(keyset_revision)?;
             if certificate_chain_pem.is_empty()
                 || certificate_chain_pem.len() > 32 * 1024
                 || !certificate_chain_pem.starts_with("-----BEGIN CERTIFICATE-----\n")

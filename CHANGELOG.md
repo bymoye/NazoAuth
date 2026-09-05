@@ -3,6 +3,15 @@
 Project changes are recorded in Keep a Changelog style. Versioned releases use
 semantic versioning once public release tags are cut.
 
+## 0.2.13 - 2026-09-05
+
+### Fixed
+
+- Align tenant key-generation results with the database keyset's canonical
+  positive decimal revision. Tenant-scoped generation also rejects requests
+  outside the OpenID4VC signing profile before any key material is created.
+  This result contract requires NazoAuthCtl 0.2.26 or newer.
+
 ## 0.2.12 - 2026-09-05
 
 ### Added
