@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use chrono::{Duration, Utc};
 use diesel::{QueryableByName, sql_query, sql_types::Uuid as SqlUuid};
 use diesel_async::{AsyncConnection, AsyncPgConnection, RunQueryDsl};
@@ -95,7 +97,25 @@ async fn audit_ledger_append_is_chained_and_outboxed() {
         .await
         .expect("audit ledger migration should apply");
     let pool = create_pool(database_url.clone(), 4).expect("audit pool should create");
-    let repository = AuditLedgerRepository::new(pool);
+    let repository = Arc::new(AuditLedgerRepository::new(pool));
+    let initial_health = repository
+        .anchor_health()
+        .await
+        .expect("initial shared anchor health should be readable");
+    let genesis = nazo_persistence::SecurityAuditExporter::record_genesis(
+        &repository,
+        "test-deployment",
+        &initial_health.head_hash,
+    )
+    .await;
+    if initial_health.head_sequence == 0 {
+        genesis.expect("an empty ledger should accept its genesis checkpoint");
+    } else {
+        assert!(matches!(genesis, Err(RepositoryError::Consistency(_))));
+    }
+    nazo_persistence::SecurityAuditExporter::observe_anchor(&repository, "test-deployment")
+        .await
+        .expect("the exporter should observe the complete shared anchor");
     loop {
         let existing = repository
             .claim_due(256, 60)
@@ -162,10 +182,14 @@ async fn audit_ledger_append_is_chained_and_outboxed() {
         .expect("first event should have an outbox row");
     assert_eq!(first_delivery.event_id, first_id);
     for delivery in claimed {
-        repository
-            .mark_exported(delivery.event_id, delivery.attempts, "test-deployment")
-            .await
-            .expect("every claimed audit event should be marked as exported");
+        nazo_persistence::SecurityAuditExporter::mark_exported(
+            &repository,
+            delivery.event_id,
+            delivery.attempts,
+            "test-deployment",
+        )
+        .await
+        .expect("every claimed audit event should be marked as exported");
     }
 
     let health = repository

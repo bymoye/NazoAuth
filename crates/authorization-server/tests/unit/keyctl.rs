@@ -156,6 +156,38 @@ fn database_config(data_dir: &Path) -> ConfigSource {
     ])
 }
 
+fn mdoc_database_config(data_dir: &Path) -> ConfigSource {
+    ConfigSource::from_owned_pairs_for_test([
+        ("DATA_DIR".to_owned(), data_dir.display().to_string()),
+        (
+            "SIGNING_KEY_ENCRYPTION_KEY".to_owned(),
+            URL_SAFE_NO_PAD.encode([0x42_u8; 32]),
+        ),
+        (
+            "SIGNING_KEY_ENCRYPTION_KEY_ID".to_owned(),
+            "keyctl-test-root".to_owned(),
+        ),
+        (
+            "CLIENT_SECRET_PEPPER".to_owned(),
+            "0123456789abcdef0123456789abcdef".to_owned(),
+        ),
+        ("TRANSPORT_MODE".to_owned(), "trusted-proxy".to_owned()),
+        ("MTLS_CERTIFICATE_SOURCE".to_owned(), "rfc9440".to_owned()),
+        (
+            "TRUSTED_PROXY_CIDRS".to_owned(),
+            "127.0.0.1/32".to_owned(),
+        ),
+        (
+            "OPENID4VCI_CREDENTIAL_CONFIGURATIONS_JSON".to_owned(),
+            r#"{"mdl":{"format":"mso_mdoc","scope":"mdl","cryptographic_binding_methods_supported":["jwk"],"credential_signing_alg_values_supported":["ES256"],"proof_types_supported":{"jwt":{"proof_signing_alg_values_supported":["ES256"]}},"doctype":"org.iso.18013.5.1.mDL"}}"#.to_owned(),
+        ),
+        (
+            "OPENID4VC_MDOC_ISSUING_COUNTRY".to_owned(),
+            "US".to_owned(),
+        ),
+    ])
+}
+
 fn database_key_settings(data_dir: &Path) -> KeySettings {
     KeySettings {
         keys_dir: data_dir.join("keys"),
@@ -989,4 +1021,181 @@ async fn rotation_retains_old_and_new_ca_crls_and_trust_anchors() {
         assert_eq!(parsed_crl.iter_revoked_certificates().count(), 0);
     }
     assert!(!data_dir.exists());
+}
+
+#[tokio::test]
+async fn operator_mdoc_management_imports_rotates_and_revokes_persisted_material() {
+    let data_dir = temporary_directory("operator-mdoc-management");
+    let source = temporary_directory("operator-mdoc-import");
+    let config = mdoc_database_config(&data_dir);
+    let binding = tenant_binding("https://tenant.example");
+    let repository = Arc::new(MemorySigningKeyRepository::default());
+    let persistence = MemoryOperatorPersistence {
+        repository: repository.clone(),
+    };
+    let (manager, _, active_key) = database_manager_with_mdoc_key(
+        repository.clone(),
+        &data_dir,
+        binding.tenant.tenant_id.as_uuid(),
+    )
+    .await;
+    write_mdoc_import_fixture(
+        &source,
+        &active_key,
+        &managed_profile("tenant.example"),
+        true,
+    )
+    .await
+    .expect("mDoc import fixture");
+    tokio::fs::write(source.join("iaca-keys").join("README.txt"), b"ignored")
+        .await
+        .expect("non-PEM import fixture");
+
+    let imported_revision = operator_manage_mdoc(
+        &config,
+        &binding,
+        &persistence,
+        MdocManagementAction::Import(source.clone()),
+    )
+    .await
+    .expect("operator mDoc import");
+    let imported = manager
+        .database_openid4vc_state()
+        .await
+        .expect("imported mDoc state");
+    assert_eq!(imported_revision, imported.revision.to_string());
+
+    let rotated_revision = operator_manage_mdoc(
+        &config,
+        &binding,
+        &persistence,
+        MdocManagementAction::Rotate,
+    )
+    .await
+    .expect("operator mDoc rotation");
+    manager.refresh().await.expect("refresh rotated mDoc state");
+    let rotated = manager
+        .database_openid4vc_state()
+        .await
+        .expect("rotated mDoc state");
+    assert_eq!(rotated_revision, rotated.revision.to_string());
+    assert!(rotated.revision > imported.revision);
+    let material = rotated.material.expect("rotated mDoc material");
+    let active_certificate = parse_certificates(&material.public.certificate_chain_pem)
+        .into_iter()
+        .next()
+        .expect("active DS certificate");
+    let active_issuer_id = material
+        .iaca_private_materials
+        .iter()
+        .find_map(|(issuer_id, pem)| {
+            (parse_certificates(pem).first() == Some(&active_certificate))
+                .then(|| issuer_id.clone())
+        })
+        .expect("active IACA fingerprint");
+
+    let revoked_revision = operator_manage_mdoc(
+        &config,
+        &binding,
+        &persistence,
+        MdocManagementAction::Revoke {
+            issuer_id: active_issuer_id.clone(),
+        },
+    )
+    .await
+    .expect("operator mDoc revocation");
+    let revoked = manager
+        .database_openid4vc_state()
+        .await
+        .expect("revoked mDoc state");
+    assert_eq!(revoked_revision, revoked.revision.to_string());
+    let entry = revoked
+        .material
+        .as_ref()
+        .and_then(|material| material.public.revocation_snapshot.as_ref())
+        .and_then(|snapshot| {
+            snapshot.entries.iter().find(|entry| {
+                entry.status == nazo_digital_credentials::CertificateRevocationStatus::Revoked
+            })
+        })
+        .expect("revoked DS entry");
+    assert!(entry.revoked_at.is_some());
+
+    let unchanged_revision = operator_manage_mdoc(
+        &config,
+        &binding,
+        &persistence,
+        MdocManagementAction::Revoke {
+            issuer_id: active_issuer_id,
+        },
+    )
+    .await
+    .expect("repeated mDoc revocation");
+    assert_eq!(unchanged_revision, revoked_revision);
+    assert!(
+        operator_manage_mdoc(
+            &config,
+            &binding,
+            &persistence,
+            MdocManagementAction::Revoke {
+                issuer_id: "unknown-iaca".to_owned(),
+            },
+        )
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("unknown IACA fingerprint")
+    );
+
+    tokio::fs::remove_dir_all(source)
+        .await
+        .expect("mDoc import fixture cleanup");
+}
+
+#[tokio::test]
+async fn certificate_import_without_mdoc_keeps_an_empty_revocation_snapshot() {
+    let data_dir = temporary_directory("certificate-import");
+    let source = temporary_directory("certificate-import-source");
+    let repository = Arc::new(MemorySigningKeyRepository::default());
+    let tenant_id = Uuid::now_v7();
+    let (manager, _, active_key) =
+        database_manager_with_mdoc_key(repository, &data_dir, tenant_id).await;
+    let profile = Openid4vcCertificateProfile {
+        hostname: "tenant.example".to_owned(),
+        mdoc_profile: None,
+    };
+    let material =
+        build_managed_material(&active_key, &profile, None).expect("certificate import material");
+    tokio::fs::create_dir_all(&source)
+        .await
+        .expect("certificate import directory");
+    tokio::fs::write(
+        source.join("certificate-bundle.pem"),
+        &material.public.certificate_chain_pem,
+    )
+    .await
+    .expect("certificate import bundle");
+
+    import_mdoc_directory(&manager, &profile, &source)
+        .await
+        .expect("certificate import without mDoc state");
+    let imported = manager
+        .database_openid4vc_state()
+        .await
+        .expect("imported certificate state")
+        .material
+        .expect("imported certificate material");
+    assert!(imported.iaca_private_materials.is_empty());
+    assert!(
+        imported
+            .public
+            .revocation_snapshot
+            .expect("empty revocation snapshot")
+            .entries
+            .is_empty()
+    );
+
+    tokio::fs::remove_dir_all(source)
+        .await
+        .expect("certificate import fixture cleanup");
 }

@@ -107,6 +107,56 @@ fn manager_with_policy(state: KeyState, purposes: &[SigningPurpose]) -> KeyManag
     manager
 }
 
+fn public_openid4vc_material(signing_kid: impl Into<String>) -> Openid4vcPublicMaterial {
+    Openid4vcPublicMaterial {
+        signing_kid: signing_kid.into(),
+        certificate_chain_pem: String::new(),
+        trust_anchors_pem: String::new(),
+        revocation_snapshot: None,
+    }
+}
+
+#[test]
+fn openid4vc_material_conversion_and_parsers_enforce_the_persisted_shape() {
+    let public = public_openid4vc_material("managed-key");
+    let material = Openid4vcMaterial::from(public.clone());
+    assert_eq!(material.public, public);
+    assert!(material.iaca_private_materials.is_empty());
+
+    assert!(super::parse_openid4vc_certificate_chain("", "chain").is_err());
+    let private_pem = pem::encode(&pem::Pem::new("PRIVATE KEY", vec![1, 2, 3]));
+    assert!(super::parse_openid4vc_certificate_chain(&private_pem, "chain").is_err());
+    let malformed_certificate = pem::encode(&pem::Pem::new("CERTIFICATE", vec![1, 2, 3]));
+    assert!(super::parse_openid4vc_certificate_chain(&malformed_certificate, "chain").is_err());
+
+    assert!(super::p256_public_key_from_jwk(&serde_json::Value::Null, "key").is_err());
+    assert!(
+        super::p256_public_key_from_jwk(
+            &serde_json::json!({"kty":"RSA","crv":"P-256","alg":"ES256","use":"sig"}),
+            "key"
+        )
+        .is_err()
+    );
+    let base = serde_json::json!({"kty":"EC","crv":"P-256","alg":"ES256","use":"sig"});
+    assert!(super::p256_public_key_from_jwk(&base, "key").is_err());
+    let invalid_x = serde_json::json!({
+        "kty":"EC","crv":"P-256","alg":"ES256","use":"sig","x":"***","y":"***"
+    });
+    assert!(super::p256_public_key_from_jwk(&invalid_x, "key").is_err());
+    let short_coordinates = serde_json::json!({
+        "kty":"EC","crv":"P-256","alg":"ES256","use":"sig",
+        "x":URL_SAFE_NO_PAD.encode([0_u8; 31]),
+        "y":URL_SAFE_NO_PAD.encode([0_u8; 32])
+    });
+    assert!(super::p256_public_key_from_jwk(&short_coordinates, "key").is_err());
+    let invalid_point = serde_json::json!({
+        "kty":"EC","crv":"P-256","alg":"ES256","use":"sig",
+        "x":URL_SAFE_NO_PAD.encode([0_u8; 32]),
+        "y":URL_SAFE_NO_PAD.encode([0_u8; 32])
+    });
+    assert!(super::p256_public_key_from_jwk(&invalid_point, "key").is_err());
+}
+
 #[test]
 fn id_token_key_rejects_http_message_signing() {
     let key = managed_key(KeyState::Active, &[SigningPurpose::IdToken]);
@@ -328,6 +378,69 @@ async fn openid4vc_lease_pins_material_and_restricts_signing_purposes() {
         .await
         .expect_err("the lease must not sign unrelated purposes");
     assert_eq!(error, nazo_auth::SignError::KeyUnavailable);
+
+    let error = lease
+        .sign(SignRequest {
+            purpose: SigningPurpose::Credential,
+            algorithm: "EdDSA",
+            signing_input: b"wrong algorithm",
+        })
+        .await
+        .expect_err("the lease must require ES256");
+    assert_eq!(error, nazo_auth::SignError::UnsupportedAlgorithm);
+
+    for (purpose, mut header) in [
+        (
+            SigningPurpose::IdToken,
+            jsonwebtoken::Header::new(jsonwebtoken::Algorithm::ES256),
+        ),
+        (
+            SigningPurpose::Credential,
+            jsonwebtoken::Header::new(jsonwebtoken::Algorithm::EdDSA),
+        ),
+        (
+            SigningPurpose::Credential,
+            jsonwebtoken::Header::new(jsonwebtoken::Algorithm::ES256),
+        ),
+    ] {
+        if purpose == SigningPurpose::Credential && header.alg == jsonwebtoken::Algorithm::ES256 {
+            header.kid = Some("wrong-kid".to_owned());
+        }
+        assert!(
+            lease
+                .encode_jwt(purpose, &header, &serde_json::json!({"sub":"invalid"}))
+                .await
+                .is_err()
+        );
+    }
+}
+
+#[test]
+fn openid4vc_lease_requires_healthy_complete_matching_material() {
+    let missing = KeyManager::for_test(jsonwebtoken::Algorithm::ES256);
+    assert!(missing.prepare_openid4vc_signing().is_err());
+
+    let incomplete = KeyManager::for_test(jsonwebtoken::Algorithm::ES256);
+    let kid = incomplete.snapshot().active_kid.clone();
+    let mut loaded = incomplete.inner.generation.load().loaded.clone();
+    loaded.verification_keys[0].managed.purposes =
+        [SigningPurpose::Credential].into_iter().collect();
+    loaded.openid4vc_material = Some(public_openid4vc_material(&kid).into());
+    incomplete
+        .inner
+        .generation
+        .store(Arc::new(KeyGeneration::new(loaded)));
+    assert!(incomplete.prepare_openid4vc_signing().is_err());
+
+    let mismatched = KeyManager::for_test(jsonwebtoken::Algorithm::ES256);
+    mismatched.set_openid4vc_material_for_test(public_openid4vc_material("wrong-kid"));
+    assert!(mismatched.prepare_openid4vc_signing().is_err());
+
+    let unhealthy = KeyManager::for_test(jsonwebtoken::Algorithm::ES256);
+    let kid = unhealthy.snapshot().active_kid.clone();
+    unhealthy.set_openid4vc_material_for_test(public_openid4vc_material(kid));
+    unhealthy.inner.health.mark_failure();
+    assert!(unhealthy.prepare_openid4vc_signing().is_err());
 }
 
 #[test]
@@ -363,6 +476,7 @@ async fn expired_database_generation_fails_closed_while_lifecycle_flag_is_still_
     );
     assert_eq!(manager.health().status, super::KeyHealthStatus::Unhealthy);
     assert!(manager.prepare_http_signing().is_err());
+    assert!(manager.prepare_openid4vc_signing().is_err());
     assert!(
         manager
             .encode_jwt(

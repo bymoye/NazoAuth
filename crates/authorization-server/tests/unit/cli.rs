@@ -341,6 +341,7 @@ fn mdoc_management_is_explicit_and_tenant_scoped() {
         }
     );
     for args in [
+        vec!["nazoauth", "mdoc-rotate", "--tenant"],
         vec!["nazoauth", "mdoc-import", "--from", "old-mdoc"],
         vec!["nazoauth", "mdoc-import", "--tenant", &tenant_arg],
         vec![

@@ -15,8 +15,8 @@ use mdoc_rs::{
     session::SessionTranscript,
 };
 use nazo_digital_credentials::{
-    CredentialFormat, CredentialSignInput, CredentialSignerPort, CredentialTrustError,
-    HolderBinding, PresentedCredential, VcIssuerTrustPolicy,
+    CertificateRevocationSnapshot, CredentialFormat, CredentialSignInput, CredentialSignerPort,
+    CredentialTrustError, HolderBinding, PresentedCredential, VcIssuerTrustPolicy,
 };
 use nazo_key_management::{
     KeyManager, KeySettings, LocalKeyRegistration, Openid4vcMaterial, Openid4vcPublicMaterial,
@@ -817,6 +817,42 @@ fn sd_jwt_chain_and_combined_anchor_validation_fail_closed() {
         crypto.combined_trust_anchors(&[certs.leaf_der]),
         Err(CredentialTrustError::UntrustedIssuer)
     ));
+}
+
+#[test]
+fn current_revocation_policy_preserves_optional_and_required_snapshots() {
+    let snapshot = CertificateRevocationSnapshot {
+        version: CertificateRevocationSnapshot::VERSION,
+        this_update: Utc::now() - Duration::minutes(1),
+        next_update: Utc::now() + Duration::minutes(1),
+        entries: Vec::new(),
+    };
+    for (mode, required) in [
+        (crate::settings::Openid4vcRevocationPolicy::Optional, false),
+        (crate::settings::Openid4vcRevocationPolicy::Required, true),
+    ] {
+        let certs = certificate_fixture("issuer.example");
+        let keyset = KeyManager::for_test(Algorithm::ES256);
+        let signing_kid = keyset.snapshot().active_kid.clone();
+        keyset.set_openid4vc_material_for_test(Openid4vcMaterial {
+            public: Openid4vcPublicMaterial {
+                signing_kid,
+                certificate_chain_pem: format!("{}{}", certs.leaf_pem, certs.ca_pem),
+                trust_anchors_pem: certs.ca_pem,
+                revocation_snapshot: Some(snapshot.clone()),
+            },
+            iaca_private_materials: Default::default(),
+        });
+        let crypto = Openid4vcCredentialCrypto::new_with_policies(
+            keyset,
+            VcIssuerTrustPolicy::san_bound(),
+            mode,
+        )
+        .expect("revocation policy fixture");
+        let policy = crypto.current_revocation_policy();
+        assert_eq!(policy.is_required(), required);
+        assert_eq!(policy.snapshot().as_deref(), Some(&snapshot));
+    }
 }
 
 #[tokio::test]
