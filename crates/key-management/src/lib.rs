@@ -25,6 +25,7 @@ pub use model::TestSigningBehavior;
 pub use model::{
     ExternalKeyRegistration, HttpSigningLease, KeyHealth, KeyHealthStatus, KeyManager, KeyRecord,
     KeyRecordStatus, KeySettings, KeySnapshot, KeyState, LocalKeyRegistration, ManagedKey,
+    Openid4vcMaterial, Openid4vcPublicMaterial, Openid4vcSigningLease, Openid4vcState,
     VerificationKey,
 };
 pub use mtls_trust::{MtlsTrustAnchorError, ValidatedMtlsTrustAnchor, validate_mtls_trust_anchor};

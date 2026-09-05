@@ -157,6 +157,8 @@ pub trait SecurityAuditLedger: Send + Sync {
 
     fn anchor_freshness(&self) -> BoxFuture<'_, Result<SecurityAuditFreshness, RepositoryError>>;
 
+    fn anchor_health(&self) -> BoxFuture<'_, Result<SecurityAuditAnchorHealth, RepositoryError>>;
+
     fn append(
         &self,
         event: SecurityAuditEvent,
@@ -173,6 +175,8 @@ pub struct SecurityAuditAnchorHealth {
     pub last_exported_hash: Option<Vec<u8>>,
     pub last_exported_occurred_at: Option<chrono::DateTime<chrono::Utc>>,
     pub last_exported_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub deployment_id: Option<String>,
+    pub observed_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 #[derive(Clone, Debug)]
@@ -195,17 +199,29 @@ pub trait SecurityAuditExporter: Send + Sync {
 
     fn anchor_health(&self) -> BoxFuture<'_, Result<SecurityAuditAnchorHealth, RepositoryError>>;
 
+    fn observe_anchor<'a>(
+        &'a self,
+        deployment_id: &'a str,
+    ) -> BoxFuture<'a, Result<(), RepositoryError>>;
+
+    fn record_genesis<'a>(
+        &'a self,
+        deployment_id: &'a str,
+        head_hash: &'a [u8],
+    ) -> BoxFuture<'a, Result<(), RepositoryError>>;
+
     fn claim_due(
         &self,
         limit: i64,
         lock_timeout_seconds: i32,
     ) -> BoxFuture<'_, Result<Vec<SecurityAuditOutboxDelivery>, RepositoryError>>;
 
-    fn mark_exported(
-        &self,
+    fn mark_exported<'a>(
+        &'a self,
         event_id: uuid::Uuid,
         expected_attempts: i32,
-    ) -> BoxFuture<'_, Result<(), RepositoryError>>;
+        deployment_id: &'a str,
+    ) -> BoxFuture<'a, Result<(), RepositoryError>>;
 
     fn reschedule<'a>(
         &'a self,
@@ -228,6 +244,21 @@ where
         (**self).anchor_health()
     }
 
+    fn observe_anchor<'a>(
+        &'a self,
+        deployment_id: &'a str,
+    ) -> BoxFuture<'a, Result<(), RepositoryError>> {
+        (**self).observe_anchor(deployment_id)
+    }
+
+    fn record_genesis<'a>(
+        &'a self,
+        deployment_id: &'a str,
+        head_hash: &'a [u8],
+    ) -> BoxFuture<'a, Result<(), RepositoryError>> {
+        (**self).record_genesis(deployment_id, head_hash)
+    }
+
     fn claim_due(
         &self,
         limit: i64,
@@ -236,12 +267,13 @@ where
         (**self).claim_due(limit, lock_timeout_seconds)
     }
 
-    fn mark_exported(
-        &self,
+    fn mark_exported<'a>(
+        &'a self,
         event_id: uuid::Uuid,
         expected_attempts: i32,
-    ) -> BoxFuture<'_, Result<(), RepositoryError>> {
-        (**self).mark_exported(event_id, expected_attempts)
+        deployment_id: &'a str,
+    ) -> BoxFuture<'a, Result<(), RepositoryError>> {
+        (**self).mark_exported(event_id, expected_attempts, deployment_id)
     }
 
     fn reschedule<'a>(

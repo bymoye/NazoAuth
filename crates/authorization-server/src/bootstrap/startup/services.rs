@@ -56,10 +56,6 @@ pub(super) struct ServiceAssembly {
 }
 
 impl ServiceAssembly {
-    pub(super) fn openid4vc_revocation_policy(&self) -> Option<&CertificateRevocationPolicy> {
-        self.core.openid4vc_revocation_policy.as_ref()
-    }
-
     pub(super) fn app_data_container(&self) -> Rc<Extensions> {
         fn insert<T: 'static>(extensions: &mut Extensions, value: T) {
             let _ = extensions.insert(value);
@@ -74,7 +70,9 @@ impl ServiceAssembly {
             &mut extensions,
             web::Data::new(startup.settings.tenant.context),
         );
-        if let Some(source) = crate::keyctl::MdocCrlSource::from_settings(&startup.settings) {
+        if let Some(source) =
+            crate::keyctl::MdocCrlSource::from_settings(&startup.settings, startup.keyset.clone())
+        {
             insert(&mut extensions, web::Data::new(source));
         }
         insert(

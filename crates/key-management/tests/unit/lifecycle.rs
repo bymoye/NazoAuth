@@ -17,6 +17,22 @@ fn refresh_interval_is_bounded_by_prepublish_window() {
 }
 
 #[test]
+fn managed_openid4vc_refresh_is_capped_at_thirty_seconds() {
+    assert_eq!(
+        managed_refresh_interval(chrono::Duration::days(1), true),
+        Duration::from_secs(30)
+    );
+    assert_eq!(
+        managed_refresh_interval(chrono::Duration::seconds(20), true),
+        Duration::from_secs(10)
+    );
+    assert_eq!(
+        managed_refresh_interval(chrono::Duration::days(1), false),
+        Duration::from_secs(3_600)
+    );
+}
+
+#[test]
 fn refresh_failure_backoff_is_bounded() {
     assert_eq!(
         next_failure_backoff(Duration::from_secs(1)),

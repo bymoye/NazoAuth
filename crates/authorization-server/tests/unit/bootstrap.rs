@@ -1,8 +1,6 @@
 use super::*;
 use actix_web::http::header;
 use actix_web::{App, HttpRequest, HttpResponse, HttpServer, test as actix_test, web};
-use chrono::{Duration as ChronoDuration, Utc};
-use nazo_digital_credentials::CertificateRevocationSnapshot;
 
 #[path = "bootstrap/transport_mode_parity.rs"]
 mod transport_mode_parity;
@@ -1081,118 +1079,6 @@ async fn direct_tls_serves_real_https_and_mtls_without_trusting_forged_headers()
     std::fs::remove_dir_all(root).unwrap();
 }
 
-fn write_fresh_revocation_snapshot(root: &std::path::Path) -> std::path::PathBuf {
-    let path = root.join("revocations.json");
-    let now = Utc::now();
-    let snapshot = CertificateRevocationSnapshot {
-        version: CertificateRevocationSnapshot::VERSION,
-        this_update: now - ChronoDuration::minutes(1),
-        next_update: now + ChronoDuration::minutes(10),
-        entries: Vec::new(),
-    };
-    std::fs::write(&path, serde_json::to_vec(&snapshot).unwrap()).unwrap();
-    path
-}
-
-fn revocation_settings(
-    policy: Openid4vcRevocationPolicy,
-    snapshot_file: Option<std::path::PathBuf>,
-) -> crate::settings::Openid4vcSettings {
-    let mut settings = Settings::from_config(&ConfigSource::default()).unwrap();
-    settings.openid4vc.revocation_policy = policy;
-    settings.openid4vc.revocation_snapshot_file = snapshot_file;
-    settings.openid4vc.revocation_reload_interval_seconds = 3_600;
-    settings.openid4vc
-}
-
-#[actix_web::test]
-async fn revocation_bootstrap_loads_disabled_optional_and_required_policies() {
-    let disabled = load_revocation_policy(&revocation_settings(
-        Openid4vcRevocationPolicy::Disabled,
-        None,
-    ))
-    .await
-    .unwrap();
-    assert!(!disabled.is_enabled());
-    assert!(disabled.snapshot().is_none());
-
-    let root = std::env::temp_dir().join(format!("nazoauth-revocation-{}", uuid::Uuid::now_v7()));
-    std::fs::create_dir(&root).unwrap();
-    let path = write_fresh_revocation_snapshot(&root);
-
-    let optional = load_revocation_policy(&revocation_settings(
-        Openid4vcRevocationPolicy::Optional,
-        Some(path.clone()),
-    ))
-    .await
-    .unwrap();
-    assert!(optional.is_enabled());
-    assert!(!optional.is_required());
-    assert!(optional.snapshot().is_some());
-
-    let required = load_revocation_policy(&revocation_settings(
-        Openid4vcRevocationPolicy::Required,
-        Some(path),
-    ))
-    .await
-    .unwrap();
-    assert!(required.is_enabled());
-    assert!(required.is_required());
-    assert!(required.snapshot().is_some());
-
-    std::fs::remove_dir_all(root).unwrap();
-}
-
-#[actix_web::test]
-async fn revocation_bootstrap_reports_snapshot_io_and_freshness_failures() {
-    let missing = std::env::temp_dir().join(format!(
-        "nazoauth-missing-revocation-{}.json",
-        uuid::Uuid::now_v7()
-    ));
-    let error = match load_revocation_policy(&revocation_settings(
-        Openid4vcRevocationPolicy::Required,
-        Some(missing),
-    ))
-    .await
-    {
-        Ok(_) => panic!("missing revocation snapshot must fail bootstrap"),
-        Err(error) => error,
-    };
-    assert!(
-        error
-            .to_string()
-            .contains("failed to load OpenID4VC revocation snapshot")
-    );
-
-    let root = std::env::temp_dir().join(format!(
-        "nazoauth-invalid-revocation-{}",
-        uuid::Uuid::now_v7()
-    ));
-    std::fs::create_dir(&root).unwrap();
-    let malformed = root.join("malformed.json");
-    std::fs::write(&malformed, b"not-json").unwrap();
-    let malformed_error = read_revocation_snapshot(&malformed)
-        .await
-        .expect_err("malformed revocation snapshot must be rejected");
-    assert!(malformed_error.to_string().contains("invalid entry"));
-
-    let expired = root.join("expired.json");
-    let now = Utc::now();
-    let snapshot = CertificateRevocationSnapshot {
-        version: CertificateRevocationSnapshot::VERSION,
-        this_update: now - ChronoDuration::minutes(10),
-        next_update: now - ChronoDuration::minutes(1),
-        entries: Vec::new(),
-    };
-    std::fs::write(&expired, serde_json::to_vec(&snapshot).unwrap()).unwrap();
-    let expired_error = read_revocation_snapshot(&expired)
-        .await
-        .expect_err("expired revocation snapshot must be rejected");
-    assert!(expired_error.to_string().contains("expired"));
-
-    std::fs::remove_dir_all(root).unwrap();
-}
-
 #[actix_web::test]
 async fn check_session_iframe_is_frameable_by_relying_parties() {
     let app = actix_test::init_service(App::new().wrap(from_fn(security_headers)).route(
@@ -1274,14 +1160,6 @@ async fn openid4vci_dataset_route_is_nested_inside_the_admin_scope() {
         (
             "OPENID4VC_DATA_ENCRYPTION_KEY",
             "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
-        ),
-        (
-            "OPENID4VC_SIGNING_CERTIFICATE_CHAIN_FILE",
-            "runtime/openid4vc-chain.pem",
-        ),
-        (
-            "OPENID4VC_TRUST_ANCHORS_FILE",
-            "runtime/openid4vc-roots.pem",
         ),
         (
             "OPENID4VCI_CREDENTIAL_CONFIGURATIONS_JSON",

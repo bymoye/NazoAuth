@@ -1,10 +1,8 @@
-use std::sync::Arc;
-
 #[cfg(test)]
 use coset::CborSerializable;
 use nazo_digital_credentials::{
-    CertificateRevocationPolicy, CredentialFormat, CredentialFuture, CredentialTrustError,
-    CredentialVerifierPort, PresentedCredential, VcIssuerTrustPolicy, VerifiedCredential,
+    CredentialFormat, CredentialFuture, CredentialTrustError, CredentialVerifierPort,
+    PresentedCredential, VcIssuerTrustPolicy, VerifiedCredential,
 };
 use nazo_key_management::KeyManager;
 
@@ -27,11 +25,8 @@ use mdoc::{AsyncCoseSigner, mdoc_assessments_accepted, verify_certificate_chain_
 #[derive(Clone)]
 pub(crate) struct Openid4vcCredentialCrypto {
     keyset: KeyManager,
-    x5c: Arc<Vec<String>>,
-    leaf_der: Arc<Vec<u8>>,
-    trust_anchors: Arc<Vec<Vec<u8>>>,
     issuer_trust_policy: VcIssuerTrustPolicy,
-    revocation_policy: CertificateRevocationPolicy,
+    revocation_policy: crate::settings::Openid4vcRevocationPolicy,
 }
 
 impl CredentialVerifierPort for Openid4vcCredentialCrypto {

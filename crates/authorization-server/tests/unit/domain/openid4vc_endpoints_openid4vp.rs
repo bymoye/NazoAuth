@@ -5,10 +5,10 @@ use std::{path::Path, sync::Arc};
 use diesel::sql_query;
 use diesel_async::RunQueryDsl;
 use nazo_auth::SigningPurpose;
-use nazo_digital_credentials::{
-    CertificateRevocationPolicy, CredentialFormat, DcqlQuery, VcIssuerTrustPolicy,
+use nazo_digital_credentials::{CredentialFormat, DcqlQuery, VcIssuerTrustPolicy};
+use nazo_key_management::{
+    KeyManager, KeySettings, LocalKeyRegistration, Openid4vcMaterial, Openid4vcPublicMaterial,
 };
-use nazo_key_management::{KeyManager, KeySettings, LocalKeyRegistration};
 use nazo_openid4vc_http_actix::{
     CreatePresentationRequest, PresentationOperations, PresentationResponseBody,
     PresentationResponseInput,
@@ -29,14 +29,17 @@ fn invalid_pool() -> nazo_postgres::DbPool {
 }
 
 async fn fixture_crypto(root: &Path) -> Openid4vcCredentialCrypto {
-    fixture_crypto_with_dns(root, true).await
+    fixture_crypto_with_dns(root, true).await.0
 }
 
 async fn fixture_crypto_without_dns(root: &Path) -> Openid4vcCredentialCrypto {
-    fixture_crypto_with_dns(root, false).await
+    fixture_crypto_with_dns(root, false).await.0
 }
 
-async fn fixture_crypto_with_dns(root: &Path, include_dns: bool) -> Openid4vcCredentialCrypto {
+async fn fixture_crypto_with_dns(
+    root: &Path,
+    include_dns: bool,
+) -> (Openid4vcCredentialCrypto, KeyManager) {
     tokio::fs::create_dir_all(root)
         .await
         .expect("fixture key directory should be created");
@@ -100,15 +103,51 @@ async fn fixture_crypto_with_dns(root: &Path, include_dns: bool) -> Openid4vcCre
     let key_manager = KeyManager::load_or_create(settings)
         .await
         .expect("fixture key manager should load");
-    let chain = format!("{}{}", leaf.pem(), ca.pem());
-    Openid4vcCredentialCrypto::new_with_policies(
-        key_manager,
-        chain.as_bytes(),
-        ca.pem().as_bytes(),
+    key_manager.set_openid4vc_material_for_test(Openid4vcMaterial {
+        public: Openid4vcPublicMaterial {
+            signing_kid,
+            certificate_chain_pem: format!("{}{}", leaf.pem(), ca.pem()),
+            trust_anchors_pem: ca.pem(),
+            revocation_snapshot: None,
+        },
+        iaca_private_materials: Default::default(),
+    });
+    let crypto = Openid4vcCredentialCrypto::new_with_policies(
+        key_manager.clone(),
         VcIssuerTrustPolicy::san_bound(),
-        CertificateRevocationPolicy::disabled(),
+        crate::settings::Openid4vcRevocationPolicy::Disabled,
     )
-    .expect("fixture OpenID4VC crypto should load")
+    .expect("fixture OpenID4VC crypto should load");
+    (crypto, key_manager)
+}
+
+fn rotated_material(current: &Openid4vcPublicMaterial) -> Openid4vcMaterial {
+    let ca_key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).expect("rotated CA key");
+    let mut ca_params = CertificateParams::default();
+    ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    ca_params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+    ca_params.not_before = time::OffsetDateTime::now_utc() - time::Duration::minutes(1);
+    ca_params.not_after = time::OffsetDateTime::now_utc() + time::Duration::hours(1);
+    let ca = CertifiedIssuer::self_signed(ca_params, ca_key).expect("rotated CA certificate");
+    let leaf_key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).expect("rotated leaf key");
+    let mut leaf_params =
+        CertificateParams::new(vec!["issuer.example".to_owned()]).expect("rotated leaf params");
+    leaf_params.is_ca = IsCa::NoCa;
+    leaf_params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
+    leaf_params.not_before = time::OffsetDateTime::now_utc() - time::Duration::minutes(1);
+    leaf_params.not_after = time::OffsetDateTime::now_utc() + time::Duration::hours(1);
+    let leaf = leaf_params
+        .signed_by(&leaf_key, &ca)
+        .expect("rotated leaf certificate");
+    Openid4vcMaterial {
+        public: Openid4vcPublicMaterial {
+            signing_kid: current.signing_kid.clone(),
+            certificate_chain_pem: format!("{}{}", leaf.pem(), ca.pem()),
+            trust_anchors_pem: ca.pem(),
+            revocation_snapshot: current.revocation_snapshot.clone(),
+        },
+        iaca_private_materials: Default::default(),
+    }
 }
 
 async fn operations(
@@ -385,7 +424,8 @@ async fn create_and_request_cover_standard_modes_and_tenant_bound_trust() {
     };
     let root = std::env::temp_dir().join(format!("nazo-openid4vp-live-{}", Uuid::now_v7()));
     let pool = nazo_postgres::create_pool(database_url, 2).expect("live pool should build");
-    let operations = operations(pool.clone(), &root, true).await;
+    let (crypto, keyset) = fixture_crypto_with_dns(&root, true).await;
+    let operations = operations_with_crypto(pool.clone(), crypto, true).await;
 
     let url_query_input = create_input(
         Some("url_query"),
@@ -471,6 +511,31 @@ async fn create_and_request_cover_standard_modes_and_tenant_bound_trust() {
             .expect("wallet nonce should bind the signed request"),
         PresentationResponseBody::RequestObject(value) if value.split('.').count() == 3
     ));
+
+    let rotated_signed_post = operations
+        .create(create_input(
+            None,
+            Some("direct_post.jwt"),
+            Some("x509_hash"),
+            true,
+        ))
+        .await
+        .expect("rotated signed POST presentation should be stored");
+    let current = keyset
+        .openid4vc_public_material()
+        .expect("managed test material");
+    keyset.set_openid4vc_material_for_test(rotated_material(&current));
+    let rotation_error = operations
+        .request(
+            rotated_signed_post.transaction_id,
+            Some("rotated-wallet-nonce"),
+        )
+        .await
+        .expect_err("certificate rotation must not emit an x509_hash-mismatched JWT");
+    assert_eq!(
+        (rotation_error.status, rotation_error.error),
+        (400, "invalid_request_uri")
+    );
 
     for request in [
         create_input(None, None, Some("unknown"), false),

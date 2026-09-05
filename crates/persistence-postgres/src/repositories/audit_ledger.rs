@@ -87,7 +87,7 @@ impl AuditLedgerRepository {
         let mut connection = self.connection().await?;
         let privileges = sql_query(
             "SELECT policy_satisfied \
-             FROM public.nazo_security_audit_privilege_preflight($1, $2, $3)",
+             FROM public.nazo_security_audit_shared_privilege_preflight($1, $2, $3)",
         )
         .bind::<diesel::sql_types::Bool, _>(require_least_privilege)
         .bind::<diesel::sql_types::Bool, _>(require_append)
@@ -125,15 +125,45 @@ impl AuditLedgerRepository {
         sql_query(
             "SELECT last_sequence AS head_sequence, last_hash AS head_hash, \
                     pending_count, oldest_pending_occurred_at, \
-                    last_exported_sequence, last_exported_hash, \
-                    last_exported_occurred_at, last_exported_at \
-             FROM public.nazo_security_audit_anchor_health() \
+                    anchor_sequence AS last_exported_sequence, \
+                    anchor_hash AS last_exported_hash, \
+                    anchor_occurred_at AS last_exported_occurred_at, \
+                    anchor_accepted_at AS last_exported_at, \
+                    anchor_deployment_id AS deployment_id, \
+                    anchor_observed_at AS observed_at \
+             FROM public.nazo_security_audit_shared_anchor_health() \
              WHERE chain_valid",
         )
         .get_result::<SecurityAuditAnchorHealthRow>(&mut connection)
         .await
         .map(Into::into)
         .map_err(map_error)
+    }
+
+    pub async fn observe_anchor(&self, deployment_id: &str) -> Result<(), RepositoryError> {
+        let mut connection = self.connection().await?;
+        let result = sql_query("SELECT public.nazo_observe_security_audit_anchor($1) AS changed")
+            .bind::<diesel::sql_types::Text, _>(deployment_id)
+            .get_result::<AuditMutationRow>(&mut connection)
+            .await
+            .map_err(map_error)?;
+        require_current_outbox_claim(result.changed)
+    }
+
+    pub async fn record_genesis(
+        &self,
+        deployment_id: &str,
+        head_hash: &[u8],
+    ) -> Result<(), RepositoryError> {
+        let mut connection = self.connection().await?;
+        let result =
+            sql_query("SELECT public.nazo_record_security_audit_genesis($1, $2) AS changed")
+                .bind::<diesel::sql_types::Text, _>(deployment_id)
+                .bind::<diesel::sql_types::Binary, _>(head_hash)
+                .get_result::<AuditMutationRow>(&mut connection)
+                .await
+                .map_err(map_error)?;
+        require_current_outbox_claim(result.changed)
     }
 
     /// Append one event and its exporter outbox entry in one transaction.
@@ -191,14 +221,17 @@ impl AuditLedgerRepository {
         &self,
         event_id: Uuid,
         expected_attempts: i32,
+        deployment_id: &str,
     ) -> Result<(), RepositoryError> {
         let mut connection = self.connection().await?;
-        let result = sql_query("SELECT public.nazo_ack_security_audit_event($1, $2) AS changed")
-            .bind::<diesel::sql_types::Uuid, _>(event_id)
-            .bind::<diesel::sql_types::Integer, _>(expected_attempts)
-            .get_result::<AuditMutationRow>(&mut connection)
-            .await
-            .map_err(map_error)?;
+        let result =
+            sql_query("SELECT public.nazo_ack_security_audit_event($1, $2, $3) AS changed")
+                .bind::<diesel::sql_types::Uuid, _>(event_id)
+                .bind::<diesel::sql_types::Integer, _>(expected_attempts)
+                .bind::<diesel::sql_types::Text, _>(deployment_id)
+                .get_result::<AuditMutationRow>(&mut connection)
+                .await
+                .map_err(map_error)?;
         require_current_outbox_claim(result.changed)
     }
 
@@ -410,6 +443,10 @@ struct SecurityAuditAnchorHealthRow {
     last_exported_occurred_at: Option<DateTime<Utc>>,
     #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Timestamptz>)]
     last_exported_at: Option<DateTime<Utc>>,
+    #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Text>)]
+    deployment_id: Option<String>,
+    #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Timestamptz>)]
+    observed_at: Option<DateTime<Utc>>,
 }
 
 impl From<SecurityAuditAnchorHealthRow> for SecurityAuditAnchorHealth {
@@ -423,6 +460,8 @@ impl From<SecurityAuditAnchorHealthRow> for SecurityAuditAnchorHealth {
             last_exported_hash: row.last_exported_hash,
             last_exported_occurred_at: row.last_exported_occurred_at,
             last_exported_at: row.last_exported_at,
+            deployment_id: row.deployment_id,
+            observed_at: row.observed_at,
         }
     }
 }

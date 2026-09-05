@@ -47,12 +47,12 @@ observe a fresh chain head; it cannot claim or acknowledge exporter rows:
 
 ```sql
 GRANT EXECUTE ON FUNCTION
-    public.nazo_security_audit_privilege_preflight(boolean, boolean, boolean),
+    public.nazo_security_audit_shared_privilege_preflight(boolean, boolean, boolean),
     public.nazo_security_audit_chain_head_for_update(),
     public.nazo_append_security_audit_event(
         uuid, text, text, jsonb, timestamptz, bytea, bytea
     ),
-    public.nazo_security_audit_anchor_freshness()
+    public.nazo_security_audit_shared_anchor_health()
 TO nazoauth_audit_writer;
 ```
 
@@ -61,11 +61,13 @@ without receiving append or chain-head-lock access:
 
 ```sql
 GRANT EXECUTE ON FUNCTION
-    public.nazo_security_audit_privilege_preflight(boolean, boolean, boolean),
+    public.nazo_security_audit_shared_privilege_preflight(boolean, boolean, boolean),
     public.nazo_claim_security_audit_events(bigint, integer),
-    public.nazo_ack_security_audit_event(uuid, integer),
+    public.nazo_ack_security_audit_event(uuid, integer, text),
+    public.nazo_observe_security_audit_anchor(text),
+    public.nazo_record_security_audit_genesis(text, bytea),
     public.nazo_reschedule_security_audit_event(uuid, integer, timestamptz, text),
-    public.nazo_security_audit_anchor_health()
+    public.nazo_security_audit_shared_anchor_health()
 TO nazoauth_audit_exporter;
 ```
 
@@ -98,11 +100,11 @@ process:
 
 ```sql
 SELECT *
-FROM public.nazo_security_audit_privilege_preflight(true, true, false);
+FROM public.nazo_security_audit_shared_privilege_preflight(true, true, false);
 -- writer: policy_satisfied = true; claim_execute/ack_execute = false
 
 SELECT *
-FROM public.nazo_security_audit_privilege_preflight(true, false, true);
+FROM public.nazo_security_audit_shared_privilege_preflight(true, false, true);
 -- exporter: policy_satisfied = true; append_execute/head_execute = false
 ```
 

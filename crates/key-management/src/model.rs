@@ -1,5 +1,6 @@
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
+    fmt,
     path::PathBuf,
     sync::{
         Arc,
@@ -13,7 +14,8 @@ use arc_swap::ArcSwap;
 use base64::{Engine, encoded_len, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::Utc;
 use nazo_auth::{SignError, SignRequest, Signature, Signer, SigningPurpose};
-use serde::Serialize;
+use p256::elliptic_curve::sec1::ToSec1Point;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::watch;
 
@@ -131,6 +133,7 @@ pub(crate) struct LoadedKeyset {
     pub(crate) verification_keys: Vec<StoredVerificationKey>,
     pub(crate) request_object_decryption_key: Vec<u8>,
     pub(crate) request_object_encryption_jwk: Value,
+    pub(crate) openid4vc_material: Option<Openid4vcMaterial>,
 }
 
 #[derive(Clone, Debug)]
@@ -278,6 +281,56 @@ pub struct LocalKeyRegistration {
     pub purposes: BTreeSet<SigningPurpose>,
 }
 
+/// Public material used by the OpenID4VC issuer and verifier.
+///
+/// This type deliberately contains only values that may be exposed to request
+/// handlers. IACA private keys are held by [`Openid4vcMaterial`] and are never
+/// part of this projection.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct Openid4vcPublicMaterial {
+    pub signing_kid: String,
+    pub certificate_chain_pem: String,
+    pub trust_anchors_pem: String,
+    pub revocation_snapshot: Option<nazo_digital_credentials::CertificateRevocationSnapshot>,
+}
+
+/// Atomically managed OpenID4VC material for one tenant.
+///
+/// `iaca_private_materials` is encrypted with the rest of the database-backed
+/// keyset. Keep the custom formatter below: debug output is routinely emitted
+/// by test failures and operator tooling, and must not disclose private PEM.
+#[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
+pub struct Openid4vcMaterial {
+    pub public: Openid4vcPublicMaterial,
+    pub iaca_private_materials: BTreeMap<String, String>,
+}
+
+impl fmt::Debug for Openid4vcMaterial {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Openid4vcMaterial")
+            .field("public", &self.public)
+            .field("iaca_private_materials", &"<redacted>")
+            .finish()
+    }
+}
+
+impl From<Openid4vcPublicMaterial> for Openid4vcMaterial {
+    fn from(public: Openid4vcPublicMaterial) -> Self {
+        Self {
+            public,
+            iaca_private_materials: BTreeMap::new(),
+        }
+    }
+}
+
+/// The latest persisted OpenID4VC material and the enclosing keyset revision.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct Openid4vcState {
+    pub revision: i64,
+    pub material: Option<Openid4vcMaterial>,
+}
+
 pub(crate) struct KeyGeneration {
     pub(crate) loaded: LoadedKeyset,
     pub(crate) snapshot: Arc<KeySnapshot>,
@@ -331,6 +384,79 @@ impl HttpSigningLease {
         sign_selected(&selected, signing_input)
             .await
             .map_err(anyhow::Error::from)
+    }
+}
+
+/// A generation-pinned signer for the two OpenID4VC signing purposes.
+///
+/// The lease keeps its [`KeyGeneration`] alive, so certificate/public material
+/// and the private signing key cannot rotate independently while a request is
+/// using the lease.
+#[derive(Clone)]
+pub struct Openid4vcSigningLease {
+    generation: Arc<KeyGeneration>,
+    health: Arc<LifecycleHealth>,
+    kid: String,
+}
+
+impl Openid4vcSigningLease {
+    #[must_use]
+    pub fn kid(&self) -> &str {
+        &self.kid
+    }
+
+    #[must_use]
+    pub fn material(&self) -> &Openid4vcPublicMaterial {
+        &self
+            .generation
+            .loaded
+            .openid4vc_material
+            .as_ref()
+            .expect("OpenID4VC signing lease always has managed material")
+            .public
+    }
+
+    pub async fn encode_jwt<T: Serialize>(
+        &self,
+        purpose: SigningPurpose,
+        header: &jsonwebtoken::Header,
+        claims: &T,
+    ) -> jsonwebtoken::errors::Result<String> {
+        encode_jwt_for_generation(
+            &self.generation,
+            &self.health,
+            Some(&self.kid),
+            purpose,
+            header,
+            claims,
+        )
+        .await
+    }
+}
+
+impl Signer for Openid4vcSigningLease {
+    async fn sign<'a>(&'a self, request: SignRequest<'a>) -> Result<Signature, SignError> {
+        if self.generation.is_expired() || !self.health.snapshot().is_healthy() {
+            return Err(SignError::KeyUnavailable);
+        }
+        if !matches!(
+            request.purpose,
+            SigningPurpose::Credential | SigningPurpose::PresentationRequest
+        ) {
+            return Err(SignError::KeyUnavailable);
+        }
+        let algorithm = crate::store::signing_algorithm_from_name(request.algorithm)
+            .ok_or(SignError::UnsupportedAlgorithm)?;
+        if algorithm != jsonwebtoken::Algorithm::ES256 {
+            return Err(SignError::UnsupportedAlgorithm);
+        }
+        let selected = self
+            .generation
+            .loaded
+            .selected_key(request.purpose, algorithm)
+            .filter(|selected| selected.kid == self.kid)
+            .ok_or(SignError::KeyUnavailable)?;
+        sign_selected(&selected, request.signing_input).await
     }
 }
 
@@ -398,6 +524,110 @@ pub(crate) struct SelectedKey<'a> {
 pub(crate) enum SelectedHandle<'a> {
     Active(&'a ActiveSigningKey),
     Local(&'a [u8]),
+}
+
+/// Parse a PEM certificate sequence at the key-management boundary. The
+/// OpenID4VC bundle format is deliberately narrow: every block is a complete
+/// X.509 certificate and the first block is the leaf certificate.
+pub(crate) fn parse_openid4vc_certificate_chain(
+    pem_text: &str,
+    description: &str,
+) -> anyhow::Result<Vec<Vec<u8>>> {
+    let blocks = pem::parse_many(pem_text.as_bytes())
+        .map_err(|error| anyhow::anyhow!("failed to parse {description}: {error}"))?;
+    if blocks.is_empty() {
+        anyhow::bail!("OpenID4VC {description} must contain a certificate");
+    }
+    blocks
+        .into_iter()
+        .map(|block| {
+            if block.tag() != "CERTIFICATE" {
+                anyhow::bail!(
+                    "OpenID4VC {description} contains PEM block {}, expected CERTIFICATE",
+                    block.tag()
+                );
+            }
+            let der = block.contents().to_vec();
+            let (rest, _) = x509_parser::parse_x509_certificate(&der).map_err(|error| {
+                anyhow::anyhow!("failed to parse OpenID4VC {description} certificate: {error}")
+            })?;
+            if !rest.is_empty() {
+                anyhow::bail!(
+                    "OpenID4VC {description} contains trailing bytes after a certificate"
+                );
+            }
+            Ok(der)
+        })
+        .collect()
+}
+
+pub(crate) fn p256_public_key_from_jwk(jwk: &Value, description: &str) -> anyhow::Result<Vec<u8>> {
+    let object = jwk
+        .as_object()
+        .ok_or_else(|| anyhow::anyhow!("{description} public JWK must be an object"))?;
+    if object.get("kty").and_then(Value::as_str) != Some("EC")
+        || object.get("crv").and_then(Value::as_str) != Some("P-256")
+        || object.get("alg").and_then(Value::as_str) != Some("ES256")
+        || object.get("use").and_then(Value::as_str) != Some("sig")
+    {
+        anyhow::bail!("{description} public JWK must be an ES256 signing key");
+    }
+    let x = URL_SAFE_NO_PAD
+        .decode(
+            object
+                .get("x")
+                .and_then(Value::as_str)
+                .ok_or_else(|| anyhow::anyhow!("{description} public JWK is missing x"))?,
+        )
+        .map_err(|error| anyhow::anyhow!("{description} public JWK x is invalid: {error}"))?;
+    let y = URL_SAFE_NO_PAD
+        .decode(
+            object
+                .get("y")
+                .and_then(Value::as_str)
+                .ok_or_else(|| anyhow::anyhow!("{description} public JWK is missing y"))?,
+        )
+        .map_err(|error| anyhow::anyhow!("{description} public JWK y is invalid: {error}"))?;
+    if x.len() != 32 || y.len() != 32 {
+        anyhow::bail!("{description} public JWK coordinates must be 32 bytes");
+    }
+    let mut point = Vec::with_capacity(1 + x.len() + y.len());
+    point.push(4);
+    point.extend_from_slice(&x);
+    point.extend_from_slice(&y);
+    let public = p256::PublicKey::from_sec1_bytes(&point)
+        .map_err(|error| anyhow::anyhow!("{description} public JWK point is invalid: {error}"))?;
+    Ok(public.to_sec1_point(false).as_bytes().to_vec())
+}
+
+pub(crate) fn p256_public_key_from_certificate(
+    der: &[u8],
+    description: &str,
+) -> anyhow::Result<Vec<u8>> {
+    let (rest, certificate) = x509_parser::parse_x509_certificate(der)
+        .map_err(|error| anyhow::anyhow!("failed to parse {description}: {error}"))?;
+    if !rest.is_empty() {
+        anyhow::bail!("{description} contains trailing bytes after a certificate");
+    }
+    let point = certificate.public_key().subject_public_key.data.as_ref();
+    let public = p256::PublicKey::from_sec1_bytes(point)
+        .map_err(|error| anyhow::anyhow!("{description} is not an ES256 certificate: {error}"))?;
+    Ok(public.to_sec1_point(false).as_bytes().to_vec())
+}
+
+pub(crate) fn openid4vc_material_is_revoked(material: &Openid4vcMaterial) -> anyhow::Result<bool> {
+    let Some(snapshot) = material.public.revocation_snapshot.as_ref() else {
+        return Ok(false);
+    };
+    let certificates = parse_openid4vc_certificate_chain(
+        &material.public.certificate_chain_pem,
+        "certificate chain",
+    )?;
+    let identity = nazo_digital_credentials::certificate_identity(&certificates[0]);
+    Ok(snapshot.entries.iter().any(|entry| {
+        entry.certificate == identity
+            && entry.status == nazo_digital_credentials::CertificateRevocationStatus::Revoked
+    }))
 }
 
 impl KeyManager {
@@ -475,6 +705,120 @@ impl KeyManager {
         crate::database::local_private_key_pem(&self.inner.generation.load().loaded, kid)
     }
 
+    /// Read the latest OpenID4VC material from the tenant's database-backed
+    /// keyset. The persisted revocation timestamps are returned unchanged;
+    /// request handling uses the generation-pinned projection instead.
+    pub async fn database_openid4vc_state(&self) -> anyhow::Result<Openid4vcState> {
+        let database = self
+            .inner
+            .database
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("key manager is not repository-backed"))?;
+        crate::database::openid4vc_state(database, &self.inner.settings).await
+    }
+
+    /// Atomically commit OpenID4VC public and private material as one keyset
+    /// generation. A stale expected revision is a conflict and is never
+    /// retried with the caller's material.
+    pub async fn database_commit_openid4vc(
+        &self,
+        expected_revision: i64,
+        material: Openid4vcMaterial,
+        new_private_key_pem: Option<String>,
+    ) -> anyhow::Result<()> {
+        let database = self
+            .inner
+            .database
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("key manager is not repository-backed"))?;
+        let loaded = crate::database::commit_openid4vc(
+            &self.inner.settings,
+            database,
+            expected_revision,
+            material,
+            new_private_key_pem,
+        )
+        .await?;
+        self.inner
+            .generation
+            .store(Arc::new(KeyGeneration::database(loaded)));
+        Ok(())
+    }
+
+    /// Return the public OpenID4VC view from the currently published
+    /// generation. The returned `Arc` remains pinned to that generation after
+    /// a subsequent refresh or rotation.
+    #[must_use]
+    pub fn openid4vc_public_material(&self) -> Option<Arc<Openid4vcPublicMaterial>> {
+        self.inner
+            .generation
+            .load()
+            .loaded
+            .openid4vc_material
+            .as_ref()
+            .map(|material| Arc::new(material.public.clone()))
+    }
+
+    /// Install managed material on an in-memory fixture without involving a
+    /// repository. This exists only for consumers compiled with the
+    /// `test-support` feature; production generations are published by the
+    /// database CAS path above.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn set_openid4vc_material_for_test<M>(&self, material: M)
+    where
+        M: Into<Openid4vcMaterial>,
+    {
+        let mut loaded = self.inner.generation.load().loaded.clone();
+        loaded.openid4vc_material = Some(material.into());
+        self.inner
+            .generation
+            .store(Arc::new(KeyGeneration::new(loaded)));
+    }
+
+    /// Pin the currently published OpenID4VC signing key and its matching
+    /// certificate/public projection to one lease.
+    pub fn prepare_openid4vc_signing(&self) -> anyhow::Result<Openid4vcSigningLease> {
+        if !self.is_healthy() {
+            anyhow::bail!("signing key lifecycle is unhealthy");
+        }
+        let generation = self.inner.generation.load_full();
+        if generation.is_expired() {
+            anyhow::bail!("signing key lifecycle is unhealthy");
+        }
+        let material = generation
+            .loaded
+            .openid4vc_material
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("OpenID4VC signing material is unavailable"))?;
+        let credential = generation
+            .loaded
+            .selected_key(SigningPurpose::Credential, jsonwebtoken::Algorithm::ES256)
+            .ok_or_else(|| anyhow::anyhow!("OpenID4VC credential signing key unavailable"))?;
+        let presentation = generation
+            .loaded
+            .selected_key(
+                SigningPurpose::PresentationRequest,
+                jsonwebtoken::Algorithm::ES256,
+            )
+            .ok_or_else(|| {
+                anyhow::anyhow!("OpenID4VC presentation-request signing key unavailable")
+            })?;
+        if credential.kid != presentation.kid || credential.kid != material.public.signing_kid {
+            anyhow::bail!(
+                "OpenID4VC signing certificate does not match one credential and presentation-request ES256 key"
+            );
+        }
+        if openid4vc_material_is_revoked(material)? {
+            anyhow::bail!("OpenID4VC signing certificate is revoked");
+        }
+        let kid = credential.kid.to_owned();
+        Ok(Openid4vcSigningLease {
+            generation,
+            health: Arc::clone(&self.inner.health),
+            kid,
+        })
+    }
+
     #[cfg(any(test, feature = "test-support"))]
     #[must_use]
     pub fn for_test(algorithm: jsonwebtoken::Algorithm) -> Self {
@@ -529,6 +873,7 @@ impl KeyManager {
             request_object_decryption_key: test_request_object_decryption_key()
                 .expect("test request object decryption key"),
             request_object_encryption_jwk: Value::Null,
+            openid4vc_material: None,
         };
         let mut loaded = loaded;
         loaded.request_object_encryption_jwk =
@@ -726,46 +1071,16 @@ impl KeyManager {
         header: &jsonwebtoken::Header,
         claims: &T,
     ) -> jsonwebtoken::errors::Result<String> {
-        if !self.is_healthy() {
-            return Err(jsonwebtoken::errors::ErrorKind::InvalidKeyFormat.into());
-        }
         let generation = self.inner.generation.load_full();
-        let selected = generation
-            .loaded
-            .selected_key(purpose, header.alg)
-            .ok_or(jsonwebtoken::errors::ErrorKind::InvalidAlgorithm)?;
-        if header.kid.as_deref().is_some_and(|kid| kid != selected.kid) {
-            return Err(jsonwebtoken::errors::ErrorKind::InvalidAlgorithm.into());
-        }
-        let mut header = header.clone();
-        header.kid = Some(selected.kid.to_owned());
-        let header_json = serde_json::to_vec(&header)?;
-        let claims_json = serde_json::to_vec(claims)?;
-        let mut signing_input = String::with_capacity(
-            encoded_len(header_json.len(), false)
-                .expect("JWT header is too large to encode")
-                .saturating_add(1)
-                .saturating_add(
-                    encoded_len(claims_json.len(), false)
-                        .expect("JWT claims are too large to encode"),
-                ),
-        );
-        URL_SAFE_NO_PAD.encode_string(&header_json, &mut signing_input);
-        signing_input.push('.');
-        URL_SAFE_NO_PAD.encode_string(&claims_json, &mut signing_input);
-        drop(header_json);
-        drop(claims_json);
-        let signature = sign_selected(&selected, signing_input.as_bytes())
-            .await
-            .map_err(sign_error_to_jwt)?;
-        signing_input.reserve(
-            encoded_len(signature.as_bytes().len(), false)
-                .expect("JWT signature is too large to encode")
-                .saturating_add(1),
-        );
-        signing_input.push('.');
-        URL_SAFE_NO_PAD.encode_string(signature.as_bytes(), &mut signing_input);
-        Ok(signing_input)
+        encode_jwt_for_generation(
+            &generation,
+            &self.inner.health,
+            None,
+            purpose,
+            header,
+            claims,
+        )
+        .await
     }
 
     pub fn prepare_http_signing(&self) -> anyhow::Result<HttpSigningLease> {
@@ -815,6 +1130,67 @@ impl KeyManager {
             }
         }
     }
+}
+
+async fn encode_jwt_for_generation<T: Serialize>(
+    generation: &Arc<KeyGeneration>,
+    health: &LifecycleHealth,
+    expected_kid: Option<&str>,
+    purpose: SigningPurpose,
+    header: &jsonwebtoken::Header,
+    claims: &T,
+) -> jsonwebtoken::errors::Result<String> {
+    if generation.is_expired() || !health.snapshot().is_healthy() {
+        return Err(jsonwebtoken::errors::ErrorKind::InvalidKeyFormat.into());
+    }
+    if expected_kid.is_some()
+        && !matches!(
+            purpose,
+            SigningPurpose::Credential | SigningPurpose::PresentationRequest
+        )
+    {
+        return Err(jsonwebtoken::errors::ErrorKind::InvalidAlgorithm.into());
+    }
+    if expected_kid.is_some() && header.alg != jsonwebtoken::Algorithm::ES256 {
+        return Err(jsonwebtoken::errors::ErrorKind::InvalidAlgorithm.into());
+    }
+    let selected = generation
+        .loaded
+        .selected_key(purpose, header.alg)
+        .ok_or(jsonwebtoken::errors::ErrorKind::InvalidAlgorithm)?;
+    if expected_kid.is_some_and(|kid| kid != selected.kid)
+        || header.kid.as_deref().is_some_and(|kid| kid != selected.kid)
+    {
+        return Err(jsonwebtoken::errors::ErrorKind::InvalidAlgorithm.into());
+    }
+    let mut header = header.clone();
+    header.kid = Some(selected.kid.to_owned());
+    let header_json = serde_json::to_vec(&header)?;
+    let claims_json = serde_json::to_vec(claims)?;
+    let mut signing_input = String::with_capacity(
+        encoded_len(header_json.len(), false)
+            .expect("JWT header is too large to encode")
+            .saturating_add(1)
+            .saturating_add(
+                encoded_len(claims_json.len(), false).expect("JWT claims are too large to encode"),
+            ),
+    );
+    URL_SAFE_NO_PAD.encode_string(&header_json, &mut signing_input);
+    signing_input.push('.');
+    URL_SAFE_NO_PAD.encode_string(&claims_json, &mut signing_input);
+    drop(header_json);
+    drop(claims_json);
+    let signature = sign_selected(&selected, signing_input.as_bytes())
+        .await
+        .map_err(sign_error_to_jwt)?;
+    signing_input.reserve(
+        encoded_len(signature.as_bytes().len(), false)
+            .expect("JWT signature is too large to encode")
+            .saturating_add(1),
+    );
+    signing_input.push('.');
+    URL_SAFE_NO_PAD.encode_string(signature.as_bytes(), &mut signing_input);
+    Ok(signing_input)
 }
 
 #[cfg(all(any(test, feature = "test-support"), windows))]

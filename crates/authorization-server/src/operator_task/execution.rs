@@ -9,7 +9,7 @@
 //! | `migrate-apply`             | selected adapter migration runner       | the adapter's migration ledger deduplicates re-entry → `true` |
 //! | `keys-list`                 | `keyctl::operator_list`                  | read-only; no side effect to duplicate → `true` |
 //! | `keys-validate`             | `keyctl::operator_validate`              | read-only; no side effect to duplicate → `true` |
-//! | `keys-generate-local`       | `keyctl::operator_generate_local`        | private-key write may precede keyset publication; crash is ambiguous → `false` |
+//! | `keys-generate-local`       | `keyctl::operator_generate_local`        | complete tenant keyset is committed atomically; existing matching registration is reused → `true` |
 //! | `keys-register-external`    | `keyctl::operator_register_external`     | keyset store is documented idempotent for an identical kid/alg/key_ref/JWK registration and fails closed on drift → `true` |
 //! | `tenant-resource-*`         | shared tenant-resource CAS engine        | exact operation-id/request-hash outcome ledger → `true` |
 //!
@@ -67,7 +67,7 @@ pub(super) fn resume_allowed(operation: &ControlOperationPayload) -> bool {
     match operation {
         ControlOperationPayload::MigrateApply => true,
         ControlOperationPayload::KeysList | ControlOperationPayload::KeysValidate => true,
-        ControlOperationPayload::KeysGenerateLocal { .. } => false,
+        ControlOperationPayload::KeysGenerateLocal { .. } => true,
         ControlOperationPayload::TenantKeysGenerateLocal { .. } => true,
         ControlOperationPayload::KeysRegisterExternal { .. } => true,
         ControlOperationPayload::TenantResourceApply { .. }

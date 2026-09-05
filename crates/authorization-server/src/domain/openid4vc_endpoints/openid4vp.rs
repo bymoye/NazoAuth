@@ -5,6 +5,7 @@ use std::sync::Arc;
 use base64::Engine as _;
 use chrono::{Duration, Utc};
 use nazo_digital_credentials::EphemeralEncryptionKey;
+use nazo_key_management::Openid4vcSigningLease;
 use nazo_openid4vc_http_actix::{
     CreatePresentationRequest, CreatePresentationResponse, PresentationFuture,
     PresentationHttpError, PresentationOperations, PresentationResponseBody,
@@ -149,6 +150,7 @@ impl ServerPresentationOperations {
     async fn request_object(
         &self,
         request: &AuthorizationRequest,
+        lease: &Openid4vcSigningLease,
     ) -> Result<String, PresentationHttpError> {
         let now = Utc::now().timestamp();
         let mut claims = serde_json::to_value(request)
@@ -159,9 +161,38 @@ impl ServerPresentationOperations {
         claims["exp"] = json!(now + self.transaction_ttl_seconds as i64);
         claims["jti"] = json!(Uuid::now_v7());
         self.crypto
-            .sign_request_object(&claims)
+            .sign_request_object(lease, &claims)
             .await
             .map_err(|_| vp_error(503, "server_error", "Presentation request signing failed."))
+    }
+
+    fn request_with_signing_client_id(
+        &self,
+        request: &AuthorizationRequest,
+        prefix: ClientIdPrefix,
+        lease: &Openid4vcSigningLease,
+    ) -> Result<AuthorizationRequest, PresentationHttpError> {
+        let mut request = request.clone();
+        request.client_id = match prefix {
+            ClientIdPrefix::RedirectUri => return Ok(request),
+            ClientIdPrefix::X509Hash => self.crypto.x509_hash_client_id(lease).map_err(|_| {
+                vp_error(
+                    503,
+                    "server_error",
+                    "Verifier client identity is unavailable.",
+                )
+            })?,
+            ClientIdPrefix::X509SanDns => {
+                self.crypto.x509_san_dns_client_id(lease).map_err(|_| {
+                    vp_error(
+                        503,
+                        "server_error",
+                        "Verifier client identity is unavailable.",
+                    )
+                })?
+            }
+        };
+        Ok(request)
     }
 
     async fn active_trust_policy(
@@ -332,18 +363,37 @@ impl PresentationOperations for ServerPresentationOperations {
                     "Presentation security policy rejected this combination.",
                 )
             })?;
+            let signing_lease = self.crypto.prepare_signing().map_err(|_| {
+                vp_error(
+                    503,
+                    "server_error",
+                    "Presentation request signing is unavailable.",
+                )
+            })?;
             let fixed_client_id = match prefix {
                 ClientIdPrefix::RedirectUri => None,
-                ClientIdPrefix::X509Hash => Some(self.crypto.x509_hash_client_id()),
-                ClientIdPrefix::X509SanDns => {
-                    Some(self.crypto.x509_san_dns_client_id().map_err(|_| {
-                        vp_error(
-                            400,
-                            "invalid_request",
-                            "x509_san_dns is unavailable for the verifier certificate.",
-                        )
-                    })?)
-                }
+                ClientIdPrefix::X509Hash => Some(
+                    self.crypto
+                        .x509_hash_client_id(&signing_lease)
+                        .map_err(|_| {
+                            vp_error(
+                                503,
+                                "server_error",
+                                "Verifier client identity is unavailable.",
+                            )
+                        })?,
+                ),
+                ClientIdPrefix::X509SanDns => Some(
+                    self.crypto
+                        .x509_san_dns_client_id(&signing_lease)
+                        .map_err(|_| {
+                            vp_error(
+                                400,
+                                "invalid_request",
+                                "x509_san_dns is unavailable for the verifier certificate.",
+                            )
+                        })?,
+                ),
             };
             let normalized_request = nazo_operator_protocol::Openid4vpNormalizedCreateRequest {
                 wallet_authorization_endpoint: wallet_authorization_endpoint.clone(),
@@ -493,10 +543,13 @@ impl PresentationOperations for ServerPresentationOperations {
             })?;
             let request_uri = (!matches!(method, RequestMethod::UrlQuery))
                 .then(|| format!("{}/openid4vp/request/{id}", self.issuer));
-            let request_object = if matches!(method, RequestMethod::UrlQuery) {
+            let request_object = if matches!(
+                method,
+                RequestMethod::UrlQuery | RequestMethod::RequestUriSignedPost
+            ) {
                 None
             } else {
-                Some(self.request_object(&request).await?)
+                Some(self.request_object(&request, &signing_lease).await?)
             };
             let now = Utc::now();
             let transaction = PresentationTransaction {
@@ -598,8 +651,23 @@ impl PresentationOperations for ServerPresentationOperations {
                             "Presentation request URI is invalid.",
                         )
                     })?;
+                let lease = self.crypto.prepare_signing().map_err(|_| {
+                    vp_error(503, "server_error", "Presentation request signing failed.")
+                })?;
+                let request = self.request_with_signing_client_id(
+                    &transaction.request,
+                    transaction.client_id_prefix,
+                    &lease,
+                )?;
+                if request.client_id != transaction.request.client_id {
+                    return Err(vp_error(
+                        400,
+                        "invalid_request_uri",
+                        "Presentation request certificate rotated; start a new request.",
+                    ));
+                }
                 return self
-                    .request_object(&transaction.request)
+                    .request_object(&request, &lease)
                     .await
                     .map(PresentationResponseBody::RequestObject);
             }

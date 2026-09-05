@@ -1,10 +1,8 @@
-use super::*;
-use crate::config::DEFAULT_DATA_DIR;
-
 use super::tenant_runtime::{
     ProcessRuntime, TenantDirectoryRefreshOutcome, TenantRuntimeBuilder, TenantRuntimeRefresher,
     TenantRuntimeRegistry,
 };
+use super::*;
 
 /// Tenant-scoped values used to assemble one immutable request graph.
 pub(super) struct StartupConfiguration {
@@ -74,12 +72,8 @@ pub(super) async fn load(
     // fixed system tenant is the only authority for deployment-level control.
     let control_tenant_id = nazo_identity::TenantContext::default_system().tenant_id;
 
-    let audit_anchor_data_dir = config.persistent_path("DATA_DIR", Some(DEFAULT_DATA_DIR))?;
     let audit_anchor_preflight = crate::adapters::audit_anchor::AuditAnchorPreflight::new(
-        crate::adapters::audit_anchor::preflight_config_from_source(
-            &config,
-            &audit_anchor_data_dir,
-        )?,
+        crate::adapters::audit_anchor::preflight_config_from_source(&config)?,
     )?;
     let control_discovery = web::Data::new(
         crate::control_discovery::ControlDiscoveryEndpoint::initialize(

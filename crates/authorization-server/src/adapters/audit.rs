@@ -229,15 +229,11 @@ pub(crate) async fn ensure_audit_storage() -> anyhow::Result<()> {
         .map_err(|error| {
             anyhow::anyhow!("durable security audit repository unavailable: {error}")
         })?;
-    let head = required
-        .repository
-        .anchor_freshness()
-        .await
-        .map_err(|error| anyhow::anyhow!("durable security audit head unavailable: {error}"))?;
-    required
-        .preflight
-        .ensure_fresh(head.head_sequence, &head.head_hash)
-        .await
+    let health =
+        required.repository.anchor_health().await.map_err(|error| {
+            anyhow::anyhow!("durable security audit health unavailable: {error}")
+        })?;
+    required.preflight.ensure_fresh(&health)
 }
 
 /// Append a high-impact audit outcome synchronously. Unlike [`audit_event`],

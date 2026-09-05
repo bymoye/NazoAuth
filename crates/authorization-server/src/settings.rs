@@ -210,8 +210,6 @@ pub(crate) struct CibaSettings {
 
 #[derive(Clone)]
 pub(crate) struct Openid4vcSettings {
-    pub(crate) signing_certificate_chain_file: Option<PathBuf>,
-    pub(crate) trust_anchors_file: Option<PathBuf>,
     pub(crate) data_encryption_key: Option<[u8; 32]>,
     pub(crate) client_attestation_jwks: Option<serde_json::Value>,
     pub(crate) key_attestation_jwks: Option<serde_json::Value>,
@@ -224,8 +222,6 @@ pub(crate) struct Openid4vcSettings {
     pub(crate) verifier_management_token: Option<String>,
     pub(crate) transaction_ttl_seconds: u64,
     pub(crate) revocation_policy: Openid4vcRevocationPolicy,
-    pub(crate) revocation_snapshot_file: Option<PathBuf>,
-    pub(crate) revocation_reload_interval_seconds: u64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

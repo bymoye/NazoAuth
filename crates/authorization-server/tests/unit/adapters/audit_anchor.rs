@@ -5,10 +5,7 @@ use super::{
         AnchorCheckpointEnvelope, CHECKPOINT_SCHEMA_VERSION, checkpoint_body, encode_hash,
         genesis_body, sign_body,
     },
-    status::{
-        AnchorCheckpoint, AnchorHealth, HEALTH_SCHEMA_VERSION, age_seconds, duration_seconds,
-        read_health, read_health_optional, write_health,
-    },
+    status::{AnchorCheckpoint, age_seconds, duration_seconds},
     transport::{AnchorPushError, send_checkpoint, send_genesis_checkpoint},
     worker::{
         AuditAnchorRepository, IterationOutcome, delivery_lag_seconds, retry_delay, run_iteration,
@@ -19,25 +16,10 @@ use nazo_identity::ports::{RepositoryError, RepositoryFuture};
 use nazo_persistence::{SecurityAuditAnchorHealth, SecurityAuditOutboxDelivery};
 use nazo_postgres::AuditLedgerRepository;
 use serde_json::{Value, json};
-use std::{
-    collections::VecDeque,
-    path::{Path, PathBuf},
-    sync::Mutex,
-    time::{Duration, SystemTime, UNIX_EPOCH},
-};
+use std::{collections::VecDeque, sync::Mutex, time::Duration};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use url::Url;
 use uuid::Uuid;
-
-fn temp_status_path(label: &str) -> PathBuf {
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system clock is after unix epoch")
-        .as_nanos();
-    std::env::temp_dir()
-        .join(format!("nazo_audit_anchor_{label}_{nonce}"))
-        .join("health.json")
-}
 
 fn valid_worker_config(endpoint: Url) -> AuditAnchorWorkerConfig {
     AuditAnchorWorkerConfig {
@@ -61,6 +43,8 @@ fn health_snapshot() -> SecurityAuditAnchorHealth {
         last_exported_hash: Some(vec![2; 32]),
         last_exported_occurred_at: Some(Utc::now() - ChronoDuration::seconds(2)),
         last_exported_at: Some(Utc::now() - ChronoDuration::seconds(1)),
+        deployment_id: Some("deployment-1".to_owned()),
+        observed_at: Some(Utc::now()),
     }
 }
 
@@ -150,6 +134,18 @@ impl AuditAnchorRepository for ScriptedRepository {
         })
     }
 
+    fn observe_anchor<'a>(&'a self, _deployment_id: &'a str) -> RepositoryFuture<'a, ()> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn record_genesis<'a>(
+        &'a self,
+        _deployment_id: &'a str,
+        _head_hash: &'a [u8],
+    ) -> RepositoryFuture<'a, ()> {
+        Box::pin(async { Ok(()) })
+    }
+
     fn claim_due(
         &self,
         _limit: i64,
@@ -168,7 +164,12 @@ impl AuditAnchorRepository for ScriptedRepository {
         })
     }
 
-    fn mark_exported(&self, event_id: Uuid, expected_attempts: i32) -> RepositoryFuture<'_, ()> {
+    fn mark_exported<'a>(
+        &'a self,
+        event_id: Uuid,
+        expected_attempts: i32,
+        _deployment_id: &'a str,
+    ) -> RepositoryFuture<'a, ()> {
         Box::pin(async move {
             let result = self
                 .acknowledgements
@@ -210,7 +211,6 @@ impl AuditAnchorRepository for ScriptedRepository {
 
 fn iteration_config(endpoint: Url) -> AuditAnchorWorkerConfig {
     let mut config = valid_worker_config(endpoint);
-    config.preflight.status_file = temp_status_path("iteration");
     config.poll_interval = Duration::from_millis(1);
     config
 }
@@ -257,10 +257,6 @@ async fn worker_iteration_anchors_genesis_before_polling_empty_outbox() {
     );
     assert_eq!(body["checkpoint_kind"], "genesis");
     assert_eq!(body["sequence"], 0);
-    let health = read_health(&config.preflight.status_file)
-        .await
-        .expect("genesis health is published");
-    assert_eq!(health.last_anchored_sequence, Some(0));
 }
 
 #[tokio::test]
@@ -288,9 +284,8 @@ async fn worker_iteration_retries_failed_genesis_without_claiming_deliveries() {
 
 #[tokio::test]
 async fn worker_iteration_reuses_current_genesis_and_tolerates_health_publish_failure() {
-    let mut config =
+    let config =
         iteration_config(Url::parse("https://unused-anchor.example.test/checkpoint").unwrap());
-    config.preflight.status_file = PathBuf::new();
     let snapshot = genesis_snapshot();
     let expected = AnchorCheckpoint::genesis(encode_hash(&snapshot.head_hash));
     let repository = ScriptedRepository::with_health(Ok(snapshot), Ok(Vec::new()));
@@ -543,20 +538,10 @@ fn mode_parser_and_preflight_configuration_reject_invalid_values() {
     let invalid_identity = AuditAnchorPreflightConfig {
         mode: AuditAnchorMode::Required,
         deployment_id: "deployment/with-slash".to_owned(),
-        status_file: PathBuf::from("runtime/anchor-health.json"),
         freshness: Duration::from_secs(60),
         max_lag: Duration::from_secs(300),
     };
     assert!(invalid_identity.validate().is_err());
-
-    let empty_path = AuditAnchorPreflightConfig {
-        mode: AuditAnchorMode::Required,
-        deployment_id: "deployment-1".to_owned(),
-        status_file: PathBuf::new(),
-        freshness: Duration::from_secs(60),
-        max_lag: Duration::from_secs(300),
-    };
-    assert!(empty_path.validate().is_err());
 }
 
 #[test]
@@ -605,51 +590,33 @@ fn mode_helpers_and_deployment_id_boundaries_are_explicit() {
 #[test]
 fn preflight_source_uses_safe_defaults_and_requires_identity_when_enabled() {
     let disabled = crate::config::ConfigSource::default();
-    let disabled_config =
-        super::config::preflight_config_from_source(&disabled, Path::new("runtime-data"))
-            .expect("disabled mode has a safe default identity");
+    let disabled_config = super::config::preflight_config_from_source(&disabled)
+        .expect("disabled mode has a safe default identity");
     assert_eq!(disabled_config.mode, AuditAnchorMode::Disabled);
     assert_eq!(disabled_config.deployment_id, "audit-anchor-disabled");
-    assert_eq!(
-        disabled_config.status_file,
-        PathBuf::from("runtime-data/instance/audit-anchor-health.json")
-    );
 
     let source = crate::config::ConfigSource::from_pairs_for_test([
         ("AUDIT_ANCHOR_MODE", "optional"),
         ("DEPLOYMENT_ID", "deployment-test"),
-        ("AUDIT_ANCHOR_STATUS_FILE", "runtime/custom-health.json"),
         ("AUDIT_ANCHOR_FRESHNESS_SECONDS", "9"),
         ("AUDIT_ANCHOR_MAX_LAG_SECONDS", "11"),
     ]);
-    let config = super::config::preflight_config_from_source(&source, Path::new("ignored"))
+    let config = super::config::preflight_config_from_source(&source)
         .expect("explicit preflight values should parse");
     assert_eq!(config.mode, AuditAnchorMode::Optional);
     assert_eq!(config.deployment_id, "deployment-test");
-    assert_eq!(
-        config.status_file,
-        std::fs::canonicalize(".")
-            .unwrap()
-            .join("runtime/custom-health.json")
-    );
     assert_eq!(config.freshness, Duration::from_secs(9));
     assert_eq!(config.max_lag, Duration::from_secs(11));
 
     let missing_identity =
         crate::config::ConfigSource::from_pairs_for_test([("AUDIT_ANCHOR_MODE", "required")]);
-    assert!(
-        super::config::preflight_config_from_source(&missing_identity, Path::new("runtime"))
-            .is_err()
-    );
+    assert!(super::config::preflight_config_from_source(&missing_identity).is_err());
     let invalid_freshness = crate::config::ConfigSource::from_pairs_for_test([
         ("AUDIT_ANCHOR_MODE", "required"),
         ("DEPLOYMENT_ID", "deployment-test"),
         ("AUDIT_ANCHOR_FRESHNESS_SECONDS", "0"),
     ]);
-    assert!(
-        super::config::preflight_config_from_source(&invalid_freshness, Path::new("runtime"))
-            .is_err()
-    );
+    assert!(super::config::preflight_config_from_source(&invalid_freshness).is_err());
 }
 
 #[test]
@@ -816,296 +783,43 @@ fn checkpoint_envelope_contains_identity_chain_and_event_content() {
 }
 
 #[test]
-fn preflight_accepts_current_health_and_rejects_stale_or_unanchored_health() {
-    let config = required_config();
+fn preflight_accepts_shared_health_and_rejects_stale_or_unanchored_state() {
     let now = Utc::now();
-    let current = AnchorHealth {
-        schema_version: HEALTH_SCHEMA_VERSION.to_owned(),
-        deployment_id: config.deployment_id.clone(),
-        observed_at: now - ChronoDuration::seconds(1),
-        head_sequence: 7,
-        head_hash: encode_hash(&[2; 32]),
-        pending_count: 0,
-        oldest_pending_occurred_at: None,
-        last_anchored_sequence: Some(7),
-        last_anchored_hash: Some(encode_hash(&[2; 32])),
-        last_anchored_occurred_at: Some(now - ChronoDuration::seconds(2)),
-        last_anchored_at: Some(now - ChronoDuration::seconds(1)),
-        anchor_lag_seconds: Some(1),
-    };
-    assert!(validate_health(&config, &current, 7, &[2; 32], now).is_ok());
+    let config = required_config();
+    let current = health_snapshot();
+    assert!(validate_health(&config, &current, now).is_ok());
 
     let mut stale = current.clone();
-    stale.observed_at = now - ChronoDuration::seconds(61);
-    assert!(validate_health(&config, &stale, 7, &[2; 32], now).is_err());
+    stale.observed_at = Some(now - ChronoDuration::seconds(121));
+    assert!(validate_health(&config, &stale, now).is_err());
 
-    let mut behind = current;
-    behind.last_anchored_sequence = Some(6);
-    assert!(validate_health(&config, &behind, 7, &[2; 32], now).is_err());
-}
-
-#[test]
-fn preflight_health_rejects_each_identity_time_and_delivery_violation() {
-    let config = required_config();
-    let now = Utc::now();
-    let current = AnchorHealth {
-        schema_version: HEALTH_SCHEMA_VERSION.to_owned(),
-        deployment_id: config.deployment_id.clone(),
-        observed_at: now - ChronoDuration::seconds(1),
-        head_sequence: 7,
-        head_hash: encode_hash(&[2; 32]),
-        pending_count: 0,
-        oldest_pending_occurred_at: None,
-        last_anchored_sequence: Some(7),
-        last_anchored_hash: Some(encode_hash(&[2; 32])),
-        last_anchored_occurred_at: Some(now - ChronoDuration::seconds(2)),
-        last_anchored_at: Some(now - ChronoDuration::seconds(1)),
-        anchor_lag_seconds: Some(1),
-    };
-
-    let mut wrong_schema = current.clone();
-    wrong_schema.schema_version = "nazo.audit.anchor.health.unknown".to_owned();
-    assert!(validate_health(&config, &wrong_schema, 7, &[2; 32], now).is_err());
     let mut wrong_deployment = current.clone();
-    wrong_deployment.deployment_id = "other-deployment".to_owned();
-    assert!(validate_health(&config, &wrong_deployment, 7, &[2; 32], now).is_err());
-    let mut wrong_sequence = current.clone();
-    wrong_sequence.head_sequence = 8;
-    assert!(validate_health(&config, &wrong_sequence, 7, &[2; 32], now).is_err());
-    let mut wrong_hash = current.clone();
-    wrong_hash.head_hash = encode_hash(&[3; 32]);
-    assert!(validate_health(&config, &wrong_hash, 7, &[2; 32], now).is_err());
-
-    let mut future_observation = current.clone();
-    future_observation.observed_at = now + ChronoDuration::seconds(1);
-    assert!(validate_health(&config, &future_observation, 7, &[2; 32], now).is_err());
-    let mut subsecond_future_observation = current.clone();
-    subsecond_future_observation.observed_at = now + ChronoDuration::milliseconds(1);
-    assert!(validate_health(&config, &subsecond_future_observation, 7, &[2; 32], now).is_err());
+    wrong_deployment.deployment_id = Some("other".to_owned());
+    assert!(validate_health(&config, &wrong_deployment, now).is_err());
 
     let mut pending = current.clone();
     pending.pending_count = 1;
-    pending.oldest_pending_occurred_at = Some(now - ChronoDuration::seconds(4));
-    assert!(validate_health(&config, &pending, 7, &[2; 32], now).is_err());
-    pending.oldest_pending_occurred_at = Some(now + ChronoDuration::seconds(1));
-    assert!(validate_health(&config, &pending, 7, &[2; 32], now).is_err());
-    pending.oldest_pending_occurred_at = None;
-    assert!(validate_health(&config, &pending, 7, &[2; 32], now).is_err());
+    assert!(validate_health(&config, &pending, now).is_err());
 
-    let mut no_sequence = current.clone();
-    no_sequence.last_anchored_sequence = None;
-    assert!(validate_health(&config, &no_sequence, 7, &[2; 32], now).is_err());
-    let mut no_hash = current.clone();
-    no_hash.last_anchored_hash = None;
-    assert!(validate_health(&config, &no_hash, 7, &[2; 32], now).is_err());
-    let mut no_occurred_at = current.clone();
-    no_occurred_at.last_anchored_occurred_at = None;
-    assert!(validate_health(&config, &no_occurred_at, 7, &[2; 32], now).is_err());
-    let mut no_anchored_at = current.clone();
-    no_anchored_at.last_anchored_at = None;
-    assert!(validate_health(&config, &no_anchored_at, 7, &[2; 32], now).is_err());
-    let mut future_occurred_at = current.clone();
-    future_occurred_at.last_anchored_occurred_at = Some(now + ChronoDuration::seconds(1));
-    assert!(validate_health(&config, &future_occurred_at, 7, &[2; 32], now).is_err());
-    let mut future_anchored_at = current.clone();
-    future_anchored_at.last_anchored_at = Some(now + ChronoDuration::seconds(1));
-    assert!(validate_health(&config, &future_anchored_at, 7, &[2; 32], now).is_err());
-    let mut delivered_before_occurrence = current.clone();
-    delivered_before_occurrence.last_anchored_occurred_at = Some(now - ChronoDuration::seconds(1));
-    delivered_before_occurrence.last_anchored_at = Some(now - ChronoDuration::seconds(2));
-    assert!(validate_health(&config, &delivered_before_occurrence, 7, &[2; 32], now).is_err());
-    let mut subsecond_inverted_checkpoint = current.clone();
-    subsecond_inverted_checkpoint.last_anchored_occurred_at =
-        Some(now - ChronoDuration::milliseconds(500));
-    subsecond_inverted_checkpoint.last_anchored_at = Some(now - ChronoDuration::milliseconds(501));
-    assert!(validate_health(&config, &subsecond_inverted_checkpoint, 7, &[2; 32], now).is_err());
-    let mut delivered_after_observation = current.clone();
-    delivered_after_observation.observed_at = now - ChronoDuration::seconds(2);
-    assert!(validate_health(&config, &delivered_after_observation, 7, &[2; 32], now).is_err());
-    let mut wrong_checkpoint = current.clone();
-    wrong_checkpoint.last_anchored_hash = Some(encode_hash(&[3; 32]));
-    assert!(validate_health(&config, &wrong_checkpoint, 7, &[2; 32], now).is_err());
-    let mut missing_lag = current.clone();
-    missing_lag.anchor_lag_seconds = None;
-    assert!(validate_health(&config, &missing_lag, 7, &[2; 32], now).is_err());
-    let mut negative_lag = current.clone();
-    negative_lag.anchor_lag_seconds = Some(-1);
-    assert!(validate_health(&config, &negative_lag, 7, &[2; 32], now).is_err());
-    let mut excessive_lag = current;
-    excessive_lag.last_anchored_occurred_at = Some(now - ChronoDuration::seconds(302));
-    excessive_lag.anchor_lag_seconds = Some(301);
-    assert!(validate_health(&config, &excessive_lag, 7, &[2; 32], now).is_err());
-}
-
-#[tokio::test]
-async fn preflight_constructor_and_freshness_gate_are_fail_closed() {
-    let mut disabled = required_config();
-    disabled.mode = AuditAnchorMode::Disabled;
-    disabled.freshness = Duration::ZERO;
-    disabled.max_lag = Duration::ZERO;
-    let preflight = AuditAnchorPreflight::new(disabled).expect("disabled preflight is valid");
-    assert!(preflight.ensure_fresh(99, &[9; 32]).await.is_ok());
-
-    let path = temp_status_path("preflight");
-    let mut config = required_config();
-    config.status_file = path.clone();
-    let preflight = AuditAnchorPreflight::new(config.clone()).expect("required config is valid");
-    assert!(preflight.ensure_fresh(7, &[2; 32]).await.is_err());
-
-    let snapshot = health_snapshot();
-    let checkpoint = AnchorCheckpoint::from_snapshot(&snapshot).expect("snapshot checkpoint");
-    write_health(&config, &snapshot, Some(&checkpoint), Utc::now())
-        .await
-        .expect("health file is written");
-    assert!(preflight.ensure_fresh(7, &[2; 32]).await.is_ok());
-    assert!(preflight.ensure_fresh(8, &[2; 32]).await.is_err());
-
-    let mut invalid = config;
-    invalid.deployment_id = "bad/id".to_owned();
-    assert!(AuditAnchorPreflight::new(invalid).is_err());
+    let mut behind = current;
+    behind.last_exported_sequence = Some(6);
+    assert!(validate_health(&config, &behind, now).is_err());
 }
 
 #[test]
-fn checkpoint_construction_handles_database_health_and_delivery_shapes() {
-    let snapshot = health_snapshot();
-    let from_snapshot = AnchorCheckpoint::from_snapshot(&snapshot).expect("complete snapshot");
-    assert_eq!(from_snapshot.sequence, 7);
-    assert_eq!(from_snapshot.hash, encode_hash(&[2; 32]));
-    assert_eq!(
-        from_snapshot.occurred_at,
-        snapshot.last_exported_occurred_at.unwrap()
-    );
-
-    let mut missing = snapshot.clone();
-    missing.last_exported_sequence = None;
-    assert!(AnchorCheckpoint::from_snapshot(&missing).is_none());
-    missing = snapshot.clone();
-    missing.last_exported_hash = None;
-    assert!(AnchorCheckpoint::from_snapshot(&missing).is_none());
-    missing = snapshot.clone();
-    missing.last_exported_occurred_at = None;
-    assert!(AnchorCheckpoint::from_snapshot(&missing).is_none());
-    missing.last_exported_occurred_at = snapshot.last_exported_occurred_at;
-    missing.last_exported_at = None;
-    assert!(AnchorCheckpoint::from_snapshot(&missing).is_none());
-
-    let health = AnchorHealth {
-        schema_version: HEALTH_SCHEMA_VERSION.to_owned(),
-        deployment_id: "deployment-1".to_owned(),
-        observed_at: Utc::now(),
-        head_sequence: 7,
-        head_hash: encode_hash(&[2; 32]),
-        pending_count: 0,
-        oldest_pending_occurred_at: None,
-        last_anchored_sequence: Some(7),
-        last_anchored_hash: Some(encode_hash(&[2; 32])),
-        last_anchored_occurred_at: Some(Utc::now()),
-        last_anchored_at: Some(Utc::now()),
-        anchor_lag_seconds: Some(1),
-    };
-    assert!(AnchorCheckpoint::from_health(&health).is_some());
-    let mut no_health_checkpoint = health.clone();
-    no_health_checkpoint.last_anchored_sequence = None;
-    assert!(AnchorCheckpoint::from_health(&no_health_checkpoint).is_none());
-    no_health_checkpoint = health.clone();
-    no_health_checkpoint.last_anchored_hash = None;
-    assert!(AnchorCheckpoint::from_health(&no_health_checkpoint).is_none());
-    no_health_checkpoint = health.clone();
-    no_health_checkpoint.last_anchored_occurred_at = None;
-    assert!(AnchorCheckpoint::from_health(&no_health_checkpoint).is_none());
-    no_health_checkpoint = health.clone();
-    no_health_checkpoint.last_anchored_at = None;
-    assert!(AnchorCheckpoint::from_health(&no_health_checkpoint).is_none());
-
-    let delivery = delivery();
-    let from_delivery = AnchorCheckpoint::from_delivery(&delivery);
-    assert_eq!(from_delivery.sequence, delivery.sequence);
-    assert_eq!(from_delivery.hash, encode_hash(&delivery.event_hash));
-    assert_eq!(from_delivery.occurred_at, delivery.occurred_at);
-    assert!(from_delivery.anchored_at >= from_delivery.occurred_at);
-
-    let genesis = AnchorCheckpoint::genesis(encode_hash(&[9; 32]));
-    assert_eq!(genesis.sequence, 0);
-    assert_eq!(genesis.hash, encode_hash(&[9; 32]));
-    assert_eq!(genesis.occurred_at, chrono::DateTime::<Utc>::UNIX_EPOCH);
-}
-
-#[tokio::test]
-async fn health_status_is_atomic_round_trip_and_optional_reads_are_typed() {
-    let path = temp_status_path("round_trip");
-    let mut config = required_config();
-    config.status_file = path.clone();
-    let snapshot = health_snapshot();
-    let checkpoint = AnchorCheckpoint::from_snapshot(&snapshot).expect("checkpoint exists");
-    write_health(&config, &snapshot, Some(&checkpoint), Utc::now())
-        .await
-        .expect("health status is written");
-    let health = read_health(&path).await.expect("health status parses");
-    assert_eq!(health.schema_version, HEALTH_SCHEMA_VERSION);
-    assert_eq!(health.deployment_id, "deployment-1");
-    assert_eq!(health.head_sequence, 7);
-    assert_eq!(health.head_hash, encode_hash(&[2; 32]));
-    assert_eq!(health.pending_count, 0);
-    assert_eq!(health.last_anchored_sequence, Some(7));
-    assert_eq!(health.last_anchored_hash, Some(encode_hash(&[2; 32])));
-    assert!(health.anchor_lag_seconds.is_some());
-    assert!(read_health_optional(&path).await.unwrap().is_some());
-
-    let missing = temp_status_path("missing");
-    assert!(read_health_optional(&missing).await.unwrap().is_none());
-
-    let invalid = temp_status_path("invalid");
-    tokio::fs::create_dir_all(invalid.parent().unwrap())
-        .await
-        .unwrap();
-    tokio::fs::write(&invalid, b"not-json").await.unwrap();
-    assert!(read_health(&invalid).await.is_err());
-    assert!(read_health_optional(&invalid).await.is_err());
-
-    let no_checkpoint = temp_status_path("without_checkpoint");
-    let mut no_checkpoint_config = config;
-    no_checkpoint_config.status_file = no_checkpoint;
-    let mut no_export = snapshot;
-    no_export.last_exported_sequence = None;
-    no_export.last_exported_hash = None;
-    no_export.last_exported_occurred_at = None;
-    no_export.last_exported_at = None;
-    write_health(&no_checkpoint_config, &no_export, None, Utc::now())
-        .await
-        .expect("health without checkpoint is representable");
-    let health = read_health(&no_checkpoint_config.status_file)
-        .await
-        .unwrap();
-    assert!(health.last_anchored_sequence.is_none());
-    assert!(health.anchor_lag_seconds.is_none());
-}
-
-#[tokio::test]
-async fn health_writer_handles_genesis_lag_and_invalid_paths() {
-    let path = temp_status_path("genesis");
-    let mut config = required_config();
-    config.status_file = path.clone();
-    let mut snapshot = health_snapshot();
-    snapshot.head_sequence = 0;
-    snapshot.head_hash = vec![9; 32];
-    snapshot.last_exported_sequence = None;
-    snapshot.last_exported_hash = None;
-    snapshot.last_exported_occurred_at = None;
-    snapshot.last_exported_at = None;
-    let genesis = AnchorCheckpoint::genesis(encode_hash(&snapshot.head_hash));
-    write_health(&config, &snapshot, Some(&genesis), Utc::now())
-        .await
-        .expect("genesis health is written");
-    let health = read_health(&path).await.unwrap();
-    assert_eq!(health.last_anchored_sequence, Some(0));
-    assert_eq!(health.anchor_lag_seconds, Some(0));
-
-    let mut invalid_path_config = required_config();
-    invalid_path_config.status_file = PathBuf::from("");
+fn preflight_mode_controls_the_shared_database_gate() {
+    let current = health_snapshot();
+    let required = AuditAnchorPreflight::new(required_config()).unwrap();
+    assert!(required.ensure_fresh(&current).is_ok());
+    let mut disabled = required_config();
+    disabled.mode = AuditAnchorMode::Disabled;
+    let mut unavailable = current;
+    unavailable.deployment_id = None;
     assert!(
-        write_health(&invalid_path_config, &snapshot, Some(&genesis), Utc::now())
-            .await
-            .is_err()
+        AuditAnchorPreflight::new(disabled)
+            .unwrap()
+            .ensure_fresh(&unavailable)
+            .is_ok()
     );
 }
 
@@ -1409,6 +1123,7 @@ async fn repository_adapter_forwards_invalid_pool_calls_without_panicking() {
             &repository,
             Uuid::nil(),
             1,
+            "deployment-1",
         )
         .await
         .is_err()
@@ -1430,7 +1145,6 @@ fn required_config() -> AuditAnchorPreflightConfig {
     AuditAnchorPreflightConfig {
         mode: AuditAnchorMode::Required,
         deployment_id: "deployment-1".to_owned(),
-        status_file: PathBuf::from("runtime/anchor-health.json"),
         freshness: Duration::from_secs(60),
         max_lag: Duration::from_secs(300),
     }

@@ -58,11 +58,16 @@ pub(super) async fn sign(
     if let Some(status) = &input.status {
         credential.insert("status".to_owned(), status.clone());
     }
+    let lease = crypto
+        .prepare_signing()
+        .map_err(|_| CredentialTrustError::Unavailable)?;
+    let material = crypto
+        .signing_material(&lease)
+        .map_err(|_| CredentialTrustError::Unavailable)?;
     let mut header = jsonwebtoken::Header::new(Algorithm::ES256);
     header.typ = Some("dc+sd-jwt".to_owned());
-    header.x5c = Some(crypto.x5c.as_ref().clone());
-    let jwt = crypto
-        .keyset
+    header.x5c = Some(material.x5c);
+    let jwt = lease
         .encode_jwt(nazo_auth::SigningPurpose::Credential, &header, &credential)
         .await
         .map_err(|_| CredentialTrustError::Unavailable)?;
@@ -111,12 +116,14 @@ pub(super) fn verify(
         .issuer_trust_policy
         .validate(issuer, &leaf_der)
         .map_err(|_| CredentialTrustError::UntrustedIssuer)?;
-    crypto.revocation_policy.check_chain_with_scoped_trust(
-        Some(issuer),
-        &certificates,
-        Utc::now(),
-        &presentation.additional_trust_anchors,
-    )?;
+    crypto
+        .current_revocation_policy()
+        .check_chain_with_scoped_trust(
+            Some(issuer),
+            &certificates,
+            Utc::now(),
+            &presentation.additional_trust_anchors,
+        )?;
     if credential
         .get("_sd_alg")
         .and_then(Value::as_str)

@@ -1,4 +1,4 @@
-use std::{collections::BTreeSet, path::PathBuf, sync::Arc, time::Duration as StdDuration};
+use std::{collections::BTreeSet, path::PathBuf, time::Duration as StdDuration};
 
 use base64::{
     Engine as _,
@@ -15,10 +15,12 @@ use mdoc_rs::{
     session::SessionTranscript,
 };
 use nazo_digital_credentials::{
-    CertificateRevocationPolicy, CredentialFormat, CredentialSignInput, CredentialSignerPort,
-    CredentialTrustError, HolderBinding, PresentedCredential, VcIssuerTrustPolicy,
+    CredentialFormat, CredentialSignInput, CredentialSignerPort, CredentialTrustError,
+    HolderBinding, PresentedCredential, VcIssuerTrustPolicy,
 };
-use nazo_key_management::{KeyManager, KeySettings, LocalKeyRegistration};
+use nazo_key_management::{
+    KeyManager, KeySettings, LocalKeyRegistration, Openid4vcMaterial, Openid4vcPublicMaterial,
+};
 use p256::{
     ecdsa::{SigningKey, signature::Signer as _},
     pkcs8::{DecodePrivateKey, EncodePrivateKey},
@@ -140,16 +142,6 @@ fn certificate_fixture_with_key(host: &str, leaf_key: KeyPair) -> CertificateFix
     }
 }
 
-fn certificate_without_san() -> Vec<u8> {
-    let key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).expect("leaf key");
-    CertificateParams::default()
-        .self_signed(&key)
-        .expect("certificate without SAN")
-        .der()
-        .as_ref()
-        .to_vec()
-}
-
 async fn real_crypto_fixture() -> (
     Openid4vcCredentialCrypto,
     CertificateFixture,
@@ -201,30 +193,43 @@ async fn real_crypto_fixture() -> (
     let keyset = KeyManager::load_or_create(settings)
         .await
         .expect("credential keyset should reload");
-    let chain_pem = format!("{}{}", certs.leaf_pem, certs.ca_pem);
-    let crypto = Openid4vcCredentialCrypto::new_with_policies(
+    let crypto = crypto_with_certificate(
         keyset,
-        chain_pem.as_bytes(),
-        certs.ca_pem.as_bytes(),
-        VcIssuerTrustPolicy::san_bound(),
-        CertificateRevocationPolicy::disabled(),
-    )
-    .expect("credential crypto should validate the generated chain");
+        &certs,
+        crate::settings::Openid4vcRevocationPolicy::Disabled,
+    );
     (crypto, certs, key_dir, kid)
 }
 
 fn crypto_with_certificate(
     keyset: nazo_key_management::KeyManager,
     certs: &CertificateFixture,
+    revocation_policy: crate::settings::Openid4vcRevocationPolicy,
 ) -> Openid4vcCredentialCrypto {
-    Openid4vcCredentialCrypto {
+    let signing_kid = keyset
+        .snapshot()
+        .signing_verification_key(
+            nazo_auth::SigningPurpose::Credential,
+            jsonwebtoken::Algorithm::ES256,
+        )
+        .expect("fixture credential key")
+        .kid
+        .clone();
+    keyset.set_openid4vc_material_for_test(Openid4vcMaterial {
+        public: Openid4vcPublicMaterial {
+            signing_kid,
+            certificate_chain_pem: format!("{}{}", certs.leaf_pem, certs.ca_pem),
+            trust_anchors_pem: certs.ca_pem.clone(),
+            revocation_snapshot: None,
+        },
+        iaca_private_materials: Default::default(),
+    });
+    Openid4vcCredentialCrypto::new_with_policies(
         keyset,
-        x5c: Arc::new(vec![STANDARD.encode(&certs.leaf_der)]),
-        leaf_der: Arc::new(certs.leaf_der.clone()),
-        trust_anchors: Arc::new(vec![certs.ca_der.clone()]),
-        issuer_trust_policy: VcIssuerTrustPolicy::san_bound(),
-        revocation_policy: CertificateRevocationPolicy::disabled(),
-    }
+        VcIssuerTrustPolicy::san_bound(),
+        revocation_policy,
+    )
+    .expect("fixture OpenID4VC material should validate")
 }
 
 struct TestMdocIssuerSigner {
@@ -440,14 +445,11 @@ fn sd_presentation_fixture() -> (
         mdoc_session_transcript: None,
         additional_trust_anchors: vec![],
     };
-    let crypto = Openid4vcCredentialCrypto {
-        keyset: nazo_key_management::KeyManager::for_test(Algorithm::ES256),
-        x5c: Arc::new(vec![STANDARD.encode(&certs.leaf_der)]),
-        leaf_der: Arc::new(certs.leaf_der.clone()),
-        trust_anchors: Arc::new(vec![certs.ca_der.clone()]),
-        issuer_trust_policy: VcIssuerTrustPolicy::san_bound(),
-        revocation_policy: CertificateRevocationPolicy::disabled(),
-    };
+    let crypto = crypto_with_certificate(
+        nazo_key_management::KeyManager::for_test(Algorithm::ES256),
+        &certs,
+        crate::settings::Openid4vcRevocationPolicy::Disabled,
+    );
     (crypto, presentation, json!("Ada"), certs)
 }
 
@@ -479,46 +481,12 @@ fn scoped_trust_anchors_require_a_bounded_unique_current_ca_set() {
 }
 
 #[test]
-fn constructor_fails_closed_for_empty_untrusted_or_mismatched_certificate_inputs() {
-    let certs = certificate_fixture("issuer.example");
-    let keyset = nazo_key_management::KeyManager::for_test(Algorithm::ES256);
+fn constructor_fails_closed_without_managed_material() {
     assert!(
         Openid4vcCredentialCrypto::new_with_policies(
-            keyset.clone(),
-            b"",
-            certs.ca_pem.as_bytes(),
+            nazo_key_management::KeyManager::for_test(Algorithm::ES256),
             VcIssuerTrustPolicy::san_bound(),
-            CertificateRevocationPolicy::disabled(),
-        )
-        .is_err()
-    );
-    assert!(
-        Openid4vcCredentialCrypto::new_with_policies(
-            keyset.clone(),
-            certs.leaf_pem.as_bytes(),
-            b"not a certificate",
-            VcIssuerTrustPolicy::san_bound(),
-            CertificateRevocationPolicy::disabled(),
-        )
-        .is_err()
-    );
-    assert!(
-        Openid4vcCredentialCrypto::new_with_policies(
-            keyset.clone(),
-            certs.ca_pem.as_bytes(),
-            certs.ca_pem.as_bytes(),
-            VcIssuerTrustPolicy::san_bound(),
-            CertificateRevocationPolicy::disabled(),
-        )
-        .is_err()
-    );
-    assert!(
-        Openid4vcCredentialCrypto::new_with_policies(
-            keyset,
-            format!("{}{}", certs.leaf_pem, certs.ca_pem).as_bytes(),
-            certs.ca_pem.as_bytes(),
-            VcIssuerTrustPolicy::san_bound(),
-            CertificateRevocationPolicy::disabled(),
+            crate::settings::Openid4vcRevocationPolicy::Disabled,
         )
         .is_err()
     );
@@ -528,8 +496,12 @@ fn constructor_fails_closed_for_empty_untrusted_or_mismatched_certificate_inputs
 async fn request_and_metadata_signing_emit_required_jose_headers() {
     let (crypto, certs, key_dir, kid) = real_crypto_fixture().await;
     let expected_x5c = vec![STANDARD.encode(&certs.leaf_der)];
+    let lease = crypto.prepare_signing().expect("signing lease");
     let request = crypto
-        .sign_request_object(&json!({"client_id": "wallet", "response_type": ["vp_token"]}))
+        .sign_request_object(
+            &lease,
+            &json!({"client_id": "wallet", "response_type": ["vp_token"]}),
+        )
         .await
         .expect("request object");
     let request_header = decode_header(&request).expect("request header");
@@ -560,10 +532,17 @@ async fn request_and_metadata_signing_map_key_failures_to_errors() {
         Algorithm::ES256,
         nazo_key_management::TestSigningBehavior::Failing,
     );
-    let crypto = crypto_with_certificate(failing_keyset, &certs);
+    let crypto = crypto_with_certificate(
+        failing_keyset,
+        &certs,
+        crate::settings::Openid4vcRevocationPolicy::Disabled,
+    );
     assert!(
         crypto
-            .sign_request_object(&json!({"iss": "issuer"}))
+            .sign_request_object(
+                &crypto.prepare_signing().expect("failing signing lease"),
+                &json!({"iss": "issuer"}),
+            )
             .await
             .is_err()
     );
@@ -578,30 +557,23 @@ async fn request_and_metadata_signing_map_key_failures_to_errors() {
 #[test]
 fn certificate_client_ids_bind_to_hash_and_dns_san() {
     let certs = certificate_fixture("issuer.example");
-    let crypto = Openid4vcCredentialCrypto {
-        keyset: nazo_key_management::KeyManager::for_test(Algorithm::ES256),
-        x5c: Arc::new(vec![]),
-        leaf_der: Arc::new(certs.leaf_der.clone()),
-        trust_anchors: Arc::new(vec![]),
-        issuer_trust_policy: VcIssuerTrustPolicy::san_bound(),
-        revocation_policy: CertificateRevocationPolicy::disabled(),
-    };
+    let crypto = crypto_with_certificate(
+        nazo_key_management::KeyManager::for_test(Algorithm::ES256),
+        &certs,
+        crate::settings::Openid4vcRevocationPolicy::Disabled,
+    );
+    let lease = crypto.prepare_signing().expect("signing lease");
     assert_eq!(
-        crypto.x509_hash_client_id(),
+        crypto.x509_hash_client_id(&lease).expect("x509 hash"),
         format!(
             "x509_hash:{}",
             URL_SAFE_NO_PAD.encode(sha2::Sha256::digest(&certs.leaf_der))
         )
     );
     assert_eq!(
-        crypto.x509_san_dns_client_id().expect("DNS SAN"),
+        crypto.x509_san_dns_client_id(&lease).expect("DNS SAN"),
         "x509_san_dns:issuer.example"
     );
-    let no_san_crypto = Openid4vcCredentialCrypto {
-        leaf_der: Arc::new(certificate_without_san()),
-        ..crypto
-    };
-    assert!(no_san_crypto.x509_san_dns_client_id().is_err());
 }
 
 #[tokio::test]
@@ -808,14 +780,11 @@ fn mdoc_mdl_binary_elements_require_base64url_and_encode_as_bstr() {
 #[test]
 fn sd_jwt_chain_and_combined_anchor_validation_fail_closed() {
     let certs = certificate_fixture("issuer.example");
-    let crypto = Openid4vcCredentialCrypto {
-        keyset: nazo_key_management::KeyManager::for_test(Algorithm::ES256),
-        x5c: Arc::new(vec![]),
-        leaf_der: Arc::new(certs.leaf_der.clone()),
-        trust_anchors: Arc::new(vec![certs.ca_der.clone()]),
-        issuer_trust_policy: VcIssuerTrustPolicy::san_bound(),
-        revocation_policy: CertificateRevocationPolicy::disabled(),
-    };
+    let crypto = crypto_with_certificate(
+        nazo_key_management::KeyManager::for_test(Algorithm::ES256),
+        &certs,
+        crate::settings::Openid4vcRevocationPolicy::Disabled,
+    );
     let valid = crypto
         .validate_sd_jwt_chain(&[STANDARD.encode(&certs.leaf_der)], &[])
         .expect("valid SD-JWT chain");
@@ -1048,7 +1017,7 @@ fn sd_jwt_verification_rejects_holder_and_issuer_policy_failures() {
         Err(CredentialTrustError::UntrustedIssuer)
     );
     let strict_revocation = Openid4vcCredentialCrypto {
-        revocation_policy: CertificateRevocationPolicy::required_without_snapshot(),
+        revocation_policy: crate::settings::Openid4vcRevocationPolicy::Required,
         ..crypto
     };
     assert_eq!(
@@ -1121,7 +1090,7 @@ async fn mdoc_verification_accepts_signed_device_response_and_extracts_claims() 
         URL_SAFE_NO_PAD.encode(sha2::Sha256::digest(&certs.leaf_der))
     );
     let strict_revocation = Openid4vcCredentialCrypto {
-        revocation_policy: CertificateRevocationPolicy::required_without_snapshot(),
+        revocation_policy: crate::settings::Openid4vcRevocationPolicy::Required,
         ..crypto
     };
     assert_eq!(
@@ -1264,9 +1233,14 @@ fn async_cose_signer_uses_credential_scope_and_propagates_signing_errors() {
     let certs = certificate_fixture("issuer.example");
     let runtime = tokio::runtime::Runtime::new().expect("test runtime");
     let handle = runtime.handle().clone();
+    let crypto = crypto_with_certificate(
+        nazo_key_management::KeyManager::for_test(Algorithm::ES256),
+        &certs,
+        crate::settings::Openid4vcRevocationPolicy::Disabled,
+    );
     let signer = AsyncCoseSigner {
-        keyset: nazo_key_management::KeyManager::for_test(Algorithm::ES256),
-        certificate_der: Arc::new(certs.leaf_der),
+        lease: crypto.prepare_signing().expect("signing lease"),
+        certificate_der: certs.leaf_der,
         runtime: handle.clone(),
     };
     let signature = signer.sign(b"credential tbs").expect("signature");
@@ -1274,12 +1248,19 @@ fn async_cose_signer_uses_credential_scope_and_propagates_signing_errors() {
     assert_eq!(signer.algorithm(), -7);
     assert!(!signer.certificate_der().is_empty());
 
-    let failing = AsyncCoseSigner {
-        keyset: nazo_key_management::KeyManager::for_test_behavior(
+    let failing_crypto = crypto_with_certificate(
+        nazo_key_management::KeyManager::for_test_behavior(
             Algorithm::ES256,
             nazo_key_management::TestSigningBehavior::Failing,
         ),
-        certificate_der: Arc::new(vec![1, 2, 3]),
+        &certificate_fixture("issuer.example"),
+        crate::settings::Openid4vcRevocationPolicy::Disabled,
+    );
+    let failing = AsyncCoseSigner {
+        lease: failing_crypto
+            .prepare_signing()
+            .expect("failing signing lease"),
+        certificate_der: vec![1, 2, 3],
         runtime: handle,
     };
     assert!(failing.sign(b"credential tbs").is_err());

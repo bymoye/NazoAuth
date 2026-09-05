@@ -402,45 +402,14 @@ impl Settings {
                 "OPENID4VCI_ISSUER_MANAGEMENT_TOKEN and OPENID4VP_VERIFIER_MANAGEMENT_TOKEN must differ"
             );
         }
-        let mut openid4vc_signing_certificate_chain_file = config
-            .optional_string("OPENID4VC_SIGNING_CERTIFICATE_CHAIN_FILE")
-            .map(PathBuf::from);
-        let mut openid4vc_trust_anchors_file = config
-            .optional_string("OPENID4VC_TRUST_ANCHORS_FILE")
-            .map(PathBuf::from);
         let openid4vc_revocation_policy = Openid4vcRevocationPolicy::from_config(config)?;
-        let mut openid4vc_revocation_snapshot_file = config
-            .optional_string("OPENID4VC_REVOCATION_SNAPSHOT_FILE")
-            .map(PathBuf::from);
-        let openid4vc_revocation_reload_interval_seconds = positive_u64(
-            config,
-            "OPENID4VC_REVOCATION_RELOAD_INTERVAL_SECONDS",
-            30,
-            "OPENID4VC_REVOCATION_RELOAD_INTERVAL_SECONDS",
-        )?;
-        if openid4vc_enabled
-            && openid4vc_revocation_policy != Openid4vcRevocationPolicy::Disabled
-            && openid4vc_revocation_snapshot_file.is_none()
-            && !tenant_specific
-        {
-            bail!(
-                "OPENID4VC_REVOCATION_SNAPSHOT_FILE is required when OPENID4VC_REVOCATION_POLICY is enabled"
-            );
-        }
         if enable_openid4vp_verifier
             && openid4vc_revocation_policy != Openid4vcRevocationPolicy::Required
         {
             bail!("ENABLE_OPENID4VP_VERIFIER=true requires OPENID4VC_REVOCATION_POLICY=required");
         }
-        if openid4vc_enabled
-            && (openid4vc_data_encryption_key.is_none()
-                || (!tenant_specific
-                    && (openid4vc_signing_certificate_chain_file.is_none()
-                        || openid4vc_trust_anchors_file.is_none())))
-        {
-            bail!(
-                "OpenID4VC modules require a data encryption root and, outside the tenant directory, explicit certificate and trust-anchor files"
-            );
+        if openid4vc_enabled && openid4vc_data_encryption_key.is_none() {
+            bail!("OpenID4VC modules require a data encryption root");
         }
         if enable_openid4vci_issuer && credential_configurations.is_empty() {
             bail!(
@@ -505,17 +474,6 @@ impl Settings {
         if tenant_specific {
             if openid4vc_enabled {
                 let tenant_id = tenant.context.tenant_id;
-                let material_dir = data_dir
-                    .join("tenants")
-                    .join(tenant_id.as_uuid().to_string())
-                    .join("openid4vc");
-                let certificate_bundle = material_dir.join("certificate-bundle.pem");
-                openid4vc_signing_certificate_chain_file = Some(certificate_bundle.clone());
-                openid4vc_trust_anchors_file = Some(certificate_bundle);
-                if openid4vc_revocation_policy != Openid4vcRevocationPolicy::Disabled {
-                    openid4vc_revocation_snapshot_file =
-                        Some(material_dir.join("revocation-snapshot.json"));
-                }
                 openid4vc_data_encryption_key = openid4vc_data_encryption_key.map(|root| {
                     derive_tenant_secret(&root, tenant_id, b"nazoauth/openid4vc/data-encryption/v1")
                 });
@@ -742,8 +700,6 @@ impl Settings {
                 ciba_notification_private_origins,
             },
             openid4vc: Openid4vcSettings {
-                signing_certificate_chain_file: openid4vc_signing_certificate_chain_file,
-                trust_anchors_file: openid4vc_trust_anchors_file,
                 data_encryption_key: openid4vc_data_encryption_key,
                 client_attestation_jwks: openid4vc_client_attestation_jwks,
                 key_attestation_jwks: openid4vc_key_attestation_jwks,
@@ -760,8 +716,6 @@ impl Settings {
                     "OPENID4VC_TRANSACTION_TTL_SECONDS",
                 )?,
                 revocation_policy: openid4vc_revocation_policy,
-                revocation_snapshot_file: openid4vc_revocation_snapshot_file,
-                revocation_reload_interval_seconds: openid4vc_revocation_reload_interval_seconds,
             },
         })
     }

@@ -33,9 +33,6 @@ pub(crate) use profile_services::{
     FederationProfileService, MtlsTrustAnchorService,
 };
 pub(crate) use registration_services::{LocalRegistrationService, RegistrationSecretHasher};
-#[cfg(test)]
-pub(crate) use startup::load_revocation_policy;
-pub(crate) use startup::read_revocation_snapshot;
 pub use startup::run;
 pub(crate) use startup::tenant_runtime::TenantRuntimeRegistry;
 pub use transient_state::{
@@ -45,7 +42,7 @@ pub use transient_state::{
     TransientStateFuture, TransientStateHealthPort,
 };
 
-use std::{path::PathBuf, sync::Arc, time::Duration};
+use std::{path::PathBuf, sync::Arc};
 
 use crate::adapters::email::{SmtpVerificationEmailDelivery, email_delivery_configured};
 use crate::adapters::security::{
@@ -105,9 +102,7 @@ use crate::http::token::device_config::DeviceHttpConfig;
 use crate::http::token::dispatch::{Openid4vcTokenHandles, TokenCoreHandles, TokenEndpointHandles};
 use crate::http::token::issue::TokenIssuanceConfig;
 use crate::runtime_modules::{RuntimeModules, ServerRuntimeModuleRegistry};
-use crate::settings::{
-    Openid4vcRevocationPolicy, Settings, mfa_totp_key_ring, token_issuance_response_key_ring,
-};
+use crate::settings::{Settings, mfa_totp_key_ring, token_issuance_response_key_ring};
 use actix_files::{Files, NamedFile};
 #[cfg(test)]
 #[allow(unused_imports)]
@@ -117,8 +112,6 @@ use actix_web::{
     dev::{ServiceRequest, ServiceResponse, fn_service},
     web,
 };
-use anyhow::Context as _;
-use nazo_digital_credentials::{CertificateRevocationPolicy, CertificateRevocationSnapshot};
 use nazo_http_actix::ClientIpConfig;
 use nazo_http_actix::{
     AuthorizationDecisionEndpoint, LocalRegistrationEndpoint, MfaProfileConfig, MfaProfileEndpoint,
@@ -131,8 +124,6 @@ use nazo_openid4vc_http_actix::{CredentialIssuerEndpoint, PresentationEndpoint};
 #[cfg(test)]
 use transport::DirectTlsReload;
 use transport::{direct_tls_listeners, spawn_direct_tls_reloader};
-
-const MAX_REVOCATION_SNAPSHOT_BYTES: u64 = 4 * 1024 * 1024;
 
 fn ui_static_files(root: PathBuf) -> Files {
     let index = root.join("index.html");

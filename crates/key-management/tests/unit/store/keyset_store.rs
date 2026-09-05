@@ -1476,6 +1476,7 @@ fn in_memory_manager(algorithm: jsonwebtoken::Algorithm) -> KeyManager {
         }],
         request_object_decryption_key,
         request_object_encryption_jwk,
+        openid4vc_material: None,
     };
     KeyManager::from_loaded(test_settings(PathBuf::new()), loaded)
 }

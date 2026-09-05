@@ -32,7 +32,6 @@ pub(super) struct CoreServices {
     pub(super) credential_dataset_admin: Option<web::Data<CredentialDatasetAdminService>>,
     pub(super) presentation_endpoint: Option<web::Data<PresentationEndpoint>>,
     pub(super) client_attestation_validator: Option<Arc<Openid4vcClientAttestationValidator>>,
-    pub(super) openid4vc_revocation_policy: Option<CertificateRevocationPolicy>,
     pub(super) token_endpoint_handles: web::Data<TokenEndpointHandles>,
 }
 
@@ -201,7 +200,6 @@ pub(super) async fn build(startup: &StartupConfiguration) -> anyhow::Result<Core
         credential_dataset_admin,
         presentation_endpoint,
         client_attestation_validator,
-        revocation_policy: openid4vc_revocation_policy,
     } = openid4vc;
     let token_endpoint_handles = web::Data::new(TokenEndpointHandles::new(
         TokenCoreHandles {
@@ -248,7 +246,6 @@ pub(super) async fn build(startup: &StartupConfiguration) -> anyhow::Result<Core
         credential_dataset_admin,
         presentation_endpoint,
         client_attestation_validator,
-        openid4vc_revocation_policy,
         token_endpoint_handles,
     })
 }

@@ -15,6 +15,8 @@ const AUDIT_LEDGER_UP: &str =
     include_str!("../../../migrations/20260805000100_security_audit_ledger/up.sql");
 const AUDIT_LEDGER_DOWN: &str =
     include_str!("../../../migrations/20260805000100_security_audit_ledger/down.sql");
+const SHARED_ANCHOR_UP: &str =
+    include_str!("../../../migrations/20260905000100_shared_audit_anchor_state/up.sql");
 
 #[test]
 fn audit_ledger_migration_is_append_only_and_has_durable_outbox() {
@@ -55,6 +57,20 @@ fn audit_ledger_migration_is_append_only_and_has_durable_outbox() {
     }
 }
 
+#[test]
+fn shared_anchor_migration_persists_checkpoint_without_a_local_file() {
+    for required in [
+        "anchor_deployment_id",
+        "nazo_observe_security_audit_anchor",
+        "nazo_record_security_audit_genesis",
+        "nazo_ack_security_audit_event",
+        "nazo_security_audit_shared_anchor_health",
+        "nazo_security_audit_shared_privilege_preflight",
+    ] {
+        assert!(SHARED_ANCHOR_UP.contains(required), "missing {required}");
+    }
+}
+
 fn database_url() -> Option<String> {
     let url = std::env::var("NAZO_AUDIT_TEST_DATABASE_URL").ok();
     if url.is_none() && std::env::var_os("CI").is_some() {
@@ -90,7 +106,7 @@ async fn audit_ledger_append_is_chained_and_outboxed() {
         }
         for delivery in existing {
             repository
-                .mark_exported(delivery.event_id, delivery.attempts)
+                .mark_exported(delivery.event_id, delivery.attempts, "test-deployment")
                 .await
                 .expect("existing audit delivery should be drainable");
         }
@@ -147,7 +163,7 @@ async fn audit_ledger_append_is_chained_and_outboxed() {
     assert_eq!(first_delivery.event_id, first_id);
     for delivery in claimed {
         repository
-            .mark_exported(delivery.event_id, delivery.attempts)
+            .mark_exported(delivery.event_id, delivery.attempts, "test-deployment")
             .await
             .expect("every claimed audit event should be marked as exported");
     }
@@ -158,6 +174,22 @@ async fn audit_ledger_append_is_chained_and_outboxed() {
         .expect("audit anchor health should be readable through its function");
     assert!(health.head_sequence >= second.sequence);
     assert_eq!(health.head_hash.len(), 32);
+    assert_eq!(health.last_exported_sequence, Some(health.head_sequence));
+    assert_eq!(
+        health.last_exported_hash.as_deref(),
+        Some(health.head_hash.as_slice())
+    );
+    assert_eq!(health.deployment_id.as_deref(), Some("test-deployment"));
+    assert!(health.observed_at.is_some());
+
+    let restarted_repository = AuditLedgerRepository::new(
+        create_pool(database_url.clone(), 2).expect("a second audit pool should create"),
+    );
+    let restarted_health = restarted_repository
+        .anchor_health()
+        .await
+        .expect("another instance should read the shared audit checkpoint");
+    assert_eq!(restarted_health, health);
 
     let mutation =
         sql_query("UPDATE security_audit_events SET event_type = event_type WHERE event_id = $1")
@@ -191,7 +223,7 @@ async fn audit_ledger_rejects_invalid_events_and_enforces_claim_fencing() {
         }
         for delivery in existing {
             repository
-                .mark_exported(delivery.event_id, delivery.attempts)
+                .mark_exported(delivery.event_id, delivery.attempts, "test-deployment")
                 .await
                 .expect("existing audit delivery should be drainable");
         }
@@ -288,7 +320,11 @@ async fn audit_ledger_rejects_invalid_events_and_enforces_claim_fencing() {
         .expect("the appended audit event should have an outbox claim");
     assert!(matches!(
         repository
-            .mark_exported(receipt.event_id, first_delivery.attempts + 1)
+            .mark_exported(
+                receipt.event_id,
+                first_delivery.attempts + 1,
+                "test-deployment"
+            )
             .await,
         Err(RepositoryError::Consistency(_))
     ));
@@ -310,12 +346,20 @@ async fn audit_ledger_rejects_invalid_events_and_enforces_claim_fencing() {
         .expect("the rescheduled event should be reclaimed");
     assert_eq!(second_delivery.attempts, first_delivery.attempts + 1);
     repository
-        .mark_exported(receipt.event_id, second_delivery.attempts)
+        .mark_exported(
+            receipt.event_id,
+            second_delivery.attempts,
+            "test-deployment",
+        )
         .await
         .expect("the current claim should be acknowledged");
     assert!(matches!(
         repository
-            .mark_exported(receipt.event_id, second_delivery.attempts)
+            .mark_exported(
+                receipt.event_id,
+                second_delivery.attempts,
+                "test-deployment"
+            )
             .await,
         Err(RepositoryError::Consistency(_))
     ));

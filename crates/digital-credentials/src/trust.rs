@@ -67,6 +67,9 @@ pub struct CertificateRevocationEntry {
     /// The `certificate_identity` value of the certificate being assessed.
     pub certificate: String,
     pub status: CertificateRevocationStatus,
+    /// Time the local authority recorded revocation, retained across CRL refreshes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revoked_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]

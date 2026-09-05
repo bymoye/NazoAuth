@@ -164,7 +164,6 @@ pub(crate) fn initialize_audit_dependencies(_pool: &nazo_postgres::DbPool) {
         crate::adapters::audit_anchor::AuditAnchorPreflightConfig {
             mode: crate::adapters::audit_anchor::config::AuditAnchorMode::Disabled,
             deployment_id: "unit-test".to_owned(),
-            status_file: std::path::PathBuf::from("runtime/test/audit-anchor-health.json"),
             freshness: std::time::Duration::from_secs(1),
             max_lag: std::time::Duration::from_secs(1),
         },
