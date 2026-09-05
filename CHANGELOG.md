@@ -3,6 +3,15 @@
 Project changes are recorded in Keep a Changelog style. Versioned releases use
 semantic versioning once public release tags are cut.
 
+## 0.2.14 - 2026-09-05
+
+### Fixed
+
+- Generate ISO/IEC 18013-5 mDL document signer and IACA certificates with a
+  PrintableString country name, the mdlDS extended-key-usage identifier, and no
+  document-signer Basic Constraints extension. Existing managed certificates
+  require an explicit mdoc rotation to publish the corrected profile.
+
 ## 0.2.13 - 2026-09-05
 
 ### Fixed
