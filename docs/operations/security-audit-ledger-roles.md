@@ -100,11 +100,11 @@ process:
 
 ```sql
 SELECT *
-FROM public.nazo_security_audit_privilege_preflight(true, true, false);
+FROM public.nazo_security_audit_shared_privilege_preflight(true, true, false);
 -- writer: policy_satisfied = true; claim_execute/ack_execute = false
 
 SELECT *
-FROM public.nazo_security_audit_privilege_preflight(true, false, true);
+FROM public.nazo_security_audit_shared_privilege_preflight(true, false, true);
 -- exporter: policy_satisfied = true; append_execute/head_execute = false
 ```
 

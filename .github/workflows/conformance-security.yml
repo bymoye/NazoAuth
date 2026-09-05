@@ -306,7 +306,7 @@ jobs:
           test "$(
             docker exec -e PGPASSWORD="$app_password" nazo-oauth-e2e-postgres \
               psql -h 127.0.0.1 -U nazoauth_e2e_app -d oauth -At -v ON_ERROR_STOP=1 \
-              -c 'SELECT policy_satisfied FROM public.nazo_security_audit_privilege_preflight(true, true, false)'
+              -c 'SELECT policy_satisfied FROM public.nazo_security_audit_shared_privilege_preflight(true, true, false)'
           )" = "t"
           sed -i \
             "s#postgresql://postgres:postgres@#postgresql://nazoauth_e2e_app:${app_password}@#" \
