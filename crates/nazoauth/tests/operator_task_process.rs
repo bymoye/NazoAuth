@@ -129,7 +129,7 @@ fn write_runtime_fixtures(root: &Path) {
     fs::write(
         root.join("server.yaml"),
         format!(
-            "DATA_DIR: runtime\nDEPLOYMENT_ID: {DEPLOYMENT}\nSIGNING_KEY_ENCRYPTION_KEY_ID: {SIGNING_KEY_ENCRYPTION_KEY_ID}\nSIGNING_KEY_ENCRYPTION_KEY: {SIGNING_KEY_ENCRYPTION_KEY}\n"
+            "DATA_DIR: runtime\nDEPLOYMENT_ID: {DEPLOYMENT}\nPUBLIC_BASE_URL: http://localhost\nISSUER: http://localhost\nSIGNING_KEY_ENCRYPTION_KEY_ID: {SIGNING_KEY_ENCRYPTION_KEY_ID}\nSIGNING_KEY_ENCRYPTION_KEY: {SIGNING_KEY_ENCRYPTION_KEY}\n"
         ),
     )
     .unwrap();
