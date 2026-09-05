@@ -1,6 +1,6 @@
 FROM docker.io/grafana/k6:2.2.0 AS k6
 
-FROM docker.io/library/python:3.14-alpine@sha256:05b2b8b732ecd268fee8727a369f936f022d1321b59befd13c30ede22769dcdc
+FROM docker.io/library/python:3.14-alpine@sha256:c6ead215bfd31f1e433d968853b7a769989117115b728874824e6c0a27cb96fc
 
 RUN apk add --no-cache ca-certificates docker-cli \
     && pip install --no-cache-dir "psycopg[binary]==3.3.4" "redis==7.1.0" "argon2-cffi==25.1.0" "cryptography==50.0.0" "blake3==1.0.9"
