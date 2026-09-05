@@ -182,14 +182,14 @@ pub async fn run(
                 .ok_or_else(|| {
                     anyhow::anyhow!("mdoc management requires an active tenant binding")
                 })?;
-            let revision = crate::keyctl::operator_manage_mdoc(
+            crate::keyctl::operator_manage_mdoc(
                 &config,
                 binding,
                 operator_persistence.as_ref(),
                 action,
             )
             .await?;
-            println!("signing keyset revision: {revision}");
+            println!("mdoc signing keyset updated");
             Ok(())
         }
         Command::AdminProvision => run_admin_provision(persistence.as_ref()).await,
