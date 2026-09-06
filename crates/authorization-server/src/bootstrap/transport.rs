@@ -236,7 +236,19 @@ pub(super) fn direct_tls_listeners(
     let client_ca: PathBuf = required("TLS_CLIENT_CA_FILE")?.into();
     let endpoint_names = endpoint_server_names(settings)?.into();
     let snapshots = DirectTlsSnapshotStore::initialize(paths, endpoint_names)?;
-    let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+    // FAPI 1 section 8.5 permits only RSA-authenticated AES-GCM suites below
+    // TLS 1.3. Apply the same inbound policy to both listeners; retain the
+    // provider's TLS 1.3 suites and leave outbound TLS providers unchanged.
+    let mut provider = rustls::crypto::aws_lc_rs::default_provider();
+    provider.cipher_suites.retain(|suite| {
+        suite.version() == &rustls::version::TLS13
+            || matches!(
+                suite.suite(),
+                rustls::CipherSuite::TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256
+                    | rustls::CipherSuite::TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384
+            )
+    });
+    let provider = Arc::new(provider);
     let client_verifier = load_client_verifier(&client_ca, Arc::clone(&provider))?;
     let resolver = Arc::new(DynamicServerCertificate {
         snapshots: Arc::clone(&snapshots),

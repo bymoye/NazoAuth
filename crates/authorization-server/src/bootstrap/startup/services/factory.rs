@@ -89,8 +89,15 @@ where
             .map_into_right_body());
     };
 
+    let tenant_id = container
+        .get::<web::Data<nazo_identity::TenantContext>>()
+        .ok_or_else(|| actix_web::error::ErrorInternalServerError("tenant context is unavailable"))?
+        .tenant_id;
     request.add_data_container(container);
-    Ok(next.call(request).await?.map_into_left_body())
+    Ok(crate::adapters::audit::REQUEST_TENANT
+        .scope(tenant_id, next.call(request))
+        .await?
+        .map_into_left_body())
 }
 
 async fn request_timeout<B>(

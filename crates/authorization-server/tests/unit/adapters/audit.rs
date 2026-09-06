@@ -1,6 +1,57 @@
 use super::*;
 use serde_json::json;
 
+#[tokio::test]
+async fn interleaved_requests_capture_their_own_tenant_before_audit_queueing() {
+    let tenant_a = nazo_identity::TenantId::new(Uuid::from_u128(101)).unwrap();
+    let tenant_b = nazo_identity::TenantId::new(Uuid::from_u128(102)).unwrap();
+    let capture = |tenant| {
+        REQUEST_TENANT.scope(tenant, async {
+            tokio::task::yield_now().await;
+            prepare_event(
+                "login_success",
+                audit_fields(&[("user_id", json!("same-id"))]),
+            )
+            .unwrap()
+        })
+    };
+    let (event_a, event_b) = tokio::join!(capture(tenant_a), capture(tenant_b));
+    assert_eq!(event_a.payload["tenant_id"], json!(tenant_a));
+    assert_eq!(event_b.payload["tenant_id"], json!(tenant_b));
+    assert!(REQUEST_TENANT.try_with(|tenant| *tenant).is_err());
+    assert!(
+        prepare_event("login_success", serde_json::Map::new())
+            .unwrap()
+            .payload
+            .get("tenant_id")
+            .is_none(),
+        "an unscoped deployment event must not inherit the preceding request tenant"
+    );
+}
+
+#[tokio::test]
+async fn audit_payload_cannot_override_the_resolved_request_tenant() {
+    let tenant_a = nazo_identity::TenantId::new(Uuid::from_u128(101)).unwrap();
+    let tenant_b = nazo_identity::TenantId::new(Uuid::from_u128(102)).unwrap();
+    REQUEST_TENANT
+        .scope(tenant_a, async {
+            assert!(matches!(
+                prepare_event(
+                    "login_success",
+                    audit_fields(&[("tenant_id", json!(tenant_b))])
+                ),
+                Err("tenant_context_mismatch")
+            ));
+            let event = prepare_event(
+                "login_success",
+                audit_fields(&[("tenant_id", json!(tenant_a))]),
+            )
+            .unwrap();
+            assert_eq!(event.payload["tenant_id"], json!(tenant_a));
+        })
+        .await;
+}
+
 #[test]
 fn audit_fields_can_remove_sensitive_material() {
     let mut fields = audit_fields(&[

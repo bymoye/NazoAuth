@@ -14,6 +14,11 @@ semantic versioning once public release tags are cut.
   deployment or currently approved client-specific CA trust for PKI mTLS
   authentication. Direct TLS and trusted RFC 9440 forwarding now apply the
   same client authorization checks; registered self-signed keys remain supported.
+- Keep direct TLS and proxy-facing mTLS on the configured AEAD cipher policy.
+- Reload server certificates when their configured paths change, preserving the
+  previous working certificate if a replacement cannot be loaded.
+- Preserve tenant identity in protocol security audit records, including key,
+  client, and trust administration events.
 
 ## 0.2.14 - 2026-09-05
 

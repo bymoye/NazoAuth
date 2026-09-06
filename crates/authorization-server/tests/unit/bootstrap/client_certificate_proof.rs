@@ -27,7 +27,8 @@ async fn mtls_admits_tenant_keys_but_rejects_a_forged_certificate_verify_signatu
     let root = std::env::temp_dir().join(format!("nazoauth-client-proof-{}", uuid::Uuid::now_v7()));
     let other = root.join("other");
     std::fs::create_dir_all(&other).unwrap();
-    let material = write_test_tls_material(&root);
+    let material =
+        write_test_tls_material_with_server_algorithm(&root, false, &rcgen::PKCS_RSA_SHA256);
     let unrelated = write_test_tls_material(&other);
     let config = direct_tls_config(&material);
     let settings = Settings::from_config(&config).unwrap();

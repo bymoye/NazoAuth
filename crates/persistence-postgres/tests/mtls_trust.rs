@@ -250,6 +250,17 @@ async fn mtls_trust_lifecycle_is_owned_two_person_current_and_revocable() {
             .unwrap()
             .contains("TEST")
     );
+    let authorization =
+        nazo_postgres::AuthorizationFlowRepository::new(pool.clone(), tenant.tenant_id.as_uuid());
+    assert!(
+        nazo_auth::AuthorizationRepositoryPort::mtls_trust_anchor_bundle(
+            &authorization,
+            client_database_id,
+        )
+        .await
+        .unwrap()
+        .contains("TEST")
+    );
     let revoked = repository
         .revoke(
             tenant.tenant_id,
@@ -277,6 +288,16 @@ async fn mtls_trust_lifecycle_is_owned_two_person_current_and_revocable() {
             .await
             .unwrap()
             .is_empty()
+    );
+    assert!(
+        nazo_auth::AuthorizationRepositoryPort::mtls_trust_anchor_bundle(
+            &authorization,
+            client_database_id,
+        )
+        .await
+        .unwrap()
+        .is_empty(),
+        "the authorization repository must observe revocation on the next lookup"
     );
     assert!(
         !repository

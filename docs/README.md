@@ -25,7 +25,7 @@ set can be scanned from one place.
 | Chinese OpenID Connect integration | [integration/openid-connect.zh-CN.md](integration/openid-connect.zh-CN.md) |
 | Protocol and profile status | [protocol/profile-matrix.md](protocol/profile-matrix.md) |
 | Composable capability policy | [protocol/composable-capability-policy.md](protocol/composable-capability-policy.md) |
-| Product-owned SCIM regression contract | [conformance/README.md](conformance/README.md) |
+| Protocol regression and external OIDF evidence | [conformance/README.md](conformance/README.md) |
 | Performance benchmark overview | [performance/performance-capacity-curve.md](performance/performance-capacity-curve.md) |
 
 ## Categories
@@ -37,7 +37,7 @@ set can be scanned from one place.
 | Protocol | [protocol](protocol) | OAuth/OIDC/FAPI profile matrices, RFC coverage, protocol self-audits, and implementation backlog. |
 | Features | [features](features) | Feature design and integration notes for ecosystem onboarding, tenancy, SCIM, federation, MFA, passkeys, and resource-server verification. |
 | Security | [security](security) | Threat model, security policy links, and runtime security event taxonomy. |
-| Conformance | [conformance](conformance) | Product-owned executable protocol regression contracts. |
+| Conformance | [conformance](conformance) | Protocol regression contracts and external black-box validation evidence. |
 | Coverage | [coverage](coverage) | Coverage runbooks and evidence. |
 | Performance | [performance](performance) | NazoAuth-only capacity, stress, and benchmark reports. |
 | Project | [project](project) | Product scope, roadmap, and project-level decision records. |
@@ -117,7 +117,8 @@ set can be scanned from one place.
 
 | Document | Role |
 | --- | --- |
-| [conformance/README.md](conformance/README.md) | Product-owned SCIM regression contract. |
+| [conformance/README.md](conformance/README.md) | Protocol regression contracts and external OIDF evidence. |
+| [conformance/oidf-2026-09-06-dual-mode-candidate.md](conformance/oidf-2026-09-06-dual-mode-candidate.md) | Direct TLS/proxy candidate results, review and signed evidence identities. |
 
 ### Coverage
 
@@ -172,6 +173,6 @@ These files are text artifacts but are not general reader documentation.
 - Keep benchmark runner instructions in `perf/README.md`; performance entry
   points and summaries belong under `docs/performance/`, while scenario
   reports belong under `docs/performance/reports/`.
-- Keep product-owned executable protocol regression contracts under `docs/conformance/`.
+- Keep product-owned protocol regression contracts and Markdown evidence from external black-box validation under `docs/conformance/`.
 - Keep generated lock files and regression seed corpora out of the reader-facing
   documentation flow; index them only as support artifacts.

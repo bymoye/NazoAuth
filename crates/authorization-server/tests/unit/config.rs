@@ -25,7 +25,7 @@ impl ConfigSource {
         }
     }
 
-    fn load_from_dir(path: impl AsRef<Path>) -> anyhow::Result<Self> {
+    pub(crate) fn load_from_dir(path: impl AsRef<Path>) -> anyhow::Result<Self> {
         Self::load_from_dir_with_env(path, std::iter::empty::<(String, String)>())
     }
 
@@ -953,6 +953,39 @@ fn relative_persistent_paths_cannot_escape_the_configuration_directory() {
             .contains("DATA_DIR relative path escapes configuration directory")
     );
     let _ = std::fs::remove_dir_all(&path);
+}
+
+#[cfg(unix)]
+#[test]
+fn tls_identity_paths_follow_atomic_links_without_allowing_relative_escape() {
+    let root = temp_config_dir("tls_identity_paths");
+    let outside = temp_config_dir("tls_identity_outside");
+    for generation in ["first", "second"] {
+        std::fs::create_dir(root.join(generation)).unwrap();
+        std::fs::write(root.join(generation).join("material"), generation).unwrap();
+    }
+    std::os::unix::fs::symlink("first", root.join("current")).unwrap();
+    std::os::unix::fs::symlink(&outside, root.join("escape")).unwrap();
+    let mut paths = Vec::new();
+    for key in ["TLS_CERTIFICATE_FILE", "TLS_PRIVATE_KEY_FILE"] {
+        for configured in [
+            "current/material".to_owned(),
+            root.join("current/material").display().to_string(),
+        ] {
+            let path = resolve_persistent_path(&root, key, &configured).unwrap();
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), "first");
+            paths.push(path);
+        }
+        let error = resolve_persistent_path(&root, key, "escape/material").unwrap_err();
+        assert!(error.to_string().contains("relative path escapes"));
+    }
+    std::os::unix::fs::symlink("second", root.join("next")).unwrap();
+    std::fs::rename(root.join("next"), root.join("current")).unwrap();
+    for path in paths {
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "second");
+    }
+    std::fs::remove_dir_all(root).unwrap();
+    std::fs::remove_dir_all(outside).unwrap();
 }
 
 #[test]

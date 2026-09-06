@@ -4,6 +4,8 @@ use actix_web::{App, HttpRequest, HttpResponse, HttpServer, test as actix_test, 
 
 #[path = "bootstrap/client_certificate_proof.rs"]
 mod client_certificate_proof;
+#[path = "bootstrap/tls_cipher_policy.rs"]
+mod tls_cipher_policy;
 #[path = "bootstrap/transport_mode_parity.rs"]
 mod transport_mode_parity;
 
@@ -23,6 +25,18 @@ fn write_test_tls_material_with_expired_server(
     root: &std::path::Path,
     expired_server: bool,
 ) -> TestTlsMaterial {
+    write_test_tls_material_with_server_algorithm(
+        root,
+        expired_server,
+        &rcgen::PKCS_ECDSA_P256_SHA256,
+    )
+}
+
+fn write_test_tls_material_with_server_algorithm(
+    root: &std::path::Path,
+    expired_server: bool,
+    server_algorithm: &'static rcgen::SignatureAlgorithm,
+) -> TestTlsMaterial {
     use rcgen::{
         BasicConstraints, CertificateParams, CertifiedIssuer, ExtendedKeyUsagePurpose, IsCa,
         KeyPair, KeyUsagePurpose, PKCS_ECDSA_P256_SHA256,
@@ -34,7 +48,7 @@ fn write_test_tls_material_with_expired_server(
     ca_params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
     let ca = CertifiedIssuer::self_signed(ca_params, ca_key).unwrap();
 
-    let server_key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).unwrap();
+    let server_key = KeyPair::generate_for(server_algorithm).unwrap();
     let mut server_params = CertificateParams::new(vec!["localhost".to_owned()]).unwrap();
     server_params.is_ca = IsCa::NoCa;
     server_params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
@@ -832,15 +846,22 @@ fn direct_tls_generation_rejects_partial_material_and_retains_last_known_good() 
 
 #[actix_web::test]
 async fn direct_tls_new_handshakes_switch_server_identity_without_reloading_client_ca() {
-    let active_root =
-        std::env::temp_dir().join(format!("nazoauth-tls-active-{}", uuid::Uuid::now_v7()));
-    let next_root =
-        std::env::temp_dir().join(format!("nazoauth-tls-next-{}", uuid::Uuid::now_v7()));
-    std::fs::create_dir(&active_root).unwrap();
+    let root = std::env::temp_dir().join(format!("nazoauth-tls-identity-{}", uuid::Uuid::now_v7()));
+    let active_root = root.join("generation-a");
+    let next_root = root.join("generation-b");
+    std::fs::create_dir_all(&active_root).unwrap();
     std::fs::create_dir(&next_root).unwrap();
     let active = write_test_tls_material(&active_root);
     let next = write_test_tls_material(&next_root);
-    let config = ConfigSource::from_owned_pairs_for_test([
+    #[cfg(unix)]
+    let identity_root = {
+        let current = root.join("current");
+        std::os::unix::fs::symlink("generation-a", &current).unwrap();
+        current
+    };
+    #[cfg(not(unix))]
+    let identity_root = active_root.clone();
+    let values = std::collections::BTreeMap::from([
         ("BIND".to_owned(), "127.0.0.1:0".to_owned()),
         ("PUBLIC_BASE_URL".to_owned(), "https://localhost".to_owned()),
         (
@@ -851,17 +872,23 @@ async fn direct_tls_new_handshakes_switch_server_identity_without_reloading_clie
         ("TLS_BIND".to_owned(), "127.0.0.1:1".to_owned()),
         (
             "TLS_CERTIFICATE_FILE".to_owned(),
-            active.certificate_path.clone(),
+            identity_root.join("server.pem").display().to_string(),
         ),
         (
             "TLS_PRIVATE_KEY_FILE".to_owned(),
-            active.private_key_path.clone(),
+            identity_root.join("server.key").display().to_string(),
         ),
         (
             "TLS_CLIENT_CA_FILE".to_owned(),
             active.client_ca_path.clone(),
         ),
     ]);
+    std::fs::write(
+        root.join(".env.yaml"),
+        yaml_serde::to_string(&values).unwrap(),
+    )
+    .unwrap();
+    let config = ConfigSource::load_from_dir(&root).unwrap();
     let settings = Settings::from_config(&config).unwrap();
     let listeners = direct_tls_listeners(&config, &settings).unwrap().unwrap();
     let snapshots = listeners.snapshots.clone();
@@ -986,17 +1013,15 @@ async fn direct_tls_new_handshakes_switch_server_identity_without_reloading_clie
         "untrusted"
     );
 
-    std::fs::copy(&next.certificate_path, &active.certificate_path).unwrap();
-    std::fs::copy(&next.private_key_path, &active.private_key_path).unwrap();
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt as _;
-
-        std::fs::set_permissions(
-            &active.private_key_path,
-            std::fs::Permissions::from_mode(0o600),
-        )
-        .unwrap();
+        std::os::unix::fs::symlink("generation-b", root.join("next")).unwrap();
+        std::fs::rename(root.join("next"), root.join("current")).unwrap();
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::copy(&next.certificate_path, &active.certificate_path).unwrap();
+        std::fs::copy(&next.private_key_path, &active.private_key_path).unwrap();
     }
     assert_eq!(
         snapshots.reload().unwrap(),
@@ -1043,8 +1068,7 @@ async fn direct_tls_new_handshakes_switch_server_identity_without_reloading_clie
 
     public_handle.stop(true).await;
     mtls_handle.stop(true).await;
-    std::fs::remove_dir_all(active_root).unwrap();
-    std::fs::remove_dir_all(next_root).unwrap();
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[actix_web::test]
