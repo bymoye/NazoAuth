@@ -102,7 +102,7 @@ pub async fn oidc_logout(
 ) -> HttpResponse {
     let parsed = match parse_logout_request(&request, &mut payload).await {
         Ok(request) => request,
-        Err(response) => return *response,
+        Err(response) => return response,
     };
     let session_id = cookie_value(&request, &endpoint.config.session_cookie_name);
     let csrf_cookie = cookie_value(&request, &endpoint.config.csrf_cookie_name);
@@ -142,22 +142,22 @@ struct ParsedOidcLogoutRequest {
 async fn parse_logout_request(
     request: &HttpRequest,
     payload: &mut Payload,
-) -> Result<ParsedOidcLogoutRequest, Box<HttpResponse>> {
+) -> Result<ParsedOidcLogoutRequest, HttpResponse> {
     let mut parsed = parse_logout_pairs(request.query_string())?;
     if request.method() != Method::POST {
         if parsed.user_confirmed || parsed.csrf_token.is_some() {
-            return Err(Box::new(invalid_logout_request(
+            return Err(invalid_logout_request(
                 "logout confirmation must use HTTP POST.",
-            )));
+            ));
         }
         return Ok(parsed);
     }
     if !request_uses_form_urlencoded(request) {
-        return Err(Box::new(oauth_error(
+        return Err(oauth_error(
             StatusCode::BAD_REQUEST,
             "invalid_request",
             "logout POST must use application/x-www-form-urlencoded.",
-        )));
+        ));
     }
     let mut body = Vec::with_capacity(LOGOUT_FORM_MAX_BYTES);
     while let Some(chunk) = payload.next().await {
@@ -169,11 +169,11 @@ async fn parse_logout_request(
             )
         })?;
         if body.len().saturating_add(chunk.len()) > LOGOUT_FORM_MAX_BYTES {
-            return Err(Box::new(oauth_error(
+            return Err(oauth_error(
                 StatusCode::PAYLOAD_TOO_LARGE,
                 "invalid_request",
                 "logout request body is too large.",
-            )));
+            ));
         }
         body.extend_from_slice(&chunk);
     }
@@ -181,7 +181,7 @@ async fn parse_logout_request(
     Ok(parsed)
 }
 
-fn parse_logout_pairs(raw: &str) -> Result<ParsedOidcLogoutRequest, Box<HttpResponse>> {
+fn parse_logout_pairs(raw: &str) -> Result<ParsedOidcLogoutRequest, HttpResponse> {
     let mut parsed = ParsedOidcLogoutRequest::default();
     merge_logout_pairs(&mut parsed, raw.as_bytes())?;
     Ok(parsed)
@@ -190,7 +190,7 @@ fn parse_logout_pairs(raw: &str) -> Result<ParsedOidcLogoutRequest, Box<HttpResp
 fn merge_logout_pairs(
     parsed: &mut ParsedOidcLogoutRequest,
     raw: &[u8],
-) -> Result<(), Box<HttpResponse>> {
+) -> Result<(), HttpResponse> {
     for (key, value) in url::form_urlencoded::parse(raw) {
         match key.as_ref() {
             "id_token_hint" => set_once(&mut parsed.request.id_token_hint, &value)?,
@@ -202,9 +202,7 @@ fn merge_logout_pairs(
             "_nazo_csrf" => set_once(&mut parsed.csrf_token, &value)?,
             "_nazo_logout_confirm" => {
                 if parsed.user_confirmed || value != "true" {
-                    return Err(Box::new(invalid_logout_request(
-                        "invalid logout confirmation.",
-                    )));
+                    return Err(invalid_logout_request("invalid logout confirmation."));
                 }
                 parsed.user_confirmed = true;
             }
@@ -218,13 +216,13 @@ fn invalid_logout_request(description: &'static str) -> HttpResponse {
     oauth_error(StatusCode::BAD_REQUEST, "invalid_request", description)
 }
 
-fn set_once(field: &mut Option<String>, value: &str) -> Result<(), Box<HttpResponse>> {
+fn set_once(field: &mut Option<String>, value: &str) -> Result<(), HttpResponse> {
     if field.is_some() {
-        return Err(Box::new(oauth_error(
+        return Err(oauth_error(
             StatusCode::BAD_REQUEST,
             "invalid_request",
             "duplicate logout parameter.",
-        )));
+        ));
     }
     field.replace(value.to_owned());
     Ok(())
