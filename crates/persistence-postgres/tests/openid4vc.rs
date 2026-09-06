@@ -1,4 +1,4 @@
-use argon2::{Argon2, PasswordHasher, password_hash::SaltString};
+use argon2::{Argon2, PasswordHasher};
 use chrono::{DateTime, Duration, Utc};
 use diesel::{
     QueryableByName, sql_query,
@@ -1704,9 +1704,8 @@ async fn issuance_store_covers_atomic_recovery_and_terminal_error_boundaries() {
     let pre_authorized_hash = blake3::hash(pre_authorized_code.as_bytes())
         .to_hex()
         .to_string();
-    let salt = SaltString::encode_b64(b"0123456789abcdef").unwrap();
     let tx_code_hash = Argon2::default()
-        .hash_password(b"2468", &salt)
+        .hash_password_with_salt(b"2468", b"0123456789abcdef")
         .unwrap()
         .to_string();
     let pre_authorized_offer = StoredCredentialOffer {
