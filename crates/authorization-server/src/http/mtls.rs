@@ -48,7 +48,11 @@ impl DirectTlsServerName {
     }
 }
 
-pub(crate) fn capture_direct_tls_client_certificate(io: &dyn Any, extensions: &mut Extensions) {
+pub(crate) fn capture_direct_tls_client_certificate(
+    io: &dyn Any,
+    extensions: &mut Extensions,
+    deployment_verifier: Option<&dyn rustls::server::danger::ClientCertVerifier>,
+) {
     let Some(stream) = io
         .downcast_ref::<actix_tls::accept::rustls_0_23::TlsStream<actix_web::rt::net::TcpStream>>()
     else {
@@ -59,15 +63,23 @@ pub(crate) fn capture_direct_tls_client_certificate(io: &dyn Any, extensions: &m
     {
         extensions.insert(DirectTlsServerName(server_name));
     }
-    let Some(certificate) = stream
-        .get_ref()
-        .1
-        .peer_certificates()
-        .and_then(|certificates| certificates.first())
-    else {
+    let Some(chain) = stream.get_ref().1.peer_certificates() else {
         return;
     };
-    if let Some(identity) = certificate_der_identity(certificate.as_ref()) {
+    let Some((certificate, intermediates)) = chain.split_first() else {
+        return;
+    };
+    if let Some(mut identity) = certificate_der_identity(certificate.as_ref()) {
+        identity.certificate_chain_der = chain.iter().map(|der| der.as_ref().to_vec()).collect();
+        identity.deployment_trusted_chain = deployment_verifier.is_some_and(|verifier| {
+            verifier
+                .verify_client_cert(
+                    certificate,
+                    intermediates,
+                    rustls::pki_types::UnixTime::now(),
+                )
+                .is_ok()
+        });
         extensions.insert(identity);
     }
 }
@@ -132,7 +144,13 @@ fn request_mtls_client_certificate_from_configured_source(
         MtlsCertificateSourceMode::Rfc9440
             if request_from_trusted_proxy_cidrs(req, trusted_proxy_cidrs) =>
         {
-            request_mtls_client_certificate_from_rfc9440(req.headers())
+            let mut certificate = request_mtls_client_certificate_from_rfc9440(req.headers())?;
+            certificate.deployment_trusted_chain = req
+                .app_data::<Data<dyn rustls::server::danger::ClientCertVerifier>>()
+                .is_some_and(|verifier| {
+                    certificate_chain_verified(&certificate, verifier.get_ref())
+                });
+            Some(certificate)
         }
         MtlsCertificateSourceMode::Rfc9440 => None,
     }
@@ -146,12 +164,28 @@ pub(crate) fn request_mtls_client_certificate_from_rfc9440(
     if values.next().is_some() || value.len() < 3 {
         return None;
     }
+    let der = decode_forwarded_certificate(value)?;
+    let mut certificate = certificate_der_identity(&der)?;
+    let mut chains = headers.get_all("client-cert-chain");
+    if let Some(chain) = chains.next() {
+        if chains.next().is_some() {
+            return None;
+        }
+        for value in chain.to_str().ok()?.split(',') {
+            certificate
+                .certificate_chain_der
+                .push(decode_forwarded_certificate(value.trim())?);
+        }
+    }
+    Some(certificate)
+}
+
+fn decode_forwarded_certificate(value: &str) -> Option<Vec<u8>> {
     let encoded = value.strip_prefix(':')?.strip_suffix(':')?;
     if encoded.is_empty() || encoded.chars().any(char::is_whitespace) {
         return None;
     }
-    let der = STANDARD.decode(encoded).ok()?;
-    certificate_der_identity(&der)
+    STANDARD.decode(encoded).ok()
 }
 
 pub(crate) fn certificate_der_identity(der: &[u8]) -> Option<MtlsClientCertificate> {
@@ -160,6 +194,7 @@ pub(crate) fn certificate_der_identity(der: &[u8]) -> Option<MtlsClientCertifica
         thumbprint: Some(URL_SAFE_NO_PAD.encode(Sha256::digest(der))),
         subject_dn: Some(subject_name_to_dn(x509.subject())?),
         verified_certificate_expiry: true,
+        certificate_chain_der: vec![der.to_vec()],
         ..MtlsClientCertificate::default()
     };
     if let Some(names) = x509.subject_alternative_name().ok().flatten() {
@@ -182,6 +217,55 @@ pub(crate) fn certificate_der_identity(der: &[u8]) -> Option<MtlsClientCertifica
     certificate.san_ip = sorted_unique(certificate.san_ip);
     certificate.san_email = sorted_unique(certificate.san_email);
     Some(certificate)
+}
+
+/// PKI authentication consumes the tenant's currently approved trust anchors.
+/// Revocation therefore takes effect on existing TLS connections as well.
+pub(crate) fn certificate_chain_trusted(
+    certificate: &MtlsClientCertificate,
+    anchors: &str,
+) -> bool {
+    use rustls::{
+        RootCertStore,
+        pki_types::{CertificateDer, pem::PemObject},
+    };
+
+    let mut roots = RootCertStore::empty();
+    for certificate in CertificateDer::pem_slice_iter(anchors.as_bytes()) {
+        let Ok(certificate) = certificate else {
+            return false;
+        };
+        if roots.add(certificate).is_err() {
+            return false;
+        }
+    }
+    let provider = std::sync::Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+    let Ok(verifier) = rustls::server::WebPkiClientVerifier::builder_with_provider(
+        std::sync::Arc::new(roots),
+        provider,
+    )
+    .build() else {
+        return false;
+    };
+    certificate_chain_verified(certificate, verifier.as_ref())
+}
+
+fn certificate_chain_verified(
+    certificate: &MtlsClientCertificate,
+    verifier: &dyn rustls::server::danger::ClientCertVerifier,
+) -> bool {
+    use rustls::pki_types::{CertificateDer, UnixTime};
+    let chain = certificate
+        .certificate_chain_der
+        .iter()
+        .map(|der| CertificateDer::from(der.as_slice()))
+        .collect::<Vec<_>>();
+    let Some((leaf, intermediates)) = chain.split_first() else {
+        return false;
+    };
+    verifier
+        .verify_client_cert(leaf, intermediates, UnixTime::now())
+        .is_ok()
 }
 
 pub(crate) fn certificate_x5c_thumbprint(value: &str) -> Option<String> {

@@ -6,13 +6,13 @@ This record distinguishes test/build evidence from publication and deployment.
 
 ## Environment
 
-Hostinger uses isolated PostgreSQL 18 and Valkey 8 containers and a private
+Linux validation environment uses isolated PostgreSQL 18 and Valkey 8 containers and a private
 MinIO test bucket. Neither production databases nor the running OIDF Suite are
 used. Cloudflare R2 verification uses the supplied account's existing bucket,
 application-generated test objects, and no changes to bucket CORS or lifecycle.
 Credentials are environment input, never repository fixtures.
 
-Hostinger's selected object storage is Cloudflare R2, bucket `nazoauth`, region
+The validation environment's selected object storage is Cloudflare R2, bucket `nazoauth`, region
 `auto`, with path-style requests. Its `r2storage.nazoauth.com` public domain is
 deployment configuration, not a core default or a presigned-upload endpoint.
 The concrete adapter receives the account's R2 S3 API endpoint and credentials
@@ -21,7 +21,7 @@ running instance to the newly built software.
 
 ## Verification commands and results
 
-Source verification and Hostinger Release builds are complete:
+Source verification and Linux validation environment Release builds are complete:
 
 ```sh
 cargo fmt --all --check
@@ -42,7 +42,7 @@ and retains the original strict count of 16. The corrected target passed all
 therefore verified across the workspace run and focused rerun (2,668 passing
 cases, five ignored); no production migration or assertion was weakened.
 
-`cargo build --release --locked -p nazoauth` passed. The Hostinger binary is
+`cargo build --release --locked -p nazoauth` passed. The Linux validation environment binary is
 `/root/build/shared-state-20260904/artifacts/nazoauth` (32,756,040 bytes),
 SHA-256 `bf107e15c0228ac66e989b6ed5104ed79250a0489b06d99a7da96d24133dfb0e`.
 
@@ -55,7 +55,7 @@ permission; the successful run followed the user's permission correction.
 Temporary objects from earlier failed runs were explicitly removed.
 
 The combined avatar test passed in the workspace against PostgreSQL, Valkey
-and MinIO. Its exact compiled test binary was then run on Hostinger with R2
+and MinIO. Its exact compiled test binary was then run on Linux validation environment with R2
 environment input and passed again: A authorizes, B finalizes/reads, A retries
 after replay, then the service clears the database reference before deleting
 the final object. Real operator process tests also passed all four cases,
@@ -77,13 +77,13 @@ cargo build --release --locked -p nazoauthctl
 ```
 
 Its test run has 760 passed, zero failed and one existing ignored test.
-The Hostinger Release binary is
+The Linux validation environment Release binary is
 `/root/build/shared-state-20260904/artifacts/nazoauthctl` (16,989,600 bytes),
 SHA-256 `74cf8be5f4ffb5f1fc5f5e3a26bc6d766a443d7549f8314ce076c163f3d162b0`.
 
 ## Storage compatibility
 
-The tenant storage configuration follow-up was verified on Hostinger with
+The tenant storage configuration follow-up was verified on Linux validation environment with
 104 passing tests: four new configuration cases and two existing S3
 signing/isolation cases, 63 server settings tests, and 35 avatar HTTP tests.
 The HTTP run used this task's PostgreSQL and Valkey containers. An initial
@@ -105,7 +105,7 @@ full workspace/R2 integration run, or migrate the deployed instance. See
 before applying the new local directory layout.
 
 The subsequent optional-global-storage change passed 159 scoped tests on
-Hostinger: nine object-store cases, 63 settings cases, 40 configuration cases,
+Linux validation environment: nine object-store cases, 63 settings cases, 40 configuration cases,
 ten CLI cases and 37 avatar HTTP cases. This includes the tenant allowlist,
 disabled storage when neither configuration applies, propagation of S3
 failure without local fallback, authenticated HTTP 403 responses before
@@ -153,7 +153,7 @@ configuration and is not established by a successful server-side HTTP upload.
 The supplied R2 bucket's managed `r2.dev` access was disabled, but its custom
 domain still served a staging probe anonymously (HTTP 200). The harmless
 probe was removed (HTTP 204). The user assigned this R2 service and public
-domain to Hostinger's deployment configuration; the domain remains unchanged.
+domain to The validation environment's deployment configuration; the domain remains unchanged.
 Preventing anonymous staging reads is a deployment access-policy requirement,
 not a requirement to remove the whole public domain or add Cloudflare-specific
 logic to NazoAuth. Successful authenticated S3 operations do not establish

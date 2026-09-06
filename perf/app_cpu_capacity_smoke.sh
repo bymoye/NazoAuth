@@ -2,7 +2,7 @@
 set -eu
 
 if [ "${CNB_CAPACITY_SKIP_BOOTSTRAP:-0}" != "1" ]; then
-  . ./perf/cnb_bootstrap.sh
+  . ./perf/bootstrap.sh
   install_capacity_dependencies
   docker compose version >/dev/null
 fi
@@ -47,4 +47,4 @@ echo "app_cpuset=${PERF_APP_CPUSET:-unrestricted}"
 echo "infra_cpuset=${PERF_INFRA_CPUSET:-unrestricted}"
 echo "app_taskset=${PERF_APP_TASKSET:-disabled}"
 
-./perf/cnb_capacity.sh
+./perf/run_capacity.sh

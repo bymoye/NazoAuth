@@ -3,7 +3,7 @@
 | Field | Value |
 | --- | --- |
 | Source commit | fa2a0e770c3d6482a90f5b7c9d92891a440bcde6 |
-| Runner tag | cnb:arch:amd64 |
+| Runner architecture | x86_64 |
 | Requested runner CPUs | 64 |
 | Observed logical CPUs | 384 |
 | Process allowed CPUs | 161-224 |
@@ -12,19 +12,19 @@
 | Memory total | unknown |
 | Cgroup memory max | unknown |
 | Workspace disk available | unknown |
-| Kernel | Linux 1df2b1a603cb 5.4.241-1-tlinux4-0023.7 #1 SMP Fri May 8 22:13:53 CST 2026 x86_64 GNU/Linux |
+| Kernel | Linux 5.4.241-1-tlinux4-0023.7 #1 SMP Fri May 8 22:13:53 CST 2026 x86_64 GNU/Linux |
 | Docker server | 27.5.1 |
 | Docker compose | 2.33.0 |
-| Compose project | nazoauth-extended-capacity-extended-metadata-jwks |
-| Compose files | docker-compose.perf.yml + perf/results/docker-compose.cpuset-extended-metadata-jwks.yml |
-| CPU set | 191-196 |
+| Compose project | nazoauth-extended-capacity-extended-introspect-opaque-refresh-t |
+| Compose files | docker-compose.perf.yml + perf/results/docker-compose.cpuset-extended-introspect-opaque-refresh-token.yml |
+| CPU set | 173-178 |
 | CPU set size | 6 |
 | Services pinned to CPU set | postgres, valkey, keyset, migrate, nazoauth, perf |
 | Per-container CPU model | Docker cpuset isolation; no CPU quota. Each service container may run on the listed CPU set. NazoAuth is additionally scaled by the stage instance count. |
-| Capacity scenarios | metadata_jwks |
+| Capacity scenarios | introspect_opaque_refresh_token |
 | Duration per point | 30m |
 | App instance stages | 1,2,4 NazoAuth replica(s) |
-| Explicit rates | 250,500,1000,1500,2000 |
+| Explicit rates | 16,32,64,128,256 |
 | Load executor | k6 constant-arrival-rate, time unit 1s |
 | Token-only target rates | 1000, 2500, 5000, 7500, 10000 flow/s |
 | OIDC cold/login and logged-in target rates | 16, 32, 64, 128, 256 flow/s |

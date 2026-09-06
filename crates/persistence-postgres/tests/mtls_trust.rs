@@ -245,10 +245,21 @@ async fn mtls_trust_lifecycle_is_owned_two_person_current_and_revocable() {
     );
     assert!(
         repository
-            .active_bundle(tenant.tenant_id)
+            .active_bundle(tenant.tenant_id, Some(client_database_id))
             .await
             .unwrap()
             .contains("TEST")
+    );
+    let authorization =
+        nazo_postgres::AuthorizationFlowRepository::new(pool.clone(), tenant.tenant_id.as_uuid());
+    assert!(
+        nazo_auth::AuthorizationRepositoryPort::mtls_trust_anchor_bundle(
+            &authorization,
+            client_database_id,
+        )
+        .await
+        .unwrap()
+        .contains("TEST")
     );
     let revoked = repository
         .revoke(
@@ -265,11 +276,35 @@ async fn mtls_trust_lifecycle_is_owned_two_person_current_and_revocable() {
     );
     assert!(
         repository
-            .active_bundle(tenant.tenant_id)
+            .active_bundle(tenant.tenant_id, None)
             .await
             .unwrap()
             .contains("TEST"),
         "revoking one client trust request must not remove another client's active anchor"
+    );
+    assert!(
+        repository
+            .active_bundle(tenant.tenant_id, Some(client_database_id))
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        nazo_auth::AuthorizationRepositoryPort::mtls_trust_anchor_bundle(
+            &authorization,
+            client_database_id,
+        )
+        .await
+        .unwrap()
+        .is_empty(),
+        "the authorization repository must observe revocation on the next lookup"
+    );
+    assert!(
+        !repository
+            .active_bundle(tenant.tenant_id, Some(bound_client_database_id))
+            .await
+            .unwrap()
+            .is_empty()
     );
 
     for digest_digit in ['0', '1', '2', '3'] {

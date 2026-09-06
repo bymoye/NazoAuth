@@ -201,6 +201,7 @@ pub trait AuthorizationRepositoryPort: Send + Sync {
         client_id: &'a str,
     ) -> AuthorizationFuture<'a, Option<OAuthClient>>;
     fn active_mtls_candidates(&self, limit: usize) -> AuthorizationFuture<'_, Vec<OAuthClient>>;
+    fn mtls_trust_anchor_bundle(&self, client_id: Uuid) -> AuthorizationFuture<'_, String>;
     fn grant<'a>(
         &'a self,
         user_id: Uuid,
@@ -540,6 +541,13 @@ where
         client_id: Uuid,
     ) -> Result<Option<String>, AuthorizationPortError> {
         self.repository.client_secret_salt(client_id).await
+    }
+
+    pub async fn mtls_trust_anchor_bundle(
+        &self,
+        client_id: Uuid,
+    ) -> Result<String, AuthorizationPortError> {
+        self.repository.mtls_trust_anchor_bundle(client_id).await
     }
 
     pub async fn client_secret_digest_matches(

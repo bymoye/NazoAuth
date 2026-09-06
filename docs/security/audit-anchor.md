@@ -6,6 +6,14 @@ ledger and its durable outbox.  An independent `nazoauth audit-anchor-worker`
 checkpoint per event to `AUDIT_ANCHOR_URL` over HTTPS.  The server process does
 not run this exporter and does not receive its database role or sink secret.
 
+The hash chain and its sequence belong to the deployment. HTTP security events
+capture `payload.tenant_id` from the same immutable tenant context that routes
+the request, before the event enters the shared writer queue. Concurrent
+requests cannot exchange this context, and a conflicting tenant field is
+rejected. Tenant-resource management events bind their tenant in the signed
+operation and database transaction. Deployment events outside a tenant request
+do not inherit the last request's identity.
+
 Each request contains the checkpoint schema `nazo.audit.anchor.v1` and these
 fields:
 

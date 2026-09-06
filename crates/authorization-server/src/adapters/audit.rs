@@ -15,6 +15,13 @@ use super::audit_anchor::AuditAnchorPreflight;
 
 pub(crate) const AUDIT_SCHEMA_VERSION: &str = "nazo.audit.v1";
 
+tokio::task_local! {
+    /// Set by the HTTP tenant resolver for the lifetime of the selected
+    /// request future. Capture this authority before handing events to the
+    /// deployment-wide asynchronous ledger worker.
+    pub(crate) static REQUEST_TENANT: nazo_identity::TenantId;
+}
+
 const SENSITIVE_FIELD_NAMES: &[&str] = &[
     "access_token",
     "refresh_token",
@@ -287,7 +294,7 @@ pub(crate) fn audit_event(event: &str, fields: serde_json::Map<String, serde_jso
                 event,
                 persistence_status = "rejected",
                 reason,
-                "security audit event is not allowlisted"
+                "security audit event was rejected"
             );
             return;
         }
@@ -326,6 +333,16 @@ fn prepare_event(
     event: &str,
     mut fields: serde_json::Map<String, serde_json::Value>,
 ) -> Result<QueuedAuditEvent, &'static str> {
+    if let Ok(tenant_id) = REQUEST_TENANT.try_with(|tenant| *tenant) {
+        let tenant = serde_json::json!(tenant_id);
+        if fields
+            .get("tenant_id")
+            .is_some_and(|declared| declared != &tenant)
+        {
+            return Err("tenant_context_mismatch");
+        }
+        fields.insert("tenant_id".to_owned(), tenant);
+    }
     for key in SENSITIVE_FIELD_NAMES {
         fields.remove(*key);
     }

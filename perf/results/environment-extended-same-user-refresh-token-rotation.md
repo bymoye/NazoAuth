@@ -3,7 +3,7 @@
 | Field | Value |
 | --- | --- |
 | Source commit | fa2a0e770c3d6482a90f5b7c9d92891a440bcde6 |
-| Runner tag | cnb:arch:amd64 |
+| Runner architecture | x86_64 |
 | Requested runner CPUs | 64 |
 | Observed logical CPUs | 384 |
 | Process allowed CPUs | 161-224 |
@@ -12,7 +12,7 @@
 | Memory total | unknown |
 | Cgroup memory max | unknown |
 | Workspace disk available | unknown |
-| Kernel | Linux 1df2b1a603cb 5.4.241-1-tlinux4-0023.7 #1 SMP Fri May 8 22:13:53 CST 2026 x86_64 GNU/Linux |
+| Kernel | Linux 5.4.241-1-tlinux4-0023.7 #1 SMP Fri May 8 22:13:53 CST 2026 x86_64 GNU/Linux |
 | Docker server | 27.5.1 |
 | Docker compose | 2.33.0 |
 | Compose project | nazoauth-extended-capacity-extended-same-user-refresh-token-rot |

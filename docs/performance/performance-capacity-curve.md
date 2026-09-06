@@ -10,7 +10,7 @@ Generated at: `2026-07-06 13:03:57 UTC`
 - [扩展容量矩阵测试总结](summaries/performance-capacity-extended-summary.md)
 - 各场景详细报告：`docs/performance/reports/**/*.md`
 - 原始结构化结果：`perf/results/capacity-*.json`
-- 测试环境记录：`perf/results/cnb-environment-*.md`
+- 测试环境记录：`perf/results/environment-*.md`
 
 ## 总览表
 

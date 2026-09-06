@@ -89,8 +89,15 @@ where
             .map_into_right_body());
     };
 
+    let tenant_id = container
+        .get::<web::Data<nazo_identity::TenantContext>>()
+        .ok_or_else(|| actix_web::error::ErrorInternalServerError("tenant context is unavailable"))?
+        .tenant_id;
     request.add_data_container(container);
-    Ok(next.call(request).await?.map_into_left_body())
+    Ok(crate::adapters::audit::REQUEST_TENANT
+        .scope(tenant_id, next.call(request))
+        .await?
+        .map_into_left_body())
 }
 
 async fn request_timeout<B>(
@@ -134,6 +141,19 @@ pub(super) async fn run(
     let bind = config.string("BIND", "0.0.0.0:8000");
     let addr: SocketAddr = bind.parse()?;
     let direct_tls = crate::bootstrap::direct_tls_listeners(&config, &route_settings)?;
+    let client_verifier = match direct_tls.as_ref() {
+        Some(listeners) => Some(listeners.client_verifier.clone()),
+        None => config
+            .optional_string("TLS_CLIENT_CA_FILE")
+            .map(|path| {
+                crate::bootstrap::transport::load_client_verifier(
+                    std::path::Path::new(&path),
+                    Arc::new(rustls::crypto::aws_lc_rs::default_provider()),
+                )
+            })
+            .transpose()?,
+    };
+    let proxy_client_verifier = client_verifier.clone();
     let ui_static_dir = crate::bootstrap::ui_release::resolve(&config).await?;
     tracing::info!("nazo-oauth-server(actix-web) listening on {addr}");
 
@@ -158,7 +178,7 @@ pub(super) async fn run(
             bind_tenant_app_data(tenant_registry.clone(), Rc::clone(&cache), request, next)
         }));
 
-        App::new()
+        let app = App::new()
             .wrap(from_fn(request_timeout))
             .wrap_fn(|req, service| {
                 let method = req.method().clone();
@@ -194,11 +214,22 @@ pub(super) async fn run(
             .app_data(control_discovery.clone())
             .app_data(control_tenant_id.clone())
             .app_data(web::Data::new(registry.clone()))
-            .service(tenant_scope)
+            .service(tenant_scope);
+        if let Some(verifier) = proxy_client_verifier.clone() {
+            app.app_data(web::Data::from(verifier))
+        } else {
+            app
+        }
     })
     .client_request_timeout(HTTP_CLIENT_REQUEST_TIMEOUT)
     .max_connections(HTTP_MAX_CONNECTIONS_PER_WORKER)
-    .on_connect(crate::http::mtls::capture_direct_tls_client_certificate);
+    .on_connect(move |io, extensions| {
+        crate::http::mtls::capture_direct_tls_client_certificate(
+            io,
+            extensions,
+            client_verifier.as_deref(),
+        );
+    });
     let (server, tls_reloader) = if let Some(listeners) = direct_tls {
         tracing::info!("nazo-oauth-server direct HTTPS listener on {addr}");
         tracing::info!(

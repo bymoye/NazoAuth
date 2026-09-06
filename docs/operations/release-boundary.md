@@ -13,8 +13,12 @@ plan names, callback paths, test headers, or build flags.
 
 The long-running runtime container contains only `nazoauth`. Its `server` entry
 point cannot mutate schema; privileged host work uses the signed controller
-protocol. External validation tooling is versioned, operated, and evidenced
-outside this repository.
+protocol. External validation tooling is versioned and operated outside this
+repository. Markdown OIDF evidence is retained under `docs/conformance/` as part
+of NazoAuth's verification record, including artifact identities, original
+outcomes, manual review, cleanup and signed evidence digests. This documentation
+is separate from the server's runtime behavior; private raw logs and test secrets
+are not packaged into the production executable or committed with the report.
 
 `crates/operator-protocol` remains the single source of controller protocol and
 cryptographic rules. Release compatibility is declared by protocol version and

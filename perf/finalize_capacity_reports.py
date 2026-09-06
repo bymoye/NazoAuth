@@ -86,7 +86,7 @@ def evidence_block(*, suffix: str, scenario: str) -> str:
     cpuset = cpuset_for_suffix(suffix)
     rows = [
         ("Source commit", run(["git", "rev-parse", "HEAD"], 4)),
-        ("Runner tag", "cnb:arch:amd64"),
+        ("Runner architecture", run(["uname", "-m"], 4)),
         ("CPU set", cpuset),
         ("CPU set size", cpuset_count(cpuset)),
         ("Capacity scenario", scenario),

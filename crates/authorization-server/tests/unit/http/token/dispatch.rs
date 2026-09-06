@@ -1424,7 +1424,7 @@ async fn token_endpoint_returns_unsupported_grant_only_after_client_authenticati
 }
 
 #[actix_web::test]
-async fn token_endpoint_identifies_mtls_client_from_verified_certificate_without_client_id() {
+async fn token_endpoint_identifies_registered_self_signed_client_without_client_id() {
     let Some(state) = live_rfc9440_token_state(AuthorizationServerProfile::Oauth2Baseline).await
     else {
         return;
@@ -1435,7 +1435,7 @@ async fn token_endpoint_identifies_mtls_client_from_verified_certificate_without
         &state,
         &client_id,
         "confidential",
-        "tls_client_auth",
+        "self_signed_tls_client_auth",
         None,
         vec!["urn:example:unsupported"],
         false,
@@ -1444,6 +1444,18 @@ async fn token_endpoint_identifies_mtls_client_from_verified_certificate_without
     )
     .await;
     set_client_mtls_thumbprint(&state, &client_id, &certificate.thumbprint).await;
+    let mut connection = get_conn(&state.diesel_db).await.unwrap();
+    sql_query("UPDATE oauth_clients SET jwks = $1 WHERE tenant_id = $2 AND client_id = $3")
+        .bind::<Jsonb, _>(json!({"keys": [{
+            "kid": "registered-client-cert",
+            "x5c": [certificate.header.trim_matches(':')]
+        }]}))
+        .bind::<diesel::sql_types::Uuid, _>(DEFAULT_TENANT_ID)
+        .bind::<Text, _>(&client_id)
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    drop(connection);
 
     let req = actix_web::test::TestRequest::post()
         .uri("/token")

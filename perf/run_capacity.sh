@@ -2,7 +2,7 @@
 set -eu
 
 if [ "${CNB_CAPACITY_SKIP_BOOTSTRAP:-0}" != "1" ]; then
-  . ./perf/cnb_bootstrap.sh
+  . ./perf/bootstrap.sh
   install_capacity_dependencies
   docker compose version >/dev/null
 fi
@@ -19,7 +19,7 @@ case "${REPORT_SUFFIX}" in
   app-cpu-*|single-instance-*) REPORT="docs/performance/reports/special/performance-capacity-curve-${REPORT_SUFFIX}.md" ;;
   *) REPORT="docs/performance/reports/main/performance-capacity-curve-${REPORT_SUFFIX}.md" ;;
 esac
-ENV_REPORT="perf/results/cnb-environment-${REPORT_SUFFIX}.md"
+ENV_REPORT="perf/results/environment-${REPORT_SUFFIX}.md"
 export CAPACITY_ENV_REPORT_PATH="${ENV_REPORT}"
 if [ "${CNB_CAPACITY_COMMIT:-1}" = "0" ]; then
   export CAPACITY_CHECKPOINT_COMMIT="${CAPACITY_CHECKPOINT_COMMIT:-0}"
@@ -110,7 +110,7 @@ fi
 PIN_TEXT="nazoauth:${APP_CPUSET_VALUE} quota=${APP_CPUS_VALUE} taskset=${APP_TASKSET_VALUE}; postgres,valkey,keyset,migrate,perf:${INFRA_CPUSET_VALUE}"
 
 if [ -n "${APP_TASKSET}" ]; then
-  CPU_MODEL_TEXT="NazoAuth is started through taskset on CPU ${APP_TASKSET}. Docker cpus/cpuset fields are still recorded, but process CPU affinity is the effective app CPU limiter in CNB nested Docker."
+  CPU_MODEL_TEXT="NazoAuth is started through taskset on CPU ${APP_TASKSET}. Docker cpus/cpuset fields are still recorded, but process CPU affinity is the effective app CPU limiter in nested Docker."
 elif [ -n "${APP_CPUS}" ]; then
   CPU_MODEL_TEXT="NazoAuth has a Docker CPU quota of ${APP_CPUS} CPU(s). PostgreSQL, Valkey, keyset, migrate, and perf use the infra CPU set and are not CPU-quota limited by this override."
 else
@@ -123,7 +123,7 @@ fi
   echo "| Field | Value |"
   echo "| --- | --- |"
   echo "| Source commit | ${CNB_COMMIT:-$(git rev-parse HEAD 2>/dev/null || echo unknown)} |"
-  echo "| Runner tag | cnb:arch:amd64 |"
+  echo "| Runner architecture | $(uname -m) |"
   echo "| Requested runner CPUs | 64 |"
   echo "| Observed logical CPUs | $(nproc --all 2>/dev/null || echo unknown) |"
   echo "| Process allowed CPUs | $(awk -F':\t' '/Cpus_allowed_list/ { print $2; exit }' /proc/self/status 2>/dev/null || echo unknown) |"
@@ -132,7 +132,7 @@ fi
   echo "| Memory total | $(awk '/MemTotal/ { printf \"%.2f GiB\", $2 / 1024 / 1024 }' /proc/meminfo 2>/dev/null || echo unknown) |"
   echo "| Cgroup memory max | $(cat /sys/fs/cgroup/memory.max 2>/dev/null || echo unknown) |"
   echo "| Workspace disk available | $(df -h . 2>/dev/null | awk 'NR==2 { print $4 " on " $6 }' || echo unknown) |"
-  echo "| Kernel | $(uname -a | sed 's/|/-/g') |"
+  echo "| Kernel | $(uname -s -r -v -m | sed 's/|/-/g') |"
   echo "| Docker server | $(docker version --format '{{.Server.Version}}' 2>/dev/null || echo unknown) |"
   echo "| Docker compose | $(docker compose version --short 2>/dev/null || echo unknown) |"
   echo "| Compose project | ${COMPOSE_PROJECT_NAME} |"
@@ -209,7 +209,7 @@ for line in env_source.splitlines():
     if len(cells) == 2:
         fields[cells[0]] = cells[1]
 
-suffix = env_path.stem.removeprefix("cnb-environment-")
+suffix = env_path.stem.removeprefix("environment-")
 results_path = Path("perf") / "results" / f"capacity-{suffix}.json"
 report_dir = target_path.parent
 env_link = Path(os.path.relpath(env_path, report_dir)).as_posix()
@@ -258,7 +258,7 @@ else:
     source = source.rstrip() + "\n\n" + evidence
 if status != 0:
     source = source.rstrip() + "\n\n## Run Status\n\n"
-    source += f"- CNB capacity run failed with exit code `{status}` before completing the full matrix.\n"
+    source += f"- Capacity run failed with exit code `{status}` before completing the full matrix.\n"
     source += "- This report may contain only successful points completed before the failure.\n"
 target_path.write_text(source, encoding="utf-8", newline="\n")
 PY
@@ -275,7 +275,7 @@ if git diff --cached --quiet; then
   exit "${status}"
 fi
 
-git commit -m "Record CNB capacity curve ${REPORT_SUFFIX}"
+git commit -m "Record capacity curve ${REPORT_SUFFIX}"
 
 BRANCH="${CNB_BRANCH:-main}"
 for attempt in 1 2 3; do

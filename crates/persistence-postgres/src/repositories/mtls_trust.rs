@@ -468,13 +468,18 @@ impl MtlsTrustAnchorRepository {
         })
     }
 
-    pub async fn active_bundle(&self, tenant_id: TenantId) -> Result<String, RepositoryError> {
+    pub async fn active_bundle(
+        &self,
+        tenant_id: TenantId,
+        client_id: Option<Uuid>,
+    ) -> Result<String, RepositoryError> {
         let mut connection = self.connection().await?;
         let rows = sql_query(
             "SELECT DISTINCT r.certificate_pem
              FROM oauth_client_mtls_trust_anchor_requests r
              JOIN oauth_clients c ON c.id = r.client_id AND c.tenant_id = r.tenant_id
              WHERE r.tenant_id = $1 AND r.status = 1 AND r.not_before <= CURRENT_TIMESTAMP
+               AND ($2::uuid IS NULL OR r.client_id = $2)
                AND r.not_after > CURRENT_TIMESTAMP AND c.is_active = TRUE
                AND (
                    c.token_endpoint_auth_method = 'tls_client_auth'
@@ -484,6 +489,7 @@ impl MtlsTrustAnchorRepository {
              LIMIT 129",
         )
         .bind::<sql_types::Uuid, _>(tenant_id.as_uuid())
+        .bind::<sql_types::Nullable<sql_types::Uuid>, _>(client_id)
         .load::<PemRow>(&mut connection)
         .await
         .map_err(map_error)?;
@@ -580,8 +586,11 @@ impl nazo_identity::ports::MtlsTrustAnchorStore for MtlsTrustAnchorRepository {
     fn active_bundle(
         &self,
         tenant_id: TenantId,
+        client_id: Option<Uuid>,
     ) -> nazo_identity::ports::RepositoryFuture<'_, String> {
-        Box::pin(async move { MtlsTrustAnchorRepository::active_bundle(self, tenant_id).await })
+        Box::pin(async move {
+            MtlsTrustAnchorRepository::active_bundle(self, tenant_id, client_id).await
+        })
     }
 }
 

@@ -149,6 +149,8 @@ impl Settings {
             .map(|tenant| tenant.issuer.clone())
             .unwrap_or_else(|| config.string("ISSUER", &public_base_url));
         validate_issuer_url(&issuer)?;
+        let transport_mode =
+            TransportMode::from_config(config.get("TRANSPORT_MODE").as_deref(), &issuer);
         let tenant = match tenant_override {
             Some(tenant) => TenantSettings {
                 context: tenant.context,
@@ -157,7 +159,25 @@ impl Settings {
                 context: nazo_identity::TenantContext::default_system(),
             },
         };
-        let mtls_endpoint_base_url = if tenant_specific {
+        let mtls_endpoint_base_url = if tenant_specific
+            && matches!(&transport_mode, Ok(TransportMode::DirectTls))
+            && let Some(configured_mtls) = config.optional_string("MTLS_ENDPOINT_BASE_URL")
+        {
+            validate_issuer_url(&configured_mtls)?;
+            let configured_mtls = Url::parse(&configured_mtls)?;
+            if configured_mtls.scheme() != "https" {
+                bail!("direct-tls transport requires an HTTPS MTLS_ENDPOINT_BASE_URL");
+            }
+            let mut tenant_mtls = Url::parse(&issuer)?;
+            // The directory owns the tenant host; the deployment owns its
+            // externally published mTLS listener port. Using the tenant's
+            // ordinary HTTPS port would advertise a listener that never
+            // requests a client certificate.
+            tenant_mtls
+                .set_port(configured_mtls.port())
+                .map_err(|()| anyhow::anyhow!("invalid tenant mTLS endpoint port"))?;
+            tenant_mtls.to_string().trim_end_matches('/').to_owned()
+        } else if tenant_specific {
             issuer.clone()
         } else {
             config
@@ -533,8 +553,7 @@ impl Settings {
             endpoint: {
                 let trusted_proxy_cidrs =
                     parse_trusted_proxy_cidrs(config.get("TRUSTED_PROXY_CIDRS"))?;
-                let transport_mode =
-                    TransportMode::from_config(config.get("TRANSPORT_MODE").as_deref(), &issuer)?;
+                let transport_mode = transport_mode?;
                 let configured_mtls_source = config
                     .get("MTLS_CERTIFICATE_SOURCE")
                     .map(|value| value.trim().to_owned())

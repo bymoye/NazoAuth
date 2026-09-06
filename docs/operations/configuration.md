@@ -355,12 +355,13 @@ source; use `disabled` when that proxy does not authenticate client certificates
 `loopback-http` rejects proxy and certificate-source settings. No public mode is
 inferred from the presence of proxy CIDRs or certificate headers.
 
-`direct-tls` serves normal HTTPS on `BIND` and client-certificate-required HTTPS
+`direct-tls` serves normal HTTPS on `BIND` and client-certificate-capable HTTPS
 on `TLS_BIND`, using the same server identity. It requires
 `TLS_CERTIFICATE_FILE`, `TLS_PRIVATE_KEY_FILE`, and `TLS_CLIENT_CA_FILE`.
 The leaf certificate must be currently valid, match the private key, and cover
 the issuer and mTLS endpoint hosts. On Unix,
-the private key must be a regular file with no group or other permission bits.
+the private key must be a regular owner-only file, or a root-owned `0640` file
+whose group is the service's effective group.
 Route the RFC 8705 mTLS endpoint aliases to `TLS_BIND`; direct mode rejects all
 proxy trust settings and derives client certificate identity only from the TLS
   session. The process revalidates the server certificate chain and private key
@@ -372,14 +373,24 @@ permissions pass. Invalid or partially installed material leaves the previous
 generation active. New handshakes use the published generation; existing
 connections keep the generation they accepted. Server-side TLS resumption is
   disabled so a new connection cannot bypass a server identity change. The
-  client-CA bundle is validated and fixed at startup; changing client trust
-  currently requires a controlled restart so one handshake cannot combine
-  server identity and client trust from different generations.
+  deployment client-CA bundle is validated and fixed at startup; changing it
+  requires a controlled restart. In proxy mode, the optional `TLS_CLIENT_CA_FILE`
+  applies the same PKI validation to the forwarded leaf and `Client-Cert-Chain`.
+  A trusted proxy must verify possession of the client private key and replace
+  incoming certificate headers; header forwarding alone does not establish CA trust.
+
+The mTLS listener verifies CertificateVerify signatures while permitting unknown
+CAs and absent certificates to reach OAuth client authentication. `tls_client_auth`
+requires the registered certificate selector and a chain trusted by either the
+deployment CA bundle or the selected tenant/client's currently approved anchors.
+Anchor revocation is checked on each authentication, including existing connections.
+`self_signed_tls_client_auth` requires the certificate registered in the client's
+JWKS. Neither an unknown CA nor a matching subject alone authenticates a client.
 The deployment owner remains responsible for crash-safe staged file activation,
 public health verification, and restoring the previous files after a failed
-rollout. Multi-identity SNI selection remains part of the tenant transport
-snapshot work; an unknown DNS SNI is rejected instead of falling back to the
-single configured identity.
+rollout. The deployment certificate may cover tenant hosts through SANs or a
+wildcard. The tenant directory remains authoritative for routing; an unknown
+Host is rejected and a differing SNI/Host pair returns 421.
 
 An active machine-resource binding is the sole authority for its managed user,
 OAuth client, mTLS anchor, or OpenID4VC dataset. Ordinary admin/SCIM writes may

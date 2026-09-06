@@ -488,7 +488,7 @@ async fn mtls_client_auth_requires_certificate_from_trusted_request_context() {
 }
 
 #[actix_web::test]
-async fn mtls_client_auth_accepts_matching_rfc9440_certificate() {
+async fn self_signed_client_auth_accepts_registered_rfc9440_certificate() {
     let state = token_management_state_with_trusted_proxy();
     let certificate = crate::test_support::rfc9440_certificate_fixture("trusted-proxy");
     let req = TestRequest::default()
@@ -501,17 +501,98 @@ async fn mtls_client_auth_accepts_matching_rfc9440_certificate() {
         .insert_header(("client-cert", certificate.header.as_str()))
         .to_http_request();
     let mut client = confidential_client_with_secret(&fixture_secret("unused"));
-    client.token_endpoint_auth_method = "tls_client_auth".to_owned();
-    client.tls_client_auth_subject_dn = Some("CN=trusted-proxy".to_owned());
-    client.tls_client_auth_cert_sha256 = Some(certificate.thumbprint);
-    let credentials = client_credentials("tls_client_auth");
+    client.token_endpoint_auth_method = "self_signed_tls_client_auth".to_owned();
+    client.jwks = Some(
+        json!({"keys": [{"kid": "registered-client-cert", "x5c": [certificate.header.trim_matches(':')]}]}),
+    );
+    let credentials = client_credentials("self_signed_tls_client_auth");
 
     assert!(
         verify_confidential_client(&state, &request_facts(&state, &req), &client, &credentials)
             .await
             .is_ok(),
-        "matching direct TLS certificate should authenticate the client"
+        "the registered self-signed certificate should authenticate through a trusted proxy"
     );
+}
+
+#[actix_web::test]
+async fn pki_client_auth_requires_both_registered_identity_and_available_trust() {
+    let state = token_management_state();
+    let mut client = confidential_client_with_secret(&fixture_secret("unused"));
+    client.token_endpoint_auth_method = "tls_client_auth".to_owned();
+    client.tls_client_auth_subject_dn = Some("CN=registered-client".to_owned());
+    let credentials = client_credentials("tls_client_auth");
+    let mut certificate = crate::http::mtls::MtlsClientCertificate {
+        subject_dn: Some("CN=registered-client".to_owned()),
+        deployment_trusted_chain: true,
+        ..Default::default()
+    };
+    assert!(
+        verify_confidential_client(
+            &state,
+            &ClientAuthRequestFacts::new("/token", Some(certificate.clone())),
+            &client,
+            &credentials,
+        )
+        .await
+        .is_ok(),
+        "deployment-verified PKI needs no client-specific trust lookup"
+    );
+    certificate.subject_dn = Some("CN=other-client".to_owned());
+    assert!(matches!(
+        verify_confidential_client(
+            &state,
+            &ClientAuthRequestFacts::new("/token", Some(certificate.clone())),
+            &client,
+            &credentials,
+        )
+        .await,
+        Err(TokenManagementClientAuthError::InvalidClient)
+    ));
+    certificate.subject_dn = client.tls_client_auth_subject_dn.clone();
+    certificate.deployment_trusted_chain = false;
+    assert!(matches!(
+        verify_confidential_client(
+            &state,
+            &ClientAuthRequestFacts::new("/token", Some(certificate)),
+            &client,
+            &credentials,
+        )
+        .await,
+        Err(TokenManagementClientAuthError::StoreUnavailable)
+    ));
+}
+
+#[actix_web::test]
+async fn pki_client_auth_rejects_matching_subject_without_an_active_client_anchor() {
+    let database_url =
+        std::env::var("NAZO_TEST_DATABASE_URL").or_else(|_| std::env::var("DATABASE_URL"));
+    let Ok(database_url) = database_url else {
+        assert!(std::env::var_os("CI").is_none(), "CI requires PostgreSQL");
+        return;
+    };
+    nazo_postgres::run_pending_migrations(&database_url)
+        .await
+        .unwrap();
+    let mut state = token_management_state();
+    state.diesel_db = create_pool(database_url, 1).unwrap();
+    let mut client = confidential_client_with_secret(&fixture_secret("unused"));
+    client.token_endpoint_auth_method = "tls_client_auth".to_owned();
+    client.tls_client_auth_subject_dn = Some("CN=registered-client".to_owned());
+    let certificate = crate::http::mtls::MtlsClientCertificate {
+        subject_dn: client.tls_client_auth_subject_dn.clone(),
+        ..Default::default()
+    };
+    assert!(matches!(
+        verify_confidential_client(
+            &state,
+            &ClientAuthRequestFacts::new("/token", Some(certificate)),
+            &client,
+            &client_credentials("tls_client_auth"),
+        )
+        .await,
+        Err(TokenManagementClientAuthError::InvalidClient)
+    ));
 }
 
 #[actix_web::test]

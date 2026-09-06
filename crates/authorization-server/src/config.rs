@@ -942,7 +942,14 @@ fn resolve_persistent_path(
             configured
         );
     }
-    Ok(resolved)
+    // Server identity reloads follow the operator's atomic activation link.
+    // Keep its pathname after checking relative-path containment, rather than
+    // pinning the certificate and key to the generation present at startup.
+    if matches!(key, "TLS_CERTIFICATE_FILE" | "TLS_PRIVATE_KEY_FILE") {
+        Ok(candidate)
+    } else {
+        Ok(resolved)
+    }
 }
 
 fn normalize_path_lexically(path: &Path) -> PathBuf {

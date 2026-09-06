@@ -30,7 +30,7 @@ For the S3-compatible adapter, set `AVATAR_OBJECT_STORE: s3` plus `AVATAR_S3_END
 
 ## Global default and tenant overrides
 
-`AVATAR_OBJECT_STORE` and the corresponding settings optionally select the deployment default. An absent tenant entry inherits that default only when it is configured. `AVATAR_TENANT_STORAGE_JSON` supplies complete configurations keyed by tenant UUID; individual fields are never merged with the default. Only `local` and `s3` are supported. R2 is an S3 configuration of the Hostinger deployment, not another adapter.
+`AVATAR_OBJECT_STORE` and the corresponding settings optionally select the deployment default. An absent tenant entry inherits that default only when it is configured. `AVATAR_TENANT_STORAGE_JSON` supplies complete configurations keyed by tenant UUID; individual fields are never merged with the default. Only `local` and `s3` are supported. R2 is an S3 configuration of the Linux validation environment deployment, not another adapter.
 
 The administrator chooses shared storage by setting `AVATAR_OBJECT_STORE`, or an allowlist by omitting it and configuring only selected tenant UUIDs in `AVATAR_TENANT_STORAGE_JSON`. No separate allowlist is maintained. If neither applies to a tenant, avatar storage is disabled; authenticated avatar requests return HTTP 403 `access_denied` with a storage-not-configured message. Authentication and authorization remain available. No local avatar directory is created for a disabled tenant.
 

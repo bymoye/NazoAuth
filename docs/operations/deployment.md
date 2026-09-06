@@ -4,6 +4,15 @@ NazoAuth has two explicit deployment contracts: Compose for source-based
 development, and the signed `nazoauthctl` lifecycle for standalone Linux
 production on Podman, Docker, or a host systemd service.
 
+Both Direct TLS listeners support TLS 1.3 and TLS 1.2. To satisfy FAPI 1
+section 8.5, TLS 1.2 accepts only `TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256`
+and `TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384`. TLS 1.3 retains AES-GCM and
+ChaCha20-Poly1305. An ECDSA server certificate therefore requires TLS 1.3;
+deploy an RSA server certificate when TLS 1.2 clients must be supported.
+For trusted-proxy deployments, configure the TLS terminator with the same
+policy. This restriction applies to server authentication, not the key
+algorithm of an OAuth client's mTLS certificate.
+
 ## Source-tree development sandbox
 
 Requirements:
@@ -99,7 +108,8 @@ For a standalone deployment without a reverse proxy, write the following to
 dedicated unprivileged service account. Replace the database and Valkey
 placeholders and the example UUIDv7 with deployment values. The certificate
 must cover `auth.example.com`; the private key must be readable by the service
-account and have no group or other permission bits.
+account and be owner-only, or root-owned mode `0640` with the service's effective
+group as its group owner. Keep all parent directories traversable by that group.
 
 ```yaml
 BIND: "0.0.0.0:8443"
@@ -129,6 +139,15 @@ gets the mTLS identity from the TLS session. In `trusted-proxy`, the proxy
 terminates public TLS and NazoAuth receives only sanitized, authenticated
 certificate evidence over the internal HTTP hop; the two modes are mutually
 exclusive.
+
+For atomic identity rotation, point `TLS_CERTIFICATE_FILE` and
+`TLS_PRIVATE_KEY_FILE` through the same operator-owned generation link, such as
+`/etc/nazoauth/tls/current/server-chain.pem` and
+`/etc/nazoauth/tls/current/server-key.pem`. The server preserves those link paths
+and validates the new certificate/key pair on each reload interval. Relative
+paths must remain inside the configuration directory when loaded.
+`TLS_CLIENT_CA_FILE` is loaded at startup; changing the server identity does not
+change the deployment's client CA trust.
 
 ## Public deployment
 

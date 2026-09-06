@@ -11,7 +11,7 @@ S3 configuration or SDK types. Static dependency checks enforce this boundary.
 
 Implementation work uses isolated branches `feat/shared-runtime-state` and
 `feat/shared-key-install`; the original checkouts and their user files remain
-unchanged. Hostinger verification uses isolated test services, never production
+unchanged. Linux validation environment verification uses isolated test services, never production
 storage or the running OIDF environment.
 
 ## Delivered behavior
@@ -46,7 +46,7 @@ storage or the running OIDF environment.
 ## Verification record
 
 The final commands, counts and proof boundaries are recorded in
-`docs/operations/shared-runtime-state-verification.md` after Hostinger acceptance.
+`docs/operations/shared-runtime-state-verification.md` after Linux validation environment acceptance.
 Targeted checks include real PostgreSQL concurrent initialization/CAS and restart,
 wrong-root rejection and rewrapping; real Valkey lease transitions; real MinIO
 signed PUT/conditional publication; and a combined A-authorize/B-finalize/B-read/

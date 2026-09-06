@@ -51,7 +51,7 @@ retries. Staging objects use the fixed `avatars/staging/` lifecycle prefix.
 The combined test exercises the production service and all concrete adapters;
 it does not start two authenticated HTTP server processes. Backend integration
 cases require the explicit test environment; a local environment-free skip is
-not operational evidence. The final Hostinger results are recorded with the
+not operational evidence. The final Linux validation environment results are recorded with the
 shared-runtime-state acceptance record.
 
 ## Operational boundary

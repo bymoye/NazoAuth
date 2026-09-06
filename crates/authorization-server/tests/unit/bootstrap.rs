@@ -2,6 +2,10 @@ use super::*;
 use actix_web::http::header;
 use actix_web::{App, HttpRequest, HttpResponse, HttpServer, test as actix_test, web};
 
+#[path = "bootstrap/client_certificate_proof.rs"]
+mod client_certificate_proof;
+#[path = "bootstrap/tls_cipher_policy.rs"]
+mod tls_cipher_policy;
 #[path = "bootstrap/transport_mode_parity.rs"]
 mod transport_mode_parity;
 
@@ -21,6 +25,18 @@ fn write_test_tls_material_with_expired_server(
     root: &std::path::Path,
     expired_server: bool,
 ) -> TestTlsMaterial {
+    write_test_tls_material_with_server_algorithm(
+        root,
+        expired_server,
+        &rcgen::PKCS_ECDSA_P256_SHA256,
+    )
+}
+
+fn write_test_tls_material_with_server_algorithm(
+    root: &std::path::Path,
+    expired_server: bool,
+    server_algorithm: &'static rcgen::SignatureAlgorithm,
+) -> TestTlsMaterial {
     use rcgen::{
         BasicConstraints, CertificateParams, CertifiedIssuer, ExtendedKeyUsagePurpose, IsCa,
         KeyPair, KeyUsagePurpose, PKCS_ECDSA_P256_SHA256,
@@ -32,7 +48,7 @@ fn write_test_tls_material_with_expired_server(
     ca_params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
     let ca = CertifiedIssuer::self_signed(ca_params, ca_key).unwrap();
 
-    let server_key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).unwrap();
+    let server_key = KeyPair::generate_for(server_algorithm).unwrap();
     let mut server_params = CertificateParams::new(vec!["localhost".to_owned()]).unwrap();
     server_params.is_ca = IsCa::NoCa;
     server_params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
@@ -392,6 +408,49 @@ fn direct_tls_listener_loads_a_complete_mutual_tls_identity() {
             .is_some()
     );
     assert!(listeners.snapshots.server_key_for(None).is_none());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+#[cfg(unix)]
+fn direct_tls_key_permissions_allow_only_a_root_owned_service_group_reader() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let root = std::env::temp_dir().join(format!("nazoauth-tls-key-mode-{}", uuid::Uuid::now_v7()));
+    std::fs::create_dir(&root).unwrap();
+    let material = write_test_tls_material(&root);
+    let config = direct_tls_config(&material);
+    let settings = Settings::from_config(&config).unwrap();
+    for mode in [0o644, 0o660, 0o604, 0o640] {
+        std::fs::set_permissions(
+            &material.private_key_path,
+            std::fs::Permissions::from_mode(mode),
+        )
+        .unwrap();
+        let result = direct_tls_listeners(&config, &settings);
+        assert_eq!(
+            result.is_ok(),
+            mode == 0o640 && rustix::process::geteuid().is_root(),
+            "unexpected key permission admission for {mode:o}"
+        );
+    }
+    if rustix::process::geteuid().is_root() {
+        let service_gid = rustix::process::getegid();
+        rustix::fs::chown(
+            &material.private_key_path,
+            Some(rustix::process::Uid::ROOT),
+            Some(rustix::process::Gid::from_raw(service_gid.as_raw() + 1)),
+        )
+        .unwrap();
+        assert!(direct_tls_listeners(&config, &settings).is_err());
+        rustix::fs::chown(
+            &material.private_key_path,
+            Some(rustix::process::Uid::from_raw(10001)),
+            Some(service_gid),
+        )
+        .unwrap();
+        assert!(direct_tls_listeners(&config, &settings).is_err());
+    }
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -787,15 +846,22 @@ fn direct_tls_generation_rejects_partial_material_and_retains_last_known_good() 
 
 #[actix_web::test]
 async fn direct_tls_new_handshakes_switch_server_identity_without_reloading_client_ca() {
-    let active_root =
-        std::env::temp_dir().join(format!("nazoauth-tls-active-{}", uuid::Uuid::now_v7()));
-    let next_root =
-        std::env::temp_dir().join(format!("nazoauth-tls-next-{}", uuid::Uuid::now_v7()));
-    std::fs::create_dir(&active_root).unwrap();
+    let root = std::env::temp_dir().join(format!("nazoauth-tls-identity-{}", uuid::Uuid::now_v7()));
+    let active_root = root.join("generation-a");
+    let next_root = root.join("generation-b");
+    std::fs::create_dir_all(&active_root).unwrap();
     std::fs::create_dir(&next_root).unwrap();
     let active = write_test_tls_material(&active_root);
     let next = write_test_tls_material(&next_root);
-    let config = ConfigSource::from_owned_pairs_for_test([
+    #[cfg(unix)]
+    let identity_root = {
+        let current = root.join("current");
+        std::os::unix::fs::symlink("generation-a", &current).unwrap();
+        current
+    };
+    #[cfg(not(unix))]
+    let identity_root = active_root.clone();
+    let values = std::collections::BTreeMap::from([
         ("BIND".to_owned(), "127.0.0.1:0".to_owned()),
         ("PUBLIC_BASE_URL".to_owned(), "https://localhost".to_owned()),
         (
@@ -806,17 +872,23 @@ async fn direct_tls_new_handshakes_switch_server_identity_without_reloading_clie
         ("TLS_BIND".to_owned(), "127.0.0.1:1".to_owned()),
         (
             "TLS_CERTIFICATE_FILE".to_owned(),
-            active.certificate_path.clone(),
+            identity_root.join("server.pem").display().to_string(),
         ),
         (
             "TLS_PRIVATE_KEY_FILE".to_owned(),
-            active.private_key_path.clone(),
+            identity_root.join("server.key").display().to_string(),
         ),
         (
             "TLS_CLIENT_CA_FILE".to_owned(),
             active.client_ca_path.clone(),
         ),
     ]);
+    std::fs::write(
+        root.join(".env.yaml"),
+        yaml_serde::to_string(&values).unwrap(),
+    )
+    .unwrap();
+    let config = ConfigSource::load_from_dir(&root).unwrap();
     let settings = Settings::from_config(&config).unwrap();
     let listeners = direct_tls_listeners(&config, &settings).unwrap().unwrap();
     let snapshots = listeners.snapshots.clone();
@@ -829,9 +901,31 @@ async fn direct_tls_new_handshakes_switch_server_identity_without_reloading_clie
     let public_server = public_builder.run();
     let public_handle = public_server.handle();
     actix_web::rt::spawn(public_server);
-    let mtls_builder = HttpServer::new(probe)
-        .bind_rustls_0_23(("127.0.0.1", 0), listeners.mtls)
-        .unwrap();
+    let client_verifier = listeners.client_verifier.clone();
+    let mtls_builder = HttpServer::new(|| {
+        App::new().route(
+            "/probe",
+            web::get().to(|request: actix_web::HttpRequest| async move {
+                if request
+                    .conn_data::<crate::http::mtls::MtlsClientCertificate>()
+                    .is_some_and(|certificate| certificate.deployment_trusted_chain)
+                {
+                    "trusted"
+                } else {
+                    "untrusted"
+                }
+            }),
+        )
+    })
+    .on_connect(move |io, extensions| {
+        crate::http::mtls::capture_direct_tls_client_certificate(
+            io,
+            extensions,
+            Some(client_verifier.as_ref()),
+        );
+    })
+    .bind_rustls_0_23(("127.0.0.1", 0), listeners.mtls)
+    .unwrap();
     let mtls_address = mtls_builder.addrs()[0];
     let mtls_server = mtls_builder.run();
     let mtls_handle = mtls_server.handle();
@@ -896,20 +990,38 @@ async fn direct_tls_new_handshakes_switch_server_identity_without_reloading_clie
         "ok"
     );
     assert!(next_public.get(&public_url).send().await.is_err());
-    assert!(active_client.get(&mtls_url).send().await.is_ok());
-    assert!(next_client.get(&mtls_url).send().await.is_err());
+    assert_eq!(
+        active_client
+            .get(&mtls_url)
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap(),
+        "trusted"
+    );
+    assert_eq!(
+        next_client
+            .get(&mtls_url)
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap(),
+        "untrusted"
+    );
 
-    std::fs::copy(&next.certificate_path, &active.certificate_path).unwrap();
-    std::fs::copy(&next.private_key_path, &active.private_key_path).unwrap();
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt as _;
-
-        std::fs::set_permissions(
-            &active.private_key_path,
-            std::fs::Permissions::from_mode(0o600),
-        )
-        .unwrap();
+        std::os::unix::fs::symlink("generation-b", root.join("next")).unwrap();
+        std::fs::rename(root.join("next"), root.join("current")).unwrap();
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::copy(&next.certificate_path, &active.certificate_path).unwrap();
+        std::fs::copy(&next.private_key_path, &active.private_key_path).unwrap();
     }
     assert_eq!(
         snapshots.reload().unwrap(),
@@ -931,13 +1043,32 @@ async fn direct_tls_new_handshakes_switch_server_identity_without_reloading_clie
             .unwrap(),
         "ok"
     );
-    assert!(active_client.get(&mtls_url).send().await.is_ok());
-    assert!(next_client.get(&mtls_url).send().await.is_err());
+    assert_eq!(
+        active_client
+            .get(&mtls_url)
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap(),
+        "trusted"
+    );
+    assert_eq!(
+        next_client
+            .get(&mtls_url)
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap(),
+        "untrusted"
+    );
 
     public_handle.stop(true).await;
     mtls_handle.stop(true).await;
-    std::fs::remove_dir_all(active_root).unwrap();
-    std::fs::remove_dir_all(next_root).unwrap();
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[actix_web::test]
@@ -991,7 +1122,9 @@ async fn direct_tls_serves_real_https_and_mtls_without_trusting_forged_headers()
             )
     };
     let public_builder = HttpServer::new(probe)
-        .on_connect(crate::http::mtls::capture_direct_tls_client_certificate)
+        .on_connect(|io, extensions| {
+            crate::http::mtls::capture_direct_tls_client_certificate(io, extensions, None);
+        })
         .bind_rustls_0_23(("127.0.0.1", 0), listeners.public)
         .unwrap();
     let public_address = public_builder.addrs()[0];
@@ -1000,7 +1133,9 @@ async fn direct_tls_serves_real_https_and_mtls_without_trusting_forged_headers()
     actix_web::rt::spawn(public_server);
 
     let mtls_builder = HttpServer::new(probe)
-        .on_connect(crate::http::mtls::capture_direct_tls_client_certificate)
+        .on_connect(|io, extensions| {
+            crate::http::mtls::capture_direct_tls_client_certificate(io, extensions, None);
+        })
         .bind_rustls_0_23(("127.0.0.1", 0), listeners.mtls)
         .unwrap();
     let mtls_address = mtls_builder.addrs()[0];
@@ -1046,9 +1181,10 @@ async fn direct_tls_serves_real_https_and_mtls_without_trusting_forged_headers()
         .get(format!("https://localhost:{}/probe", mtls_address.port()))
         .send()
         .await;
-    assert!(
-        anonymous_mtls.is_err(),
-        "mTLS alias must reject anonymous TLS"
+    assert_eq!(
+        anonymous_mtls.unwrap().text().await.unwrap(),
+        "none",
+        "missing client certificates must reach OAuth as absent credentials"
     );
 
     let identity = reqwest::Identity::from_pem(material.client_identity_pem.as_bytes())

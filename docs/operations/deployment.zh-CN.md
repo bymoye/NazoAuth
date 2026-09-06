@@ -79,8 +79,8 @@ role 执行迁移，再使用独立的 runtime role 启动服务。迁移启动�
 
 不使用反向代理的独立部署，应将以下内容写入 server 工作目录中的 `.env.yaml`，并以专用的
 非特权 service account 运行 `nazoauth server`。请替换数据库和 Valkey 占位值，以及示例中的
-UUIDv7。证书必须覆盖 `auth.example.com`；私钥必须让 service account 可读，并且不能带有
-group 或 other 权限位。
+UUIDv7。证书必须覆盖 `auth.example.com`；私钥必须让 service account 可读，使用仅属主可读写
+的权限，或 root 所有、属组为服务有效组的 `0640`。父目录必须允许该组穿越。
 
 ```yaml
 BIND: "0.0.0.0:8443"
