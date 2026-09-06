@@ -41,9 +41,7 @@ impl std::fmt::Debug for SuppliedClientSecret {
 
 impl Drop for SuppliedClientSecret {
     fn drop(&mut self) {
-        for byte in &mut self.0 {
-            *byte = 0;
-        }
+        self.0.fill(0);
     }
 }
 

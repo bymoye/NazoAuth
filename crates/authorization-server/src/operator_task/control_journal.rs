@@ -71,10 +71,9 @@
 //! ```
 
 use std::fs::{self, OpenOptions};
-use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context as _, bail};
+use anyhow::bail;
 use chrono::Utc;
 use nazo_operator_protocol::{
     CONTROL_RESULT_SCHEMA, ControlErrorCode, ControlOperation, ControlOutcome, ControlResult,

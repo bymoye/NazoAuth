@@ -1,11 +1,11 @@
 use std::collections::BTreeMap;
 
-use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use nazo_operator_protocol::{
     MAX_TENANT_RESOURCE_IDENTITIES, TenantResourceIdentity, TenantResourceKind,
     TenantResourceMapping,
 };
-use sha2::{Digest as _, Sha256};
+use sha2::Sha256;
 
 use super::*;
 

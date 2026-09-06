@@ -16,7 +16,7 @@
 
 use std::{io::Cursor, path::Path};
 
-use anyhow::{Context as _, bail};
+use anyhow::bail;
 use yaml_serde::Value as YamlValue;
 
 use super::*;

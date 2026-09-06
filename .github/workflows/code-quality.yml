@@ -118,7 +118,7 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: dtolnay/rust-toolchain@46511b1c83438f0dd37c02d843619ece5a4abb5b # 1.97.1
+      - uses: dtolnay/rust-toolchain@62ae3a85dbdd2bedbb5819da8ce45635129289a1 # 1.98.0
         with:
           components: rustfmt, clippy
 
@@ -169,7 +169,7 @@ jobs:
         run: cargo fmt --check
 
       - name: Clippy all targets
-        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+        run: cargo clippy --workspace --all-targets --all-features --locked --keep-going -- -D warnings
 
       - name: Materialize the isolated CI schema through the persistence owner
         run: >-
@@ -188,7 +188,7 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: dtolnay/rust-toolchain@46511b1c83438f0dd37c02d843619ece5a4abb5b # 1.97.1
+      - uses: dtolnay/rust-toolchain@62ae3a85dbdd2bedbb5819da8ce45635129289a1 # 1.98.0
 
       - name: Install pinned nightly and cargo-fuzz
         run: |
