@@ -1,13 +1,9 @@
 use super::*;
 
-fn fixture_password(label: &str) -> String {
-    format!("password-policy-fixture-{label}-{}", Uuid::now_v7())
-}
-
 #[test]
 fn password_hash_policy_is_explicit_argon2id_v19() {
-    let password = fixture_password("registered");
-    let wrong_password = fixture_password("presented");
+    let password = Uuid::now_v7().to_string();
+    let wrong_password = Uuid::now_v7().to_string();
     let hash = hash_password(&password).expect("password should hash");
     let second_hash = hash_password(&password).expect("same password should hash again");
 
