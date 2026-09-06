@@ -1,0 +1,5 @@
+# Actix 4.15 HttpResponse is 128 bytes on our 64-bit targets. HTTP adapters
+# return these already-materialized responses directly through Result; another
+# allocation solely to satisfy this heuristic would not simplify that boundary.
+# Clippy warns at >= the threshold, so retain the lint for errors above 128 bytes.
+large-error-threshold = 129
