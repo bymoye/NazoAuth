@@ -9,8 +9,14 @@ fn password_hash_policy_is_explicit_argon2id_v19() {
     let password = fixture_password("registered");
     let wrong_password = fixture_password("presented");
     let hash = hash_password(&password).expect("password should hash");
+    let second_hash = hash_password(&password).expect("same password should hash again");
 
     assert!(hash.starts_with("$argon2id$v=19$m=19456,t=2,p=1$"));
+    let first_salt = PasswordHash::new(&hash).unwrap().salt.unwrap();
+    let second_salt = PasswordHash::new(&second_hash).unwrap().salt.unwrap();
+    assert_eq!(first_salt.as_ref().len(), 16);
+    assert_eq!(second_salt.as_ref().len(), 16);
+    assert_ne!(first_salt, second_salt);
     let parsed = nazo_identity::PasswordHash::new(hash).expect("valid password hash");
     assert!(parsed.verify_password(&password));
     assert!(!parsed.verify_password(&wrong_password));
