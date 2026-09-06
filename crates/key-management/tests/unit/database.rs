@@ -3,7 +3,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use nazo_auth::SigningPurpose;
 use nazo_digital_credentials::{
     CertificateRevocationEntry, CertificateRevocationSnapshot, CertificateRevocationStatus,

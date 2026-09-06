@@ -169,7 +169,7 @@ jobs:
         run: cargo fmt --check
 
       - name: Clippy all targets
-        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+        run: cargo clippy --workspace --all-targets --all-features --locked --keep-going -- -D warnings
 
       - name: Materialize the isolated CI schema through the persistence owner
         run: >-
