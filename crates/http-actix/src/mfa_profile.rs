@@ -268,7 +268,7 @@ pub async fn mfa_totp_begin(
 ) -> HttpResponse {
     let context = match request_context(&endpoint, &request) {
         Ok(context) => context,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     match endpoint.operations.begin_totp(context).await {
         Ok(enrollment) => json_response_no_store(json!({
@@ -288,7 +288,7 @@ pub async fn mfa_totp_confirm(
 ) -> HttpResponse {
     let context = match request_context(&endpoint, &request) {
         Ok(context) => context,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     match endpoint
         .operations
@@ -317,7 +317,7 @@ pub async fn mfa_verify(
 ) -> HttpResponse {
     let context = match request_context(&endpoint, &request) {
         Ok(context) => context,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     match endpoint
         .operations
@@ -358,7 +358,7 @@ pub async fn mfa_step_up(
 ) -> HttpResponse {
     let context = match request_context(&endpoint, &request) {
         Ok(context) => context,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     match endpoint
         .operations
@@ -387,7 +387,7 @@ pub async fn mfa_backup_codes_regenerate(
 ) -> HttpResponse {
     let context = match request_context(&endpoint, &request) {
         Ok(context) => context,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     match endpoint
         .operations
@@ -413,7 +413,7 @@ pub async fn mfa_disable(
 ) -> HttpResponse {
     let context = match request_context(&endpoint, &request) {
         Ok(context) => context,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     match endpoint
         .operations
@@ -438,20 +438,20 @@ pub async fn mfa_disable(
 fn request_context(
     endpoint: &MfaProfileEndpoint,
     request: &HttpRequest,
-) -> Result<MfaRequestContext, HttpResponse> {
+) -> Result<MfaRequestContext, Box<HttpResponse>> {
     if !has_valid_csrf_token_for_cookies(
         request,
         None,
         &endpoint.config.session_cookie_name,
         &endpoint.config.csrf_cookie_name,
     ) {
-        return Err(crate::csrf_error());
+        return Err(Box::new(crate::csrf_error()));
     }
     let Some(session_id) = cookie_value(request, &endpoint.config.session_cookie_name) else {
-        return Err(clear_session_cookies(
+        return Err(Box::new(clear_session_cookies(
             endpoint,
             authorization_error_response(StatusCode::UNAUTHORIZED, "login_required", "请求失败."),
-        ));
+        )));
     };
     let user_agent_hash = request
         .headers()

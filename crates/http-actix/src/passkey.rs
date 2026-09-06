@@ -276,7 +276,7 @@ pub async fn passkey_registration_begin(
     };
     let context = match profile_context(&endpoint, &request, true) {
         Ok(context) => context,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     match endpoint
         .operations
@@ -301,7 +301,7 @@ pub async fn passkey_registration_finish(
     };
     let context = match profile_context(&endpoint, &request, true) {
         Ok(context) => context,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     match endpoint
         .operations
@@ -323,7 +323,7 @@ pub async fn passkey_list(
 ) -> HttpResponse {
     let context = match profile_context(&endpoint, &request, false) {
         Ok(context) => context,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     match endpoint.operations.list(context).await {
         Ok(credentials) => passkey_list_response(&credentials),
@@ -338,7 +338,7 @@ pub async fn passkey_delete(
 ) -> HttpResponse {
     let context = match profile_context(&endpoint, &request, true) {
         Ok(context) => context,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     match endpoint.operations.delete(context, path.into_inner()).await {
         Ok(()) => empty_response_no_store(StatusCode::NO_CONTENT),
@@ -355,7 +355,7 @@ fn profile_context(
     endpoint: &PasskeyProfileEndpoint,
     request: &HttpRequest,
     require_csrf: bool,
-) -> Result<PasskeyProfileContext, HttpResponse> {
+) -> Result<PasskeyProfileContext, Box<HttpResponse>> {
     if require_csrf
         && !has_valid_csrf_token_for_cookies(
             request,
@@ -364,10 +364,10 @@ fn profile_context(
             &endpoint.config.csrf_cookie_name,
         )
     {
-        return Err(no_store_response(csrf_error()));
+        return Err(Box::new(no_store_response(csrf_error())));
     }
     let Some(session_id) = cookie_value(request, &endpoint.config.session_cookie_name) else {
-        return Err(login_required_response(endpoint));
+        return Err(Box::new(login_required_response(endpoint)));
     };
     Ok(PasskeyProfileContext {
         session_id,

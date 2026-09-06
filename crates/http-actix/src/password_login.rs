@@ -114,7 +114,7 @@ async fn login_inner(
 ) -> HttpResponse {
     let (payload, response_mode) = match parse_login_request(&request, &body) {
         Ok(value) => value,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     if matches!(response_mode, LoginResponseMode::Form)
         && !form_login_origin_is_allowed(&endpoint.config, &request)
@@ -291,7 +291,7 @@ fn blake3_hex(value: &str) -> String {
 fn parse_login_request(
     request: &HttpRequest,
     body: &Bytes,
-) -> Result<(LoginRequest, LoginResponseMode), HttpResponse> {
+) -> Result<(LoginRequest, LoginResponseMode), Box<HttpResponse>> {
     let content_type = request
         .headers()
         .get(header::CONTENT_TYPE)
@@ -319,14 +319,14 @@ fn parse_login_request(
         })?;
         return parse_login_form(raw).map(|payload| (payload, LoginResponseMode::Form));
     }
-    Err(oauth_error(
+    Err(Box::new(oauth_error(
         StatusCode::UNSUPPORTED_MEDIA_TYPE,
         "invalid_request",
         "login request must use JSON or form encoding.",
-    ))
+    )))
 }
 
-fn parse_login_form(raw: &str) -> Result<LoginRequest, HttpResponse> {
+fn parse_login_form(raw: &str) -> Result<LoginRequest, Box<HttpResponse>> {
     let mut email = None;
     let mut password = None;
     let mut next = None;
@@ -339,18 +339,18 @@ fn parse_login_form(raw: &str) -> Result<LoginRequest, HttpResponse> {
         }
     }
     let Some(email) = email else {
-        return Err(oauth_error(
+        return Err(Box::new(oauth_error(
             StatusCode::BAD_REQUEST,
             "invalid_request",
             "email is required.",
-        ));
+        )));
     };
     let Some(password) = password else {
-        return Err(oauth_error(
+        return Err(Box::new(oauth_error(
             StatusCode::BAD_REQUEST,
             "invalid_request",
             "password is required.",
-        ));
+        )));
     };
     Ok(LoginRequest {
         email,
@@ -359,13 +359,13 @@ fn parse_login_form(raw: &str) -> Result<LoginRequest, HttpResponse> {
     })
 }
 
-fn assign_once(slot: &mut Option<String>, value: String) -> Result<(), HttpResponse> {
+fn assign_once(slot: &mut Option<String>, value: String) -> Result<(), Box<HttpResponse>> {
     if slot.is_some() {
-        return Err(oauth_error(
+        return Err(Box::new(oauth_error(
             StatusCode::BAD_REQUEST,
             "invalid_request",
             "duplicate login form parameter.",
-        ));
+        )));
     }
     *slot = Some(value);
     Ok(())
