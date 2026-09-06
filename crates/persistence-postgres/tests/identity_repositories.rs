@@ -1,4 +1,4 @@
-use argon2::{Argon2, PasswordHasher, password_hash::SaltString};
+use argon2::{Argon2, PasswordHasher};
 use diesel::{
     QueryableByName, sql_query,
     sql_types::{Jsonb, Text, Uuid as SqlUuid},
@@ -805,9 +805,8 @@ async fn backup_code_is_consumed_once_atomically() {
         return;
     };
     let code = "ABCD-EFGH";
-    let salt = SaltString::encode_b64(b"0123456789abcdef").unwrap();
     let hash = Argon2::default()
-        .hash_password(code.as_bytes(), &salt)
+        .hash_password_with_salt(code.as_bytes(), b"0123456789abcdef")
         .unwrap()
         .to_string();
     let repository = mfa_repository(pool.clone());

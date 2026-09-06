@@ -13,8 +13,6 @@ use argon2::Argon2;
 use argon2::PasswordHash;
 use argon2::PasswordHasher;
 use argon2::PasswordVerifier;
-use argon2::password_hash::SaltString;
-use argon2::password_hash::rand_core::OsRng;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use chrono::Utc;
@@ -80,9 +78,8 @@ pub(crate) fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
 }
 
 pub(crate) fn hash_password(password: &str) -> argon2::password_hash::Result<String> {
-    let salt = SaltString::generate(&mut OsRng);
     Ok(password_hasher()
-        .hash_password(password.as_bytes(), &salt)?
+        .hash_password(password.as_bytes())?
         .to_string())
 }
 
