@@ -1,6 +1,6 @@
 # OIDF and transport acceptance: candidate, 2026-09-06
 
-Status: candidate engineering acceptance complete. Distributed Release acceptance, final CI and issue closure remain pending.
+Status: historical candidate engineering acceptance complete. Subsequent published-artifact acceptance and final checks are recorded in [official-release evidence](oidf-2026-09-06-official-release.md). The candidate results and identities below remain unchanged.
 
 Server SHA-256: `b59be9638241f46b5dfbd1c9904a7d6e014ba781757e891974569e128c74464e`.
 Controller SHA-256: `10832978b3b36c120142325230d147ea3f2ee51ab7c9554094ae42338cc8b97e`.
