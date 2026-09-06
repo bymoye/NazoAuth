@@ -2,7 +2,7 @@
 set -eu
 
 echo "extended capacity matrix bootstrap started $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
-. ./perf/cnb_bootstrap.sh
+. ./perf/bootstrap.sh
 install_capacity_dependencies
 docker compose version >/dev/null
 
@@ -88,12 +88,12 @@ commit_extended_report() {
   suffix="$1"
   report="$(extended_report_path "${suffix}")"
   results="perf/results/capacity-extended-${suffix}.json"
-  env_report="perf/results/cnb-environment-extended-${suffix}.md"
+  env_report="perf/results/environment-extended-${suffix}.md"
   if [ ! -f "${report}" ]; then
     echo "extended capacity report not found for ${suffix}: ${report}"
     return 0
   fi
-  git add perf/capacity.py perf/cnb_capacity.sh perf/cnb_extended_capacity_matrix.sh perf/k6/oauth.js perf/runner.py perf/seed.py
+  git add perf/capacity.py perf/run_capacity.sh perf/extended_capacity_matrix.sh perf/k6/oauth.js perf/runner.py perf/seed.py
   git add "${report}"
   [ -f "${results}" ] && git add -f "${results}" || true
   [ -f "${env_report}" ] && git add -f "${env_report}" || true
@@ -101,7 +101,7 @@ commit_extended_report() {
     echo "No extended capacity report changes to commit for ${suffix}."
     return 0
   fi
-  git commit -m "Record CNB extended capacity ${suffix}"
+  git commit -m "Record extended capacity ${suffix}"
   push_capacity_commit
 }
 
@@ -124,7 +124,7 @@ run_extended_child() {
     export CNB_CAPACITY_SKIP_BOOTSTRAP=1
     export CNB_CAPACITY_COMMIT=0
     export CNB_BUILD_ID="${CNB_BUILD_ID:-extended-capacity}"
-    ./perf/cnb_capacity.sh
+    ./perf/run_capacity.sh
   ) >"${log_path}" 2>&1 &
   echo "$! ${suffix} ${log_path}" >>"${children_file}"
 }
@@ -185,11 +185,11 @@ kill "${reporter_pid}" 2>/dev/null || true
 wait "${reporter_pid}" 2>/dev/null || true
 
 if find docs/performance/reports/extended -maxdepth 1 -name 'performance-capacity-curve-extended-*.md' -print -quit | grep -q .; then
-  git add perf/capacity.py perf/cnb_capacity.sh perf/cnb_extended_capacity_matrix.sh perf/k6/oauth.js perf/runner.py perf/seed.py docs/performance/reports/extended/performance-capacity-curve-extended-*.md
+  git add perf/capacity.py perf/run_capacity.sh perf/extended_capacity_matrix.sh perf/k6/oauth.js perf/runner.py perf/seed.py docs/performance/reports/extended/performance-capacity-curve-extended-*.md
   if git diff --cached --quiet; then
     echo "No extended capacity changes to commit."
   else
-    git commit -m "Record CNB extended capacity matrix"
+    git commit -m "Record extended capacity matrix"
     push_capacity_commit
   fi
 else

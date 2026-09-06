@@ -93,7 +93,7 @@ run_child() {
     export CNB_REPO_SLUG="nazo_zero/NazoAuth"
     export CNB_BRANCH="$(git branch --show-current 2>/dev/null || echo main)"
     export CNB_COMMIT="$(git rev-parse HEAD)"
-    ./perf/cnb_capacity.sh
+    ./perf/run_capacity.sh
   ) >"${log_path}" 2>&1 &
   echo "$! ${suffix} ${log_path}" >>"${children_file}"
 }

@@ -30,7 +30,7 @@ scenario-level reports are grouped below `reports/`.
 - Benchmark runner instructions live in [`../../perf/README.md`](../../perf/README.md).
 - Scenario reports intentionally keep only a compact evidence table, capacity
   curve table, and step breakdown. Repeated runner topology belongs in the
-  linked `perf/results/cnb-environment-*.md` capture instead of being copied
+  linked `perf/results/environment-*.md` capture instead of being copied
   into every report.
 
 ## Common Semantics

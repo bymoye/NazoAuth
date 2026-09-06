@@ -2,34 +2,29 @@
 
 | Field | Value |
 | --- | --- |
-| Source commit | 712be1e9025a35ede9311aa1073d34e319d332db |
-| Runner tag | cnb:arch:amd64 |
+| Source commit | fa2a0e770c3d6482a90f5b7c9d92891a440bcde6 |
+| Runner architecture | x86_64 |
 | Requested runner CPUs | 64 |
 | Observed logical CPUs | 384 |
-| Process allowed CPUs | 83-146 |
+| Process allowed CPUs | 161-224 |
 | Observed CPU model | AMD EPYC 9K65 192-Core Processor |
 | Cgroup CPU max | unknown |
 | Memory total | unknown |
 | Cgroup memory max | unknown |
-| Workspace disk available | 512G on /workspace |
-| Kernel | Linux 6ec5bafaebc0 5.4.241-1-tlinux4-0023.7 #1 SMP Fri May 8 22:13:53 CST 2026 x86_64 GNU/Linux |
+| Workspace disk available | unknown |
+| Kernel | Linux 5.4.241-1-tlinux4-0023.7 #1 SMP Fri May 8 22:13:53 CST 2026 x86_64 GNU/Linux |
 | Docker server | 27.5.1 |
 | Docker compose | 2.33.0 |
-| Compose project | nazoauth-local-app-cpu-1vcpu-smoke |
-| Compose files | docker-compose.perf.yml + perf/results/docker-compose.cpuset-app-cpu-1vcpu-smoke.yml |
-| CPU set | unrestricted |
-| CPU set size | app=unrestricted, infra=unrestricted |
-| App CPU set | unrestricted |
-| App CPU set size | unrestricted |
-| App CPU quota | 1 |
-| Infra CPU set | unrestricted |
-| Infra CPU set size | unrestricted |
-| Services pinned to CPU set | nazoauth:unrestricted quota=1; postgres,valkey,keyset,migrate,perf:unrestricted |
-| Per-container CPU model | NazoAuth has a Docker CPU quota of 1 CPU(s). PostgreSQL, Valkey, keyset, migrate, and perf use the infra CPU set and are not CPU-quota limited by this override. |
-| Capacity scenarios | token_only_client_credentials |
-| Duration per point | 2m |
-| App instance stages | 1 NazoAuth replica(s) |
-| Explicit rates | 100,250,500 |
+| Compose project | nazoauth-extended-capacity-extended-revoke-refresh-token |
+| Compose files | docker-compose.perf.yml + perf/results/docker-compose.cpuset-extended-revoke-refresh-token.yml |
+| CPU set | 185-190 |
+| CPU set size | 6 |
+| Services pinned to CPU set | postgres, valkey, keyset, migrate, nazoauth, perf |
+| Per-container CPU model | Docker cpuset isolation; no CPU quota. Each service container may run on the listed CPU set. NazoAuth is additionally scaled by the stage instance count. |
+| Capacity scenarios | revoke_refresh_token |
+| Duration per point | 30m |
+| App instance stages | 1,2,4 NazoAuth replica(s) |
+| Explicit rates | 16,32,64,128,256 |
 | Load executor | k6 constant-arrival-rate, time unit 1s |
 | Token-only target rates | 1000, 2500, 5000, 7500, 10000 flow/s |
 | OIDC cold/login and logged-in target rates | 16, 32, 64, 128, 256 flow/s |

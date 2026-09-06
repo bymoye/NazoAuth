@@ -2,7 +2,7 @@
 set -eu
 
 if [ "${CNB_CAPACITY_SKIP_BOOTSTRAP:-0}" != "1" ]; then
-  . ./perf/cnb_bootstrap.sh
+  . ./perf/bootstrap.sh
   install_capacity_dependencies
   docker compose version >/dev/null
 fi
@@ -92,4 +92,4 @@ echo "infra_cpuset=${PERF_INFRA_CPUSET}"
 echo "report=docs/performance/reports/special/performance-capacity-curve-${suffix}.md"
 echo "results=perf/results/capacity-${suffix}.json"
 
-./perf/cnb_capacity.sh
+./perf/run_capacity.sh

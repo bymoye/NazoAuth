@@ -1,4 +1,4 @@
-# OIDF and transport acceptance: Hostinger candidate, 2026-09-06
+# OIDF and transport acceptance: candidate, 2026-09-06
 
 Status: candidate engineering acceptance complete. Distributed Release acceptance, final CI and issue closure remain pending.
 
@@ -15,7 +15,7 @@ All 84 REVIEW records were individually examined. Each mode has 25 actual VP PNG
 
 Both modes passed fresh tenant-boundary requests, controller-absent protocol requests, and protocol requests after certificate transactions. Temporary tenants and clients were removed through ordinary APIs. Public certificate evidence covers import/bootstrap, real ACME initial issuance and renewal with key rotation, deadline and mismatch rejection, reload failure, public endpoint failure, forced controller termination, fencing and ordinary recovery. The native proxy transaction additionally exercised invalid native syntax and rollback failure followed by recovery. Four real certificates were issued across the two modes. Historical harness failures and corrected resumptions are retained.
 
-Shared Angie configuration was restored: the 13 original configuration hashes match their baseline, the two task-owned shared ingress configurations were retired, native validation succeeded, existing site responses remained within observed baseline, and production `auth.nazo.run/health` returned 200 through IPv4 and IPv6.
+Shared Angie configuration was restored: the 13 original configuration hashes match their baseline, the two task-owned shared ingress configurations were retired, native validation succeeded, existing site responses remained within observed baseline, and the existing authentication service's `/health` endpoint returned 200 through IPv4 and IPv6.
 
 The two raw manifests were checked against 2396 original module log files and 50 PNGs, then signed with a task-owned Ed25519 key. The signed index covers 27 exported evidence files. The private key is excluded from the archive.
 

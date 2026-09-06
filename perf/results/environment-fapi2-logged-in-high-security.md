@@ -2,29 +2,29 @@
 
 | Field | Value |
 | --- | --- |
-| Source commit | fa2a0e770c3d6482a90f5b7c9d92891a440bcde6 |
-| Runner tag | cnb:arch:amd64 |
+| Source commit | 354dd98f223e38f7f5e8538876eeb881e9a1c5fa |
+| Runner architecture | x86_64 |
 | Requested runner CPUs | 64 |
 | Observed logical CPUs | 384 |
-| Process allowed CPUs | 161-224 |
+| Process allowed CPUs | 48-63,336-383 |
 | Observed CPU model | AMD EPYC 9K65 192-Core Processor |
 | Cgroup CPU max | unknown |
 | Memory total | unknown |
 | Cgroup memory max | unknown |
 | Workspace disk available | unknown |
-| Kernel | Linux 1df2b1a603cb 5.4.241-1-tlinux4-0023.7 #1 SMP Fri May 8 22:13:53 CST 2026 x86_64 GNU/Linux |
+| Kernel | Linux 5.4.241-1-tlinux4-0023.7 #1 SMP Fri May 8 22:13:53 CST 2026 x86_64 GNU/Linux |
 | Docker server | 27.5.1 |
 | Docker compose | 2.33.0 |
-| Compose project | nazoauth-extended-capacity-extended-same-user-introspect-opaque |
-| Compose files | docker-compose.perf.yml + perf/results/docker-compose.cpuset-extended-same-user-introspect-opaque-refresh-token.yml |
-| CPU set | 209-214 |
-| CPU set size | 6 |
+| Compose project | nazoauth-local-fapi2-logged-in-high-security |
+| Compose files | docker-compose.perf.yml + perf/results/docker-compose.cpuset-fapi2-logged-in-high-security.yml |
+| CPU set | 368-379 |
+| CPU set size | 12 |
 | Services pinned to CPU set | postgres, valkey, keyset, migrate, nazoauth, perf |
 | Per-container CPU model | Docker cpuset isolation; no CPU quota. Each service container may run on the listed CPU set. NazoAuth is additionally scaled by the stage instance count. |
-| Capacity scenarios | same_user_introspect_opaque_refresh_token |
+| Capacity scenarios | fapi2_logged_in_high_security |
 | Duration per point | 30m |
 | App instance stages | 1,2,4 NazoAuth replica(s) |
-| Explicit rates | 8,16,32,64,128 |
+| Explicit rates | 16,32,64,128,256 |
 | Load executor | k6 constant-arrival-rate, time unit 1s |
 | Token-only target rates | 1000, 2500, 5000, 7500, 10000 flow/s |
 | OIDC cold/login and logged-in target rates | 16, 32, 64, 128, 256 flow/s |

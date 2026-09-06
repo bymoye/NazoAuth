@@ -492,7 +492,7 @@ def completed_stage_rows(key: str, records: list[dict]) -> list[dict]:
 
 
 def matrix_runtime_status() -> dict:
-    processes = run(['sh', '-lc', "ps -eo pid,ppid,stat,pcpu,pmem,etime,cmd --sort=pid | grep -E 'dev_capacity_matrix|extended_capacity_matrix|cnb_capacity|capacity.py' | grep -v grep || true"], 3)
+    processes = run(['sh', '-lc', "ps -eo pid,ppid,stat,pcpu,pmem,etime,cmd --sort=pid | grep -E 'dev_capacity_matrix|extended_capacity_matrix|run_capacity|capacity.py' | grep -v grep || true"], 3)
     tail = read_tail(MATRIX_LOG, 120)
     final_line = ''
     for line in tail.splitlines():

@@ -3,7 +3,7 @@
 | Field | Value |
 | --- | --- |
 | Source commit | 354dd98f223e38f7f5e8538876eeb881e9a1c5fa |
-| Runner tag | cnb:arch:amd64 |
+| Runner architecture | x86_64 |
 | Requested runner CPUs | 64 |
 | Observed logical CPUs | 384 |
 | Process allowed CPUs | 48-63,336-383 |
@@ -12,19 +12,19 @@
 | Memory total | unknown |
 | Cgroup memory max | unknown |
 | Workspace disk available | unknown |
-| Kernel | Linux 4c01331e6f85 5.4.241-1-tlinux4-0023.7 #1 SMP Fri May 8 22:13:53 CST 2026 x86_64 GNU/Linux |
+| Kernel | Linux 5.4.241-1-tlinux4-0023.7 #1 SMP Fri May 8 22:13:53 CST 2026 x86_64 GNU/Linux |
 | Docker server | 27.5.1 |
 | Docker compose | 2.33.0 |
-| Compose project | nazoauth-local-oidc-refresh-only |
-| Compose files | docker-compose.perf.yml + perf/results/docker-compose.cpuset-oidc-refresh-only.yml |
-| CPU set | 356-367 |
+| Compose project | nazoauth-local-oidc-logged-in |
+| Compose files | docker-compose.perf.yml + perf/results/docker-compose.cpuset-oidc-logged-in.yml |
+| CPU set | 344-355 |
 | CPU set size | 12 |
 | Services pinned to CPU set | postgres, valkey, keyset, migrate, nazoauth, perf |
 | Per-container CPU model | Docker cpuset isolation; no CPU quota. Each service container may run on the listed CPU set. NazoAuth is additionally scaled by the stage instance count. |
-| Capacity scenarios | oidc_refresh_only |
+| Capacity scenarios | oidc_logged_in_authorization_code |
 | Duration per point | 30m |
 | App instance stages | 1,2,4 NazoAuth replica(s) |
-| Explicit rates | 250,500,1000,1500,2000 |
+| Explicit rates | 16,32,64,128,256 |
 | Load executor | k6 constant-arrival-rate, time unit 1s |
 | Token-only target rates | 1000, 2500, 5000, 7500, 10000 flow/s |
 | OIDC cold/login and logged-in target rates | 16, 32, 64, 128, 256 flow/s |
