@@ -1,7 +1,7 @@
 use super::*;
 
 fn fixture_password(label: &str) -> String {
-    format!("password-policy-fixture-{label}")
+    format!("password-policy-fixture-{label}-{}", Uuid::now_v7())
 }
 
 #[test]
